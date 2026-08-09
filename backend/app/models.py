@@ -2,6 +2,12 @@
 from pydantic import BaseModel
 
 
+class DetectRequest(BaseModel):
+    """自动识别请求：只给路径与目标语言，类型/源语言/pack_format 全自动推断。"""
+    path: str
+    target_lang: str = "zh_cn"
+
+
 class ScanRequest(BaseModel):
     path: str
     mode: str = "modpack"          # "modpack" | "jar"

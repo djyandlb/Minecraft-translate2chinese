@@ -13,12 +13,14 @@ from fastapi.staticfiles import StaticFiles
 
 from app.archive import is_archive, extract_modpack
 from app.config import AppConfig
+from app.detect import build_detect_summary, detect_input_type, detect_source_lang, infer_pack_format
 from app.diff import build_jobs
 from app.glossary import load_glossary
 from app.hardcode import scan_hardcoded_strings
 from app.hardcode_flow import run_hardcode_translation
 from app.maps import flow as maps_flow, scan as maps_scan, world as maps_world
-from app.models import HardcodeRequest, MapScanRequest, MapTranslateRequest, ScanRequest, TranslateRequest
+from app.models import (DetectRequest, HardcodeRequest, MapScanRequest,
+                        MapTranslateRequest, ScanRequest, TranslateRequest)
 from app.scanner import scan_modpack, scan_jar
 from app.tasks import TaskStore
 from app.translator import run_translation
@@ -77,6 +79,30 @@ def set_key(payload: dict):
     import keyring
     keyring.set_password(AppConfig(CONFIG_PATH).get("api_key_ref", "mc-translator"), "api_key", api_key)
     return {"ok": True}
+
+
+@app.post("/api/detect")
+def detect(req: DetectRequest):
+    """自动识别输入类型 + 源语言 + pack_format。识别失败返回 kind=unknown 供前端提示。
+
+    压缩包先 _resolve 解压成目录再判断；map 不适用源语言/版本推断（返回 None）。
+    """
+    p = _resolve(req.path)
+    kind = detect_input_type(p)
+    if kind == "unknown":
+        return {"kind": "unknown"}
+    if kind == "map":
+        return {"kind": "map", "source_lang": None, "pack_format": None, "summary": None}
+    # 按类型聚 jar 列表：modpack → mods/**/*.jar；modjar → 该文件本身
+    jars = [p] if kind == "modjar" else (sorted((p / "mods").rglob("*.jar")) if (p / "mods").is_dir() else [])
+    source_lang = detect_source_lang(jars, req.target_lang)
+    pack_format = infer_pack_format(p)
+    return {
+        "kind": kind,
+        "source_lang": source_lang,
+        "pack_format": pack_format,
+        "summary": build_detect_summary(jars, source_lang),
+    }
 
 
 @app.post("/api/scan")
