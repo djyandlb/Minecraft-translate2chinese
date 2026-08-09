@@ -12,6 +12,7 @@ jawa 类名加载方式（已实测，Windows）：
     path_map 的 key 统一规范化为 POSIX 斜杠式，再以相对路径去 .class 后缀加载。
 """
 
+import asyncio
 import io
 import json
 import logging
@@ -87,6 +88,21 @@ def is_hardcode_translatable(text: str) -> bool:
     # 类路径（每段都是合法 Java 标识符）com.example.Mod
     if "." in t and all(_CLASS_PATH_PART_RE.fullmatch(s) for s in t.split(".")):
         return False
+    # ---- 粗过滤（voxy 实测：655 条硬编码候选绝大多数是技术串，砍到几十条真实候选）----
+    # 数据串/代码特征：分号/竖线分隔数据、花括号模板、shader 指令（#version）、
+    # 代码下标/函数调用（printfOutputStruct.stream[..] / uint( / vec2(）→ 排除
+    if any(ch in t for ch in ";|{}#[]()"):
+        return False
+    if "printf" in t:
+        return False
+    # 资源/文件路径（无空格的多为路径拼接，textures/atlas/blocks.png 等）→ 排除
+    if "/" in t or "\\" in t:
+        return False
+    # 纯小写单词（≤16 字符、无空格）：voxy/id/path/minecraft/bobby 等标识符 → 排除。
+    # 含空格的真实 UI 句子（Could not parse config）与 %s/%d 占位符不受影响，
+    # 前者留 ai_judge 判断是否日志。
+    if re.match(r"^[a-z]{2,16}$", t):
+        return False
     return True
 
 
@@ -148,8 +164,12 @@ def _repack(work: Path, jar: Path) -> None:
             zf.write(p, rel)
 
 
-def _trim_context(raw: set[str], max_items: int = 30, max_chars: int = 80) -> list[str]:
-    """context 去重截断：保持出现顺序，最多 max_items 条，每条最多 max_chars 字符。"""
+def _trim_context(raw: set[str], max_items: int = 10, max_chars: int = 60) -> list[str]:
+    """context 去重截断：保持出现顺序，最多 max_items 条，每条最多 max_chars 字符。
+
+    默认 10 条/60 字符（曾为 30/80）：ai_judge 逐条判断时 prompt 更小，配合
+    分页并发，显著降低 655 条候选时的 LLM 卡慢（voxy 实测）。
+    """
     seen: set[str] = set()
     out: list[str] = []
     for s in raw:
@@ -300,6 +320,11 @@ def replace_hardcoded_strings(jar: Path, mapping: dict[str, str]) -> dict:
 # 每批发送给 LLM 判断的候选上限
 _AI_JUDGE_PAGE = 25
 
+# ai_judge 并发限流：与 LLMClient.translate_batch 的默认并发（concurrency=5）对齐。
+# 分页串行在候选多（voxy 实测 655 条）时逐批等待，是卡慢主因之一；
+# 并发 5 页在保持供应商请求速率可控的前提下把多批请求并行发出。
+_AI_JUDGE_CONCURRENCY = 5
+
 def _ai_judge_system_prompt(target_lang: str) -> str:
     """system 提示词：判断「是否用户可见文本」并翻译成 target_lang 对应语言。
 
@@ -396,6 +421,64 @@ async def _ai_judge_single(engine, client, cand: dict, target_lang: str) -> dict
     return _ai_judge_item_result(items, cand)
 
 
+async def _ai_judge_batch(engine, client, batch: list[dict], target_lang: str) -> dict[str, str]:
+    """对一批候选发一次 LLM 请求并解析，返回该批 translatable=true 的 {text: translation}。
+
+    提取自原 ai_judge_translate 的循环体，供并发调度复用（每批一个任务）。
+    容错语义与原实现一致：请求失败/空内容 → 整批跳过；非法 JSON/空数组 →
+    逐条降级 _ai_judge_single，不整批丢（P0 根因 3）。
+    """
+    result: dict[str, str] = {}
+    payload = [
+        {"text": c["text"], "context": c.get("context") or []}
+        for c in batch
+    ]
+    body = {
+        "model": engine.model,
+        "messages": [
+            {"role": "system", "content": _ai_judge_system_prompt(target_lang)},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ],
+        "temperature": 0.2,
+    }
+    try:
+        resp = await client.post(f"{engine.base_url}/chat/completions", json=body)
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        if engine.on_usage:
+            u = data.get("usage") or {}
+            engine.on_usage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+        if not content:
+            # content 为 null（部分供应商流式/拒绝场景）：按整批跳过，
+            # 若交给 _parse 会在 content.strip() 抛 AttributeError（B 审查 🟡1）
+            logger.warning("ai_judge 返回空内容，跳过 %d 条", len(batch))
+            return result
+    except Exception as exc:
+        # 请求失败（网络/API/HTTP 错误）→ 整批跳过，不中断其他批次
+        logger.warning("ai_judge 批次请求失败，跳过 %d 条：%s", len(batch), exc)
+        return result
+    items = _parse_ai_judge_response(content)
+    if not items:
+        # 非法 JSON / 空数组 → 不整批丢，对该批候选逐条降级（P0 根因 3）
+        logger.warning("ai_judge 输出非法 JSON/空数组，%d 条逐条降级", len(batch))
+        for cand in batch:
+            single = await _ai_judge_single(engine, client, cand, target_lang)
+            if single is None:
+                logger.warning("ai_judge 单条降级失败：%s", cand["text"])
+                continue
+            result.update(single)
+        return result
+    for item in items:
+        text = item.get("text")
+        if not text:
+            continue
+        # 仅接受显式 translatable=true 且带非空 translation 的条目
+        if item.get("translatable") and item.get("translation"):
+            result[text] = item["translation"]
+    return result
+
+
 async def ai_judge_translate(engine, candidates: list[dict], target_lang: str) -> dict[str, str]:
     """LLM 判断硬编码候选是否用户可见并翻译。
 
@@ -404,58 +487,25 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str) -
     只返回 translatable=true 的 {text: translation}。
     解析容错：非法 JSON / 缺失字段 → 该批跳过，logger.warning 记录。
     复用 engine（LLMClient）的 base_url/model 与 httpx 客户端发 /chat/completions。
+
+    提速：分页串行改为 asyncio.gather + Semaphore(_AI_JUDGE_CONCURRENCY) 并发处理各页，
+    与 LLMClient.translate_batch 的并发模式对齐（voxy 实测 655 条候选时分页串行卡慢）。
     """
     if not candidates:
         return {}
     client = engine._get_client()  # LLMClient 内部复用的 httpx.AsyncClient
-    result: dict[str, str] = {}
-    for start in range(0, len(candidates), _AI_JUDGE_PAGE):
-        batch = candidates[start:start + _AI_JUDGE_PAGE]
-        payload = [
-            {"text": c["text"], "context": c.get("context") or []}
-            for c in batch
-        ]
-        body = {
-            "model": engine.model,
-            "messages": [
-                {"role": "system", "content": _ai_judge_system_prompt(target_lang)},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            "temperature": 0.2,
-        }
-        try:
-            resp = await client.post(f"{engine.base_url}/chat/completions", json=body)
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            if engine.on_usage:
-                u = data.get("usage") or {}
-                engine.on_usage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
-            if not content:
-                # content 为 null（部分供应商流式/拒绝场景）：按整批跳过，
-                # 若交给 _parse 会在 content.strip() 抛 AttributeError（B 审查 🟡1）
-                logger.warning("ai_judge 返回空内容，跳过 %d 条", len(batch))
-                continue
-        except Exception as exc:
-            # 请求失败（网络/API/HTTP 错误）→ 整批跳过，不中断其他批次
-            logger.warning("ai_judge 批次请求失败，跳过 %d 条：%s", len(batch), exc)
-            continue
-        items = _parse_ai_judge_response(content)
-        if not items:
-            # 非法 JSON / 空数组 → 不整批丢，对该批候选逐条降级（P0 根因 3）
-            logger.warning("ai_judge 输出非法 JSON/空数组，%d 条逐条降级", len(batch))
-            for cand in batch:
-                single = await _ai_judge_single(engine, client, cand, target_lang)
-                if single is None:
-                    logger.warning("ai_judge 单条降级失败：%s", cand["text"])
-                    continue
-                result.update(single)
-            continue
-        for item in items:
-            text = item.get("text")
-            if not text:
-                continue
-            # 仅接受显式 translatable=true 且带非空 translation 的条目
-            if item.get("translatable") and item.get("translation"):
-                result[text] = item["translation"]
-    return result
+    batches = [
+        candidates[k:k + _AI_JUDGE_PAGE]
+        for k in range(0, len(candidates), _AI_JUDGE_PAGE)
+    ]
+    sem = asyncio.Semaphore(_AI_JUDGE_CONCURRENCY)
+
+    async def run_batch(batch: list[dict]) -> dict[str, str]:
+        async with sem:
+            return await _ai_judge_batch(engine, client, batch, target_lang)
+
+    results = await asyncio.gather(*(run_batch(b) for b in batches))
+    merged: dict[str, str] = {}
+    for r in results:
+        merged.update(r)
+    return merged

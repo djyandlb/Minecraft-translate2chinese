@@ -60,10 +60,29 @@ def test_is_hardcode_translatable():
     assert not is_hardcode_translatable("mymod:item")       # modid 前缀
     assert not is_hardcode_translatable("com.example.Mod")  # 类路径/包名
     assert not is_hardcode_translatable("12345")            # 纯数字
-    # 业界过滤（参考 MIT 工具）：单词保留为候选，由用户选择环节把关，不在此一刀切
-    assert is_hardcode_translatable("stone")                # 单次词是候选（用户决定翻不翻）
-    assert is_hardcode_translatable("parent")
-    assert is_hardcode_translatable("model")
+    # 粗过滤（voxy 实测：655 条硬编码候选绝大多数是技术串）：
+    # 纯小写单词（≤16 字符、无空格）→ 技术标识符，排除
+    assert not is_hardcode_translatable("stone")
+    assert not is_hardcode_translatable("parent")
+    assert not is_hardcode_translatable("model")
+    assert not is_hardcode_translatable("voxy")
+    assert not is_hardcode_translatable("id")
+    assert not is_hardcode_translatable("path")
+    assert not is_hardcode_translatable("minecraft")
+    assert not is_hardcode_translatable("bobby")
+    # 数据串/代码特征 → 排除
+    assert not is_hardcode_translatable("position;aabb;x")             # 分号分隔数据串
+    assert not is_hardcode_translatable("a|b")                         # 竖线分隔
+    assert not is_hardcode_translatable("#version")                    # shader 指令
+    assert not is_hardcode_translatable("printf")                      # 代码字面量
+    assert not is_hardcode_translatable("textures/atlas/blocks.png")   # 资源路径
+    assert not is_hardcode_translatable("{base_save_path}")            # 模板占位
+    assert not is_hardcode_translatable("uint(")                       # 代码函数调用
+    # 占位符保留：%s/%d 等
+    assert is_hardcode_translatable("Size exceeds limits: %s")
+    assert is_hardcode_translatable("Hello %s")
+    # 含空格句子保留（Could not parse config 等留 ai_judge 判断是否日志）
+    assert is_hardcode_translatable("Could not parse config")
     # 纯技术串仍排除
     assert not is_hardcode_translatable("(Ljava/lang/String;)V")   # 方法签名
     assert not is_hardcode_translatable("HELLO_WORLD")             # 常量名
@@ -378,14 +397,27 @@ async def test_ai_judge_translate_missing_field_skips():
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_translate_paging():
-    """分页：候选超过 25 条时分多批请求，每批 ≤25 条。"""
-    seen_sizes = []
+async def test_ai_judge_translate_paging_concurrent():
+    """分页并发：候选超过 25 条时分多批并发请求，每批 ≤25 条。
 
-    def handler(request):
+    Semaphore 限流并发 + asyncio.gather（对齐 LLMClient.translate_batch 的并发模式）。
+    async handler 让出事件循环以放大并发窗口，断言同一时刻有多个请求 in-flight。
+    """
+    import asyncio
+
+    seen_sizes = []
+    active = 0
+    max_active = 0
+
+    async def handler(request):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)   # 让出事件循环：放大并发窗口
         payload = json.loads(request.content)
         batch = json.loads(payload["messages"][-1]["content"])
         seen_sizes.append(len(batch))
+        active -= 1
         return Response(200, json={"choices": [{"message": {"content": json.dumps([
             {"text": item["text"], "translatable": True, "translation": "译"}
             for item in batch
@@ -395,7 +427,8 @@ async def test_ai_judge_translate_paging():
     candidates = [{"text": f"t{i}", "context": []} for i in range(60)]
     mapping = await ai_judge_translate(engine, candidates, "zh_cn")
     assert len(mapping) == 60
-    assert seen_sizes == [25, 25, 10]   # 60 → 25 + 25 + 10
+    assert sorted(seen_sizes) == [10, 25, 25]   # 60 → 25 + 25 + 10（并发下顺序不定）
+    assert max_active >= 2                      # 至少两个批次同时 in-flight
     await engine._client.aclose()
 
 
