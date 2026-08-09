@@ -16,6 +16,9 @@
 #     config/*.json、dictionary/*.txt、legacy_blocks.json），PyInstaller 默认不收非 .py，
 #     必须用 collect_data_files 显式收，否则 frozen 下 FileNotFoundError 崩启动。
 #   - jawa 按需 import_module 动态加载 attributes 子模块，用 collect_submodules 兜底。
+#   - collect_submodules("app.maps"/"app.translate") 需要 app 可被 import，故先手动把
+#     backend 塞进 sys.path（pathex 只在 Analysis 内部生效，collect_submodules 在其前执行）。
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -23,6 +26,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 ROOT = Path(SPECPATH).parent                  # 项目根（SPECPATH = scripts/，其父目录即项目根）
 BACKEND = ROOT / "backend"                   # Python 包根（app/ 在其下）
 APP = BACKEND / "app"
+sys.path.insert(0, str(BACKEND))             # 让 collect_submodules 能定位 app 子包
 
 a = Analysis(
     [str(APP / "desktop.py")],               # 打包入口：pywebview 壳 + 子线程 uvicorn
@@ -37,9 +41,14 @@ a = Analysis(
     hiddenimports=[
         # 对象导入双保险：入口显式收集 app 包与地图扫描
         "app.main", "app.maps.scan",
+        # M6 综合改造新增：文本源全覆盖扫描 / 任务中间产物清理 / 硬编码汉化核心（ai_judge 依赖）
+        "app.text_sources", "app.cleanup", "app.hardcode",
         # 重构新增：detect/auto_flow/hardcode_flow/langfile/translate 子包（顶层链已静态分析，双保险）
         "app.detect", "app.auto_flow", "app.hardcode_flow", "app.langfile",
-        "app.translate", "app.translate.engine", "app.translate.machine", "app.translate.llm",
+        # maps/translate 子包全量收集（copy/export/flow/world/write、common/han/providers 等延迟 import）
+        "app.maps", "app.translate",
+        *collect_submodules("app.maps"),
+        *collect_submodules("app.translate"),
         # uvicorn 运行链（有 hook-uvicorn，补全保险）
         "uvicorn.logging", "uvicorn.loops", "uvicorn.protocols", "uvicorn.lifespan",
         "uvicorn.loops.auto", "uvicorn.protocols.http.auto", "uvicorn.protocols.websockets.auto",
