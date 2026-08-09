@@ -1,4 +1,5 @@
 import json
+import re
 import zipfile
 from pathlib import Path
 from app.version import pack_format_to_lang_ext
@@ -13,7 +14,8 @@ def build_resource_pack(translations: dict[str, dict[str, str]], target_lang: st
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("pack.mcmeta", json.dumps(pack_mcmeta(pack_format), ensure_ascii=False, indent=2))
         for modid, entries in translations.items():
-            if not entries:
+            # modid 属于不可信外部输入：仅放行合法字符集，拦截 "/"、"\.." 等路径穿越手段
+            if not entries or not re.fullmatch(r"[a-z0-9_.-]+", modid):
                 continue
             zf.writestr(f"assets/{modid}/lang/{target_lang}.{ext}",
                         json.dumps(entries, ensure_ascii=False, indent=2))
