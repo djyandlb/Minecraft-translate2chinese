@@ -22,6 +22,27 @@ def parse_lang(text: str) -> dict[str, str]:
         result[k.strip()] = v.strip()
     return result
 
+
+def parse_properties(text: str) -> dict[str, str]:
+    """解析 Java .properties：每行 key=value（或 key: value），#/! 开头注释与空行跳过。
+
+    Java Properties 格式允许 = 或 : 作键值分隔符，行首 # 与 ! 均视为注释。
+    不做转义/续行处理——语言文件实际使用中极罕见，社区同类工具一致，可接受。
+    """
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", "!")):
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+        elif ":" in line:
+            k, v = line.split(":", 1)
+        else:
+            continue
+        result[k.strip()] = v.strip()
+    return result
+
 def load_lang_file(path: Path) -> tuple[dict[str, str], str]:
     """读语言文件，返回 (entries, 格式)，格式为 "json" 或 "lang"。"""
     text = path.read_text(encoding="utf-8")
@@ -33,4 +54,8 @@ def write_json_lang(data: dict[str, str]) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 def write_lang(data: dict[str, str]) -> str:
+    return "\n".join(f"{k}={v}" for k, v in data.items()) + "\n"
+
+def write_properties(data: dict[str, str]) -> str:
+    """把条目序列化为 .properties 文本（key=value 每行，末尾换行）。"""
     return "\n".join(f"{k}={v}" for k, v in data.items()) + "\n"

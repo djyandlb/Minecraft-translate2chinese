@@ -5,7 +5,7 @@ import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from app.jar import lang_files_from_namelist
-from app.langfile import parse_lang, parse_json_lang
+from app.langfile import parse_lang, parse_json_lang, parse_properties
 
 
 @dataclass
@@ -18,10 +18,12 @@ class ModScan:
 
 
 def _read_entries(zf: zipfile.ZipFile, path: str, fmt: str) -> dict[str, str]:
-    """从 zip 内读语言文件：json 经 parse_json_lang 去注释，lang 按 key=value。"""
+    """从 zip 内读语言文件：json 去注释、lang/properties 按 key=value。"""
     raw = zf.read(path).decode("utf-8")
     if fmt == "lang":
         return parse_lang(raw)
+    if fmt == "properties":
+        return parse_properties(raw)
     return parse_json_lang(raw)
 
 
