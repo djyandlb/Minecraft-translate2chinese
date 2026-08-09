@@ -1,6 +1,6 @@
 <script setup>
 import { nextTick, onMounted, ref, watch } from 'vue'
-import { getConfig, saveConfig } from '../api'
+import { getConfig, saveConfig, saveKey } from '../api'
 
 // props：onDone(配置对象) / onNext() 由 App 注入，走完一步 → next()
 const props = defineProps({ onDone: Function, onNext: Function })
@@ -74,7 +74,8 @@ async function saveAndNext() {
   saving.value = true
   error.value = ''
   try {
-    // api_key 只存浏览器本地，绝不随 config 发送给后端
+    // api_key 写进后端 keyring（AI 引擎真正读取的地方），localStorage 仅作 UI 回显
+    if (apiKey.value) await saveKey(apiKey.value)
     localStorage.setItem(API_KEY_STORE, apiKey.value)
     const body = {
       engine: engine.value,
@@ -127,7 +128,7 @@ async function saveAndNext() {
       <div class="field">
         <label>API Key</label>
         <input type="password" v-model="apiKey" placeholder="sk-..." autocomplete="off" />
-        <small class="sub">仅保存在本机浏览器（localStorage），不会发送给后端</small>
+        <small class="sub">经后端写入本机系统凭据库（keyring），不落配置文件</small>
       </div>
     </template>
 

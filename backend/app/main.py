@@ -28,9 +28,12 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 def _resolve(path_str: str) -> Path:
     """整合包输入：目录或压缩包。扫描用压缩包解压到 work/extracted/scan，独立于任务解压目录（F4）。"""
+    import shutil
     p = Path(path_str)
     if is_archive(p):
-        p = extract_modpack(p, WORK_DIR / "extracted" / "scan")
+        dest = WORK_DIR / "extracted" / "scan"
+        shutil.rmtree(dest, ignore_errors=True)   # M3：解压前清残留，防旧文件混入
+        p = extract_modpack(p, dest)
     return p
 
 
@@ -48,6 +51,17 @@ def post_config(payload: dict):
         cfg.set(k, v)
     cfg.save()
     return cfg.data
+
+
+@app.post("/api/key")
+def set_key(payload: dict):
+    """R1：API Key 写入系统 keyring，与 create_engine 读 keyring 打通链路。绝不落盘。"""
+    api_key = str(payload.get("api_key", "")).strip()
+    if not api_key:
+        raise HTTPException(400, "api_key 不能为空")
+    import keyring
+    keyring.set_password(AppConfig(CONFIG_PATH).get("api_key_ref", "mc-translator"), "api_key", api_key)
+    return {"ok": True}
 
 
 @app.post("/api/scan")
@@ -95,6 +109,7 @@ def cancel_task(task_id: str):
     if state is None:
         raise HTTPException(404, "任务不存在")
     state.cancelled = True
+    state.paused = False   # Y4：取消立即解除暂停，避免暂停中取消无效
     STORE.save(state)
     return {"ok": True}
 
@@ -124,7 +139,11 @@ def browse(path: str = ""):
     p = Path(path) if path else Path.home()
     if not p.exists() or not p.is_dir():
         return {"parent": str(p.parent), "dirs": []}
-    dirs = sorted([d.name for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")])
+    try:
+        dirs = sorted([d.name for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")])
+    except (PermissionError, OSError):
+        # M3：无权限/读取失败目录返回空列表，不 500
+        dirs = []
     return {"parent": str(p.parent) if p.parent != p else "", "dirs": dirs}
 
 

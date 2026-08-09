@@ -39,7 +39,8 @@ function onTranslate(id) { taskId.value = id; next() }
     <main class="main">
       <SetupView v-show="current === 0" :on-done="onConfigSaved" :on-next="next" />
       <ScanView v-show="current === 1" :source-lang="config.source_lang"
-                :target-lang="config.target_lang" :on-translate="onTranslate" :on-back="back" />
+                :target-lang="config.target_lang" :mc-version="config.mc_version"
+                :on-translate="onTranslate" :on-back="back" />
       <ProgressView v-show="current === 2" :task-id="taskId" :on-back="back" />
     </main>
   </div>

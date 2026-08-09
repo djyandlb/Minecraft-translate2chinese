@@ -2,10 +2,11 @@
 import { ref } from 'vue'
 import { browse, scan, translate } from '../api'
 
-// props：sourceLang/targetLang（来自配置步）、onTranslate(taskId)、onBack()
+// props：sourceLang/targetLang/mcVersion（来自配置步）、onTranslate(taskId)、onBack()
 const props = defineProps({
   sourceLang: { type: String, default: 'en_us' },
   targetLang: { type: String, default: 'zh_cn' },
+  mcVersion: { type: String, default: '1.20.1' },
   onTranslate: Function,
   onBack: Function,
 })
@@ -84,8 +85,10 @@ async function startTranslate() {
     const r = await translate({
       path: path.value,
       mode: mode.value,
+      scope: scope.value,
       source_lang: props.sourceLang,
       target_lang: props.targetLang,
+      mc_version: props.mcVersion,
     })
     props.onTranslate?.(r.task_id)
   } catch (e) {

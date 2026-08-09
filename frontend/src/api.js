@@ -26,6 +26,9 @@ async function req(path, options = {}) {
 export const getConfig = () => req('/config')
 export const saveConfig = (cfg) => req('/config', { method: 'POST', body: JSON.stringify(cfg) })
 
+// API Key：写入后端 keyring（前端 localStorage 仅作 UI 回显，真正生效靠后端 keyring）
+export const saveKey = (apiKey) => req('/key', { method: 'POST', body: JSON.stringify({ api_key: apiKey }) })
+
 // 扫描：返回 { mods:[{modid,entries,gaps}], total_gaps }
 export const scan = (body) => req('/scan', { method: 'POST', body: JSON.stringify(body) })
 

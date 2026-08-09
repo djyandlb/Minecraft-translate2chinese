@@ -40,6 +40,7 @@ async function refresh() {
   }
 }
 function startPolling() {
+  if (!props.taskId) return            // M3：防空转，无任务 ID 不启动轮询
   stopPolling()                        // 幂等：若已有 timer 先清再设
   timer = setInterval(refresh, 1000)   // running/paused 时每秒轮询
 }
@@ -104,6 +105,9 @@ onUnmounted(stopPolling)
         <span class="progress-num">{{ percent }}%（{{ task.done }}/{{ task.total }}）</span>
       </div>
 
+      <div v-if="task.failed > 0" class="warn-box">
+        有 {{ task.failed }} 条翻译失败，可能因 API Key 无效或网络问题
+      </div>
       <div v-if="failInfo" class="fail-box">失败原因：{{ failInfo }}</div>
       <p v-if="error" class="err">{{ error }}</p>
 
@@ -155,6 +159,12 @@ onUnmounted(stopPolling)
 
 .fail-box {
   border: 1px solid var(--danger); color: var(--danger);
+  border-radius: 6px; padding: 10px; margin-bottom: 10px;
+}
+
+.warn-box {
+  border: 1px solid var(--warn); color: var(--warn);
+  background: rgba(232, 163, 61, .08);
   border-radius: 6px; padding: 10px; margin-bottom: 10px;
 }
 

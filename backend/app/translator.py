@@ -31,7 +31,7 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
             path = extract_modpack(path, work_dir / "extracted" / task_id)
         scans = (scan_jar(path, req.source_lang, req.target_lang)
                  if req.mode == "jar"
-                 else scan_modpack(path, req.source_lang, req.target_lang))
+                 else scan_modpack(path, req.source_lang, req.target_lang, req.scope))
         jobs = build_jobs(scans)
         state.total = len(jobs)
         store.save(state)
@@ -46,9 +46,15 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
             engine.on_usage = on_usage
         if isinstance(engine, LLMClient) and glossary_prompt:
             engine.glossary_prompt = glossary_prompt
+        if isinstance(engine, LLMClient) and not engine.api_key:
+            # R1：keyring 空 key → 引擎主路径假成功，提前告警
+            state.progress.append({"status": "warn", "error": "未配置 API Key，AI 翻译将失败，请在配置页填写"})
 
         same_script = is_same_script(req.source_lang, req.target_lang)
-        pack_format = req.pack_format or version_to_pack_format("1.20.1")
+        # Y2：pack_format 优先级 显式 > mc_version > 默认 1.20.1
+        pack_format = (req.pack_format or
+                       (version_to_pack_format(req.mc_version) if req.mc_version
+                        else version_to_pack_format("1.20.1")))
         by_mod: dict[str, dict[str, str]] = {}
 
         for job in jobs:
@@ -56,9 +62,11 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
                 state.status = "cancelled"
                 store.save(state)
                 return
-            while state.paused:
+            while state.paused and not state.cancelled:
+                # Y4：暂停等待也必须响应取消，否则取消被暂停卡死
                 await asyncio.sleep(0.5)
             cached = memory.get(job.source_text, req.target_lang)
+            from_engine = False
             if cached:
                 translated = cached
             elif same_script:
@@ -66,6 +74,10 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
                 translated = traditional(job.source_text) if req.target_lang == "zh_tw" else simplify(job.source_text)
             else:
                 translated = (await engine.translate_batch([job.source_text], req.target_lang))[0]
+                from_engine = True
+            if from_engine and translated == job.source_text:
+                # Y3：引擎失败回原文 → 计入 failed，前端醒目提示
+                state.failed += 1
             memory.set(job.source_text, req.target_lang, translated)
             by_mod.setdefault(job.modid, {})[job.key] = translated
             state.done += 1
