@@ -169,25 +169,16 @@ class _JsApi:
         return {"ok": True, "path": str(dest_path)}
 
 
-def _app_icon() -> str | None:
-    """定位应用图标 app-icon.ico（frozen → _MEIPASS/assets；否则项目根 assets/）。"""
-    if getattr(sys, "frozen", False):
-        base = Path(getattr(sys, "_MEIPASS", "."))
-    else:
-        base = Path(__file__).resolve().parent.parent.parent
-    p = base / "assets" / "app-icon.ico"
-    return str(p) if p.exists() else None
-
-
 def main() -> None:
     """启动后台 API 服务 + 桌面窗口。"""
     logger.info("桌面壳启动，端口 %s", (port := _free_port()))
     threading.Thread(target=_run_server, args=(port,), daemon=True).start()
     import webview  # 延迟导入：未装 pywebview 时不影响其余代码
-    # js_api 暴露 select_path 给前端，桌面版直接拿本地路径（不走上传）
+    # 注意：pywebview 6 的 create_window 不支持 icon 参数（窗口图标靠 exe 图标自动显示，PyInstaller spec 已设）
+    # js_api 暴露 select_path/save_output 给前端，桌面版直接拿本地路径/弹保存框
     window = webview.create_window("MC 自动翻译器", html=PLACEHOLDER_HTML,
                                    width=1150, height=780, min_size=(900, 640),
-                                   js_api=_JsApi(), icon=_app_icon())
+                                   js_api=_JsApi())
     # 响应式关闭：监听窗口 closed 事件（用户点叉），记录日志并让后端跟随退出。
     # 注意：进程退出真正由下方 webview.start() 返回后 os._exit 执行；
     # 事件只用于「区分正常关闭 vs 异常/WebView2 崩溃」的诊断（用户反馈窗口会自动关闭）。
