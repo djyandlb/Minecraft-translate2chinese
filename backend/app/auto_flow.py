@@ -30,6 +30,7 @@ from app.hardcode import (ai_judge_translate, replace_hardcoded_strings,
 from app.maps.flow import run_map_translation
 from app.memory import MemoryStore
 from app.models import AutoRequest, MapTranslateRequest
+from app.modname import friendly_output_name
 from app.resourcepack import build_resource_pack
 from app.scanner import scan_jar, scan_modpack
 from app.tasks import TaskStore
@@ -458,9 +459,10 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
         hard_count = 0
         if kind == "modjar":
             # modjar → 单一汉化 jar：语言文件 + json/lines + 硬编码全写回一个 jar 副本。
-            # 命名 {原jar stem}-{语言}化.jar（zh_cn→简体中文化、zh_tw→繁体中文化）。
+            # 命名 {中文名}-{语言}化.jar（中文名取 resolve_mod_name，取不到回退原 stem；
+            # 后缀「{语言}化」支持任意目标语言）。
             for jar in jars:
-                jar_copy = out_dir / f"{jar.stem}-{lang_display_name(req.target_lang)}化.jar"
+                jar_copy = out_dir / friendly_output_name(jar, req.target_lang)
                 # 原 jar 只读铁律：先 copy2 副本再改
                 shutil.copy2(jar, jar_copy)
                 # 语言文件写回：解压副本 → 写 assets/<modid>/lang/<target>.<ext>（合并已有 zh）→ 重打包
@@ -527,14 +529,15 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                 mapping = hard_mappings.get(jar) if do_hardcode else None
                 if not json_updates and not mapping:
                     continue
-                # 原 jar 只读铁律：先 copy2 到 out_dir/hardcoded/<name> 副本再改
-                name = f"{task_id}_{jar.stem}.jar"
+                # 原 jar 只读铁律：先 copy2 到 out_dir/hardcoded/<name> 副本再改；
+                # 命名同 modjar：{中文名}-{语言}化.jar（取不到中文名回退原 stem）
+                name = friendly_output_name(jar, req.target_lang)
                 if name in hard_used:
                     # 同名 jar（不同子目录）防覆盖：独立 seq 递增 + while 循环，
-                    # 彻底避免序号名与既有名（如 stem=2_mod 的 jar）相撞（A5-review）
+                    # 彻底避免序号名与既有名相撞（A5-review）
                     while name in hard_used:
                         seq += 1
-                        name = f"{task_id}_{seq}_{jar.stem}.jar"
+                        name = f"{Path(name).stem}_{seq}.jar"
                 hard_used.add(name)
                 jar_copy = hard_dir / name
                 jar_copy.parent.mkdir(parents=True, exist_ok=True)
