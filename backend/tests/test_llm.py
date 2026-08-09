@@ -242,6 +242,8 @@ async def test_batch_system_prompt_strict_rules():
     assert "不得添加任何解释" in s
     assert "占位符" in s
     assert r"\n" in s          # 多行原文用字面 \n 表示，不真的换行拆条
+    # P0-3 中英混排约束：译文须像原生中文，禁止把英文硬插进中文短语
+    assert "避免中英混杂" in s and "硬插" in s and "原生中文" in s
     await client._client.aclose()
 
 
@@ -266,4 +268,6 @@ async def test_single_system_prompt_strict_rules():
     assert "把 Minecraft" in s
     assert "占位符" in s and r"\n" in s
     assert "只输出译文" in s
+    # P0-3 中英混排约束（单条兜底 prompt 同样有）
+    assert "避免中英混杂" in s and "硬插" in s
     await client._client.aclose()

@@ -377,7 +377,7 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                     return
                 await _wait_if_paused()
                 try:
-                    mapping = await ai_judge_translate(engine, cands, req.target_lang)
+                    judged = await ai_judge_translate(engine, cands, req.target_lang)
                 except Exception as exc:
                     # 失败 → 仅计 failed 并跳过本批（不再累加 done，
                     # 避免异常路径 done+failed 双计超 total，B 审查 🟡4）
@@ -385,21 +385,35 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                     state.progress.append({"status": "warn",
                                            "error": f"{jar.name} AI 判断硬编码失败：{exc}"})
                     continue
+                # P0-2：兼容旧式 mock（dict）与三分类 AiJudgeResult
+                if isinstance(judged, dict):
+                    mapping = judged
+                    unresolved: list[str] = []
+                else:
+                    mapping = judged.translations
+                    unresolved = judged.unresolved
                 if mapping:
                     hard_mappings[jar] = mapping
                     # B 审查 🔵5：AI 判断译文写回记忆，后续语言文件/其他 jar 同串直接命中
                     for text, trans in mapping.items():
                         memory.set(text, req.target_lang, trans)
-                skipped = len(cands) - len(mapping)
+                # P0-2：exclude（LLM 明确判定非用户可见）与 unresolved（未判定）分开报告
+                skipped = max(0, len(cands) - len(mapping) - len(unresolved))
                 if skipped > 0:
                     state.progress.append({"status": "warn",
                                            "error": (f"{jar.name}: AI 判定 {skipped} 条硬编码"
                                                      f"非用户可见文本，已跳过")})
+                if unresolved:
+                    preview = "、".join(unresolved[:5]) + ("…" if len(unresolved) > 5 else "")
+                    state.progress.append({"status": "warn",
+                                           "error": (f"{jar.name}: {len(unresolved)} 条硬编码未判定"
+                                                     f"（LLM 未返回/降级失败），未翻译：{preview}")})
                 # AI 判断已批量处理这批候选，进度按候选数推进
                 state.done += len(cands)
                 # B 审查 🔵6：LLM 分支补一条汇总 progress（judged/visible 便于前端展示）
                 state.progress.append({"jar": jar.name, "judged": len(cands),
-                                       "visible": len(mapping), "status": "done"})
+                                       "visible": len(mapping), "unresolved": len(unresolved),
+                                       "status": "done"})
                 if state.done % 10 == 0:
                     memory.save()
                     store.save(state)

@@ -33,6 +33,58 @@ public class HelloMod {
 '''
 
 
+# 字节码级 Logger 剔除（P0-1 首选方案）：用「以 Logger 结尾的类 + info/error 方法」模拟
+# log4j/slf4j 日志调用形态。日志串不是 failed/cannot 开头（正则不排除），
+# 只能靠扫描层识别 ldc → 相邻 invoke Logger.x 剔除。
+LOGGER_JAVA_SRC = '''
+public class LogMod {
+    static class Logger {
+        static void info(String s) { }
+        static void error(String s, Object... args) { }
+    }
+    public static void main(String[] args) {
+        Logger.info("Config doesnt exist, creating new");
+        Logger.error("A generic internal message", new Object[0]);
+        System.out.println("Sky fog distance");
+        System.out.println("Enable Voxy");
+    }
+}
+'''
+
+
+def _make_logger_jar(tmp_path: Path) -> Path:
+    """javac 编译含 Logger 调用的类并打包成 jar。无 javac 则跳过测试。"""
+    if shutil.which("javac") is None:
+        pytest.skip("无 javac，跳过真实编译测试")
+    srcdir = tmp_path / "src"
+    srcdir.mkdir()
+    (srcdir / "LogMod.java").write_text(LOGGER_JAVA_SRC, encoding="utf-8")
+    classes = tmp_path / "classes"
+    classes.mkdir()
+    subprocess.run(
+        ["javac", "-d", str(classes), str(srcdir / "LogMod.java")], check=True
+    )
+    jar = tmp_path / "logmod.jar"
+    with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in classes.rglob("*.class"):
+            zf.write(f, f.relative_to(classes).as_posix())
+    return jar
+
+
+def test_scan_excludes_logger_strings(tmp_path):
+    """字节码级 Logger 剔除：ldc 后相邻 invoke Logger.x 的字符串 → 不进候选。
+
+    日志串不是正则形态（不以 failed/cannot 开头），证明是扫描层字节码识别起效，
+    而不是 is_hardcode_translatable 的日志正则兜底。
+    """
+    jar = _make_logger_jar(tmp_path)
+    found = scan_hardcoded_strings(jar)
+    assert "Sky fog distance" in found
+    assert "Enable Voxy" in found
+    assert "Config doesnt exist, creating new" not in found
+    assert "A generic internal message" not in found
+
+
 def _make_test_jar(tmp_path: Path) -> Path:
     """javac 编译测试类并打包成 jar。无 javac 则跳过测试。"""
     if shutil.which("javac") is None:
@@ -78,16 +130,59 @@ def test_is_hardcode_translatable():
     assert not is_hardcode_translatable("textures/atlas/blocks.png")   # 资源路径
     assert not is_hardcode_translatable("{base_save_path}")            # 模板占位
     assert not is_hardcode_translatable("uint(")                       # 代码函数调用
-    # 占位符保留：%s/%d 等
+    # 占位符保留：%s/%d 等（含空格完整句子不受格式串规则影响）
     assert is_hardcode_translatable("Size exceeds limits: %s")
     assert is_hardcode_translatable("Hello %s")
-    # 含空格句子保留（Could not parse config 等留 ai_judge 判断是否日志）
-    assert is_hardcode_translatable("Could not parse config")
+    # 纯格式串（printf 风格、无空格）→ 技术格式说明符，排除
+    assert not is_hardcode_translatable("%.1f")
+    assert not is_hardcode_translatable("%6.3f")
+    assert not is_hardcode_translatable("%%CONST_ARRAY%%")
     # 纯技术串仍排除
     assert not is_hardcode_translatable("(Ljava/lang/String;)V")   # 方法签名
     assert not is_hardcode_translatable("HELLO_WORLD")             # 常量名
     assert not is_hardcode_translatable("1234567890abcdef")        # 十六进制
     assert not is_hardcode_translatable("true")                    # 字面量
+
+
+def test_is_hardcode_log_exclusion():
+    """P0-1 日志形态剔除：日志句式/堆栈标记 → False；GUI 文本保留。
+
+    对照方块译匠「过滤前移」：扫描层就砍掉日志形态，不再留给 ai_judge。
+    保守匹配（开头动词 + 技术名词），不误杀 GUI 错误提示。
+    """
+    logs = [
+        "Failed to load config",
+        "Failed to write config file",
+        "Cannot create a child lower than lod level 0",
+        "Cannot create a parent higher than LoD 4",
+        "Could not parse config",
+        "Unable to allocate geometry buffer, got gl error \x01",
+        "Invalid block state in chunk stream",
+        "Missing required dependency",
+        "Exception in world cleaner",
+        "Caused by: java.lang.NullPointerException",
+        "not registered: some_mod:thing",
+    ]
+    for text in logs:
+        assert not is_hardcode_translatable(text), text
+    # GUI 可见文本必须保留（玩家看到的选项/提示）
+    gui = [
+        "Sky fog distance",
+        "Enable Voxy",
+        "Fog intensity",
+        "Fog curve",
+        "Cloud render distance in chunks",
+        "Higher distance, sharper sky fog",
+        "Multiplier for terrain fog opacity. 0.0 = off, 1.0 = vanilla",
+    ]
+    for text in gui:
+        assert is_hardcode_translatable(text), text
+    # 控制字符（\x01 等日志占位符）→ 排除（GUI 文本不含控制字符）
+    assert not is_hardcode_translatable("Allocated new geometry buffer: \x01, isSparse: \x01")
+    # 无空格 CamelCase → 方法名/类名等技术标识符排除（GUI 短语含空格；
+    # 注意 snake_case 单词如 iron_ingot 仍保留为候选，交由 ai_judge 把关）
+    assert not is_hardcode_translatable("verifyMeshing")
+    assert not is_hardcode_translatable("ModelData")
 
 
 def test_scan_hardcoded_strings(tmp_path):
@@ -347,52 +442,132 @@ def _llm_engine_with(handler) -> "LLMClient":
     return engine
 
 
+# ---------- P0-2：ai_judge 三分类（translate / exclude / unresolved） ----------
+
 @pytest.mark.asyncio
 async def test_ai_judge_translate():
-    """LLM 判断：只返回 translatable=true 的 {text: translation}，不可见文本不返回。"""
+    """LLM 判断：action=translate 的进 translations，action=exclude 的进 excluded。"""
     def handler(request):
-        return Response(200, json={"choices": [{"message": {"content": json.dumps([
-            {"text": "Hello World", "translatable": True, "translation": "你好世界"},
-            {"text": "stone", "translatable": False, "translation": ""},
-        ])}}]})
+        return Response(200, json={"choices": [{"message": {"content": json.dumps(
+            {"decisions": [
+                {"text": "Hello World", "action": "translate", "translation": "你好世界"},
+                {"text": "stone", "action": "exclude", "reason": "not_user_visible"},
+            ]})}}]})
 
     engine = _llm_engine_with(handler)
     candidates = [
         {"text": "Hello World", "context": ["Welcome to the server"]},
         {"text": "stone", "context": ["iron_ingot"]},
     ]
-    mapping = await ai_judge_translate(engine, candidates, "zh_cn")
-    assert mapping == {"Hello World": "你好世界"}   # stone 判定不可见 → 不返回
+    result = await ai_judge_translate(engine, candidates, "zh_cn")
+    assert result.translations == {"Hello World": "你好世界"}
+    assert result.excluded == ["stone"]
+    assert result.unresolved == []
     await engine._client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_translate_invalid_json_skips():
-    """LLM 输出非法 JSON → 该批跳过，不抛异常，返回空映射（容错）。"""
+async def test_ai_judge_exclude_developer_log_reason():
+    """P0-2：LLM 明确以 developer_log 排除的日志 → 进 excluded，不翻译。"""
     def handler(request):
+        return Response(200, json={"choices": [{"message": {"content": json.dumps(
+            {"decisions": [
+                {"text": "Sky fog distance", "action": "translate", "translation": "天空雾距离"},
+                {"text": "Failed to load config", "action": "exclude", "reason": "developer_log"},
+            ]})}}]})
+
+    engine = _llm_engine_with(handler)
+    result = await ai_judge_translate(engine, [
+        {"text": "Sky fog distance", "context": []},
+        {"text": "Failed to load config", "context": []},
+    ], "zh_cn")
+    assert result.translations == {"Sky fog distance": "天空雾距离"}
+    assert result.excluded == ["Failed to load config"]
+    assert result.unresolved == []
+    await engine._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_judge_unresolved_retry_single():
+    """P0-2：LLM 批量只返回部分候选 → 未返回的进 unresolved 并单独重试，重试成功并入。"""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        payload = json.loads(request.content)
+        batch = json.loads(payload["messages"][-1]["content"])
+        # 无论批量还是单条重试，都只返回第一个候选的 translate
+        return Response(200, json={"choices": [{"message": {"content": json.dumps(
+            {"decisions": [
+                {"text": batch[0]["text"], "action": "translate", "translation": "译" + batch[0]["text"]}
+            ]})}}]})
+
+    engine = _llm_engine_with(handler)
+    result = await ai_judge_translate(engine, [
+        {"text": "A", "context": []},
+        {"text": "B", "context": []},
+    ], "zh_cn")
+    # 批量只处置 A → B unresolved → 单独重试 B 成功
+    assert result.translations == {"A": "译A", "B": "译B"}
+    assert result.unresolved == []
+    assert calls["n"] == 2   # 1 批量 + 1 单条重试
+    await engine._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_judge_unresolved_kept_after_retry():
+    """P0-2：unresolved 单条重试最多 2 次仍未解决 → 保留在 unresolved，不静默漏判。"""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return Response(200, json={"choices": [{"message": {"content": json.dumps(
+            {"decisions": [
+                {"text": "other", "action": "translate", "translation": "x"}
+            ]})}}]})
+
+    engine = _llm_engine_with(handler)
+    result = await ai_judge_translate(engine, [{"text": "Ghost", "context": []}], "zh_cn")
+    assert result.translations == {}
+    assert result.unresolved == ["Ghost"]
+    assert calls["n"] == 3   # 1 批量 + 2 次单条重试
+    await engine._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_judge_translate_invalid_json_unresolved():
+    """LLM 输出非法 JSON → 逐条降级失败 → 进 unresolved（不整批静默丢）。"""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
         return Response(200, json={"choices": [{"message": {"content": "这不是 JSON"}}]})
 
     engine = _llm_engine_with(handler)
-    mapping = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
-    assert mapping == {}
+    result = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
+    assert result.translations == {}
+    assert result.unresolved == ["Hello"]
+    assert calls["n"] == 4   # 1 批量 + 1 逐条降级 + 2 次 unresolved 重试
     await engine._client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_translate_missing_field_skips():
-    """LLM 输出缺失 translatable/translation 字段 → 该条忽略，不崩。"""
+async def test_ai_judge_translate_missing_field_unresolved():
+    """LLM 输出缺失 action/translation 字段 → 该条进 unresolved，不崩。"""
     def handler(request):
-        return Response(200, json={"choices": [{"message": {"content": json.dumps([
-            {"text": "Hello World"},                      # 缺字段
-            {"text": "Good day", "translatable": True},   # 缺 translation
-        ])}}]})
+        return Response(200, json={"choices": [{"message": {"content": json.dumps(
+            {"decisions": [
+                {"text": "Hello World"},                      # 缺 action/translation
+                {"text": "Good day", "action": "translate"},  # 缺 translation
+            ]})}}]})
 
     engine = _llm_engine_with(handler)
-    mapping = await ai_judge_translate(engine, [
+    result = await ai_judge_translate(engine, [
         {"text": "Hello World", "context": []},
         {"text": "Good day", "context": []},
     ], "zh_cn")
-    assert mapping == {}
+    assert result.translations == {}
+    assert set(result.unresolved) == {"Hello World", "Good day"}
     await engine._client.aclose()
 
 
@@ -418,29 +593,36 @@ async def test_ai_judge_translate_paging_concurrent():
         batch = json.loads(payload["messages"][-1]["content"])
         seen_sizes.append(len(batch))
         active -= 1
-        return Response(200, json={"choices": [{"message": {"content": json.dumps([
-            {"text": item["text"], "translatable": True, "translation": "译"}
-            for item in batch
-        ])}}]})
+        return Response(200, json={"choices": [{"message": {"content": json.dumps(
+            {"decisions": [
+                {"text": item["text"], "action": "translate", "translation": "译"}
+                for item in batch
+            ]})}}]})
 
     engine = _llm_engine_with(handler)
     candidates = [{"text": f"t{i}", "context": []} for i in range(60)]
-    mapping = await ai_judge_translate(engine, candidates, "zh_cn")
-    assert len(mapping) == 60
+    result = await ai_judge_translate(engine, candidates, "zh_cn")
+    assert len(result.translations) == 60
+    assert result.unresolved == []
     assert sorted(seen_sizes) == [10, 25, 25]   # 60 → 25 + 25 + 10（并发下顺序不定）
     assert max_active >= 2                      # 至少两个批次同时 in-flight
     await engine._client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_translate_null_content_skips():
-    """LLM 返回 content=null → 该批跳过，不抛 AttributeError，返回空映射（B 审查 🟡1）。"""
+async def test_ai_judge_translate_null_content_unresolved():
+    """LLM 返回 content=null → 该批全进 unresolved，不抛 AttributeError（B 审查 🟡1）。"""
+    calls = {"n": 0}
+
     def handler(request):
+        calls["n"] += 1
         return Response(200, json={"choices": [{"message": {"content": None}}]})
 
     engine = _llm_engine_with(handler)
-    mapping = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
-    assert mapping == {}
+    result = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
+    assert result.translations == {}
+    assert result.unresolved == ["Hello"]
+    assert calls["n"] == 3   # 1 批量 + 2 次单条重试
     await engine._client.aclose()
 
 
@@ -461,6 +643,39 @@ async def test_ai_judge_system_prompt_uses_target_lang():
     await engine._client.aclose()
 
 
+def test_ai_judge_system_prompt_mix_rules():
+    """P0-2/P0-3：ai_judge system prompt 含日志排除边界 + 混排约束 + 严格 JSON。"""
+    import app.hardcode as hardcode
+    s = hardcode._ai_judge_system_prompt("zh_cn")
+    assert "玩家在游戏中能直接看到" in s
+    # 日志/技术串明确排除（照方块译匠）
+    assert "日志" in s and "排除" in s
+    assert "developer_log" in s
+    # 混排约束
+    assert "中英" in s and ("混杂" in s or "混排" in s or "硬插" in s)
+    # 严格 JSON 结构
+    assert "decisions" in s and "action" in s
+
+
+@pytest.mark.asyncio
+async def test_ai_judge_known_translations_injected():
+    """P0-3：已确认术语注入 ai_judge user prompt（强制沿用已确认译名）。"""
+    seen = {}
+
+    def handler(request):
+        payload = json.loads(request.content)
+        seen["user"] = payload["messages"][-1]["content"]
+        return Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+
+    engine = _llm_engine_with(handler)
+    await ai_judge_translate(engine, [{"text": "Sky fog distance", "context": []}], "zh_cn",
+                             known_translations={"Sky fog distance": "天空雾距离"})
+    assert "Sky fog distance" in seen["user"]
+    assert "天空雾距离" in seen["user"]
+    assert "已确认" in seen["user"]
+    await engine._client.aclose()
+
+
 # ---------- P0 止血：ai_judge 非法 JSON 逐条降级（不整批丢） ----------
 
 @pytest.mark.asyncio
@@ -475,17 +690,19 @@ async def test_ai_judge_invalid_json_downgrades_per_item():
         # 逐条降级：单候选返回合法 JSON
         payload = json.loads(request.content)
         batch = json.loads(payload["messages"][-1]["content"])
-        return Response(200, json={"choices": [{"message": {"content": json.dumps([
-            {"text": b["text"], "translatable": True, "translation": "译" + b["text"]}
-            for b in batch
-        ])}}]})
+        return Response(200, json={"choices": [{"message": {"content": json.dumps(
+            {"decisions": [
+                {"text": b["text"], "action": "translate", "translation": "译" + b["text"]}
+                for b in batch
+            ]})}}]})
 
     engine = _llm_engine_with(handler)
-    mapping = await ai_judge_translate(engine, [
+    result = await ai_judge_translate(engine, [
         {"text": "Hello World", "context": []},
         {"text": "Good day", "context": []},
     ], "zh_cn")
-    assert mapping == {"Hello World": "译Hello World", "Good day": "译Good day"}
+    assert result.translations == {"Hello World": "译Hello World", "Good day": "译Good day"}
+    assert result.unresolved == []
     assert calls["n"] == 3   # 1 批量 + 2 逐条降级
     await engine._client.aclose()
 
@@ -501,13 +718,15 @@ async def test_ai_judge_empty_array_downgrades():
             return Response(200, json={"choices": [{"message": {"content": "[]"}}]})
         payload = json.loads(request.content)
         batch = json.loads(payload["messages"][-1]["content"])
-        return Response(200, json={"choices": [{"message": {"content": json.dumps([
-            {"text": b["text"], "translatable": True, "translation": "译" + b["text"]}
-            for b in batch
-        ])}}]})
+        return Response(200, json={"choices": [{"message": {"content": json.dumps(
+            {"decisions": [
+                {"text": b["text"], "action": "translate", "translation": "译" + b["text"]}
+                for b in batch
+            ]})}}]})
 
     engine = _llm_engine_with(handler)
-    mapping = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
-    assert mapping == {"Hello": "译Hello"}
+    result = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
+    assert result.translations == {"Hello": "译Hello"}
+    assert result.unresolved == []
     assert calls["n"] == 2   # 1 批量 + 1 逐条降级
     await engine._client.aclose()
