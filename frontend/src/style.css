@@ -30,7 +30,7 @@ input, select, button {
   color: inherit;
 }
 
-input[type="text"], input[type="password"], select {
+input[type="text"], input[type="password"], input[type="number"], select {
   background: var(--bg-2);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -39,6 +39,13 @@ input[type="text"], input[type="password"], select {
   outline: none;
   transition: border-color .15s;
 }
+/* 数字输入框：隐藏原生上下箭头，与文本输入风格统一 */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] { -moz-appearance: textfield; }
 input:focus, select:focus { border-color: var(--accent); }
 
 button.btn {
