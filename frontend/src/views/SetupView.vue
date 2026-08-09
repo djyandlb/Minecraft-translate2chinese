@@ -2,8 +2,8 @@
 import { nextTick, onMounted, ref, watch } from 'vue'
 import { getConfig, getKeyStatus, saveConfig, saveKey, testConnection } from '../api'
 
-// props：onDone(配置对象) / onNext() 由 App 注入，走完一步 → next()
-const props = defineProps({ onDone: Function, onNext: Function })
+// props：onDone(配置对象) / onClose() 由 App 注入（保存后回调）；closable=false 时隐藏「取消」（首次开屏强制配置）
+const props = defineProps({ onDone: Function, onClose: Function, closable: { type: Boolean, default: true } })
 
 // 厂商预置映射：选中自动带出 base_url + model（允许手动覆盖）
 const PROVIDERS = {
@@ -103,7 +103,7 @@ function onKeyFocus() {
   if (apiKey.value === API_KEY_PLACEHOLDER) apiKey.value = ''
 }
 
-async function saveAndNext() {
+async function saveAndClose() {
   saving.value = true
   error.value = ''
   try {
@@ -120,7 +120,7 @@ async function saveAndNext() {
     }
     await saveConfig(body)
     props.onDone?.(body)
-    props.onNext?.()
+    props.onClose?.()
   } catch (e) {
     error.value = `保存失败：${e.message}`
   } finally {
@@ -131,7 +131,7 @@ async function saveAndNext() {
 
 <template>
   <section class="panel">
-    <h2>① 配置</h2>
+    <h2>配置</h2>
     <p class="hint">选择翻译引擎与目标语言（源语言自动识别）</p>
 
     <div class="field">
@@ -203,8 +203,9 @@ async function saveAndNext() {
     <p v-if="error" class="err">{{ error }}</p>
 
     <div class="actions">
-      <button class="btn primary" :disabled="saving" @click="saveAndNext">
-        {{ saving ? '保存中…' : '保存并下一步' }}
+      <button class="btn" v-if="closable" :disabled="saving" @click="props.onClose?.()">取消</button>
+      <button class="btn primary" :disabled="saving" @click="saveAndClose">
+        {{ saving ? '保存中…' : '保存' }}
       </button>
     </div>
   </section>

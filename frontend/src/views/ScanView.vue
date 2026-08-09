@@ -1,25 +1,33 @@
 <script setup>
-import { ref } from 'vue'
-import { autoTranslate, browse, detect, uploadFile } from '../api'
+import { computed, ref } from 'vue'
+import { browse } from '../api'
 
-// props：targetLang（来自 App 配置）+ onTranslate(taskId) / onBack()
+// props：jobs（App 持有的任务队列，展示用）+ addPath/addUpload（App 注入的入队方法，可 await）
 const props = defineProps({
-  targetLang: { type: String, default: 'zh_cn' },
-  onTranslate: Function,
-  onBack: Function,
+  jobs: { type: Array, default: () => [] },
+  processing: { type: Boolean, default: false },   // 队列处理中 → 禁用移除/清空/开始
+  detecting: { type: Boolean, default: false },    // 有文件识别中 → 禁用添加
+  addPath: { type: Function, required: true },     // 本地路径入队（内部 detect）
+  addUpload: { type: Function, required: true },   // 上传文件入队（浏览器/无本地路径兜底）
 })
+const emit = defineEmits(['remove-job', 'clear-jobs', 'start-queue'])
 
 // 桌面版（pywebview）检测：存在 window.pywebview → 可用 js_api 直接拿本地路径，不走上传
 const isDesktop = typeof window !== 'undefined' && !!window.pywebview
 
-const path = ref('')
-const result = ref(null)          // /api/detect 返回 {kind, source_lang, pack_format, summary}
-const detecting = ref(false)
-const uploading = ref(false)
-const translating = ref(false)
+const dragOver = ref(false)
+const fileInput = ref(null)
 const error = ref('')
 
-// —— 目录浏览器（跨盘浏览复用现有 browser，盘根可列盘符）——
+const KIND_TEXT = { modpack: '整合包', modjar: '单个 mod', map: '地图存档' }
+const STATUS_TEXT = { pending: '待翻译', running: '翻译中…', done: '完成 ✓', failed: '失败 ✗' }
+const STATUS_ICON = { pending: '•', running: '◎', done: '✓', failed: '✗' }
+
+const pendingCount = computed(() => props.jobs.filter(j => j.status === 'pending').length)
+const startEnabled = computed(() => !props.processing && pendingCount.value > 0)
+const failCountTip = computed(() => props.jobs.some(j => j.status === 'failed'))
+
+// —— 目录浏览器（浏览器模式跨盘浏览，复用现有 browser，盘根可列盘符）——
 const showBrowser = ref(false)
 const browserPath = ref('')
 const dirs = ref([])
@@ -28,14 +36,12 @@ const browsing = ref(false)
 
 async function openBrowser() {
   showBrowser.value = true
-  await loadDirs(path.value || '')
+  await loadDirs('')
 }
 async function loadDirs(p) {
   browsing.value = true
   try {
     const r = await browse(p)
-    // 首次（p 为空）时 browse('') 返回的 parent 即 home 绝对路径，
-    // 始终用绝对路径作为当前目录，后续点入子目录拼出的子路径才不偏位
     browserPath.value = p || r.parent || ''
     dirs.value = r.dirs
     parent.value = r.parent || ''
@@ -54,11 +60,10 @@ function enterDir(name) {
 function goUp() {
   if (parent.value) loadDirs(parent.value)
 }
-// 选中目录后收浏览器并立即自动识别
+// 选中目录后收浏览器并立即入队（App 内自动识别）
 async function pickPath() {
-  path.value = browserPath.value
   showBrowser.value = false
-  await autoDetect()
+  await props.addPath(browserPath.value)
 }
 
 // —— 桌面版 js_api：系统对话框选文件/目录，直接拿本地路径（不走上传）——
@@ -66,117 +71,75 @@ async function pickLocal(kind) {
   try {
     const paths = await window.pywebview.api.select_path(kind)
     if (paths && paths.length) {
-      path.value = paths[0]
-      await autoDetect()
+      for (const p of paths) await props.addPath(p)   // file 可多选返回多路径；folder 单目录
     }
   } catch (e) {
     error.value = `选择${kind === 'folder' ? '目录' : '文件'}失败：${e.message}`
   }
 }
 
-// —— 拖放 / 点选上传 ——
-const dragOver = ref(false)
-const fileInput = ref(null)
+// —— 拖放 / 点选上传（支持多文件）——
 function onDragOver(e) { e.preventDefault(); dragOver.value = true }
 function onDragLeave(e) {
-  // F13-review：子元素间移动会误触发 dragleave 导致高亮闪断；仅离开整个 dropzone 才熄灭
+  // 子元素间移动会误触发 dragleave 导致高亮闪断；仅离开整个 dropzone 才熄灭
   if (e.currentTarget.contains(e.relatedTarget)) return
   dragOver.value = false
 }
 async function onDrop(e) {
   e.preventDefault(); dragOver.value = false
-  const file = e.dataTransfer.files?.[0]
-  if (!file) return
-  // 桌面版：File 对象若暴露本地 path 属性（pywebview WebView2 实测），直接用本地地址不走上传
-  const localPath = isDesktop && (file.path || file.webkitRelativePath)
-  if (localPath) {
-    path.value = localPath
-    await autoDetect()
-    return
+  const files = Array.from(e.dataTransfer.files || [])
+  if (!files.length) return
+  for (const file of files) {
+    // 桌面版：File 对象若暴露本地 path 属性（pywebview WebView2 实测），直接用本地地址不走上传
+    const localPath = isDesktop && (file.path || file.webkitRelativePath)
+    if (localPath) await props.addPath(localPath)
+    else await props.addUpload(file)     // 浏览器 / 拿不到本地路径 → 走上传兜底
   }
-  await handleFile(file)   // 浏览器 / 拿不到本地路径 → 走上传兜底
 }
 function onClickDrop() { fileInput.value?.click() }
+// 拖放区点击：桌面版弹系统文件对话框（多选），浏览器版走 input 选文件
+function onZoneClick() {
+  if (isDesktop) pickLocal('file')
+  else onClickDrop()
+}
 async function onFilePicked(e) {
-  const file = e.target.files?.[0]
-  if (file) await handleFile(file)
-  e.target.value = ''     // 允许连续选择同一文件
-}
-// 统一上传入口：POST /api/upload → 拿到落盘路径 → 自动识别
-async function handleFile(file) {
-  uploading.value = true; error.value = ''
-  try {
-    const r = await uploadFile(file)
-    path.value = r.path
-    await autoDetect()
-  } catch (err) {
-    error.value = `上传失败：${err.message}`
-  } finally {
-    uploading.value = false
+  const files = Array.from(e.target.files || [])
+  e.target.value = ''                    // 允许连续选择同一批文件
+  for (const file of files) {
+    const localPath = isDesktop && (file.path || file.webkitRelativePath)
+    if (localPath) await props.addPath(localPath)
+    else await props.addUpload(file)
   }
 }
-
-// —— 自动识别 ——
-async function autoDetect() {
-  if (!path.value) { error.value = '请选择路径或拖入文件'; return }
-  detecting.value = true; error.value = ''
-  result.value = null   // F13-review：识别前清空旧摘要，防失败残留导致「摘要与翻译对象不一致」
-  try {
-    result.value = await detect({ path: path.value, target_lang: props.targetLang })
-    if (result.value.kind === 'unknown') {
-      error.value = '无法识别输入类型，请确认是整合包目录 / mod jar / 地图存档'
-    }
-  } catch (e) {
-    error.value = `识别失败：${e.message}`
-  } finally {
-    detecting.value = false
-  }
-}
-
-// —— 一键全部翻译（语言文件 + 硬编码并入，产物资源包 + 汉化 jar）——
-async function startTranslate() {
-  if (!result.value || result.value.kind === 'unknown') { error.value = '请先完成识别'; return }
-  translating.value = true; error.value = ''
-  try {
-    // 硬编码改为后端 AI 自动判断，不再传 selected_hardcoded
-    const r = await autoTranslate({ path: path.value, target_lang: props.targetLang })
-    props.onTranslate?.(r.task_id)
-  } catch (e) {
-    error.value = `启动翻译失败：${e.message}`
-  } finally {
-    translating.value = false
-  }
-}
-
-const KIND_TEXT = { modpack: '整合包', modjar: '单个 mod', map: '地图存档' }
 </script>
 
 <template>
-  <section class="panel">
-    <h2>② 汉化</h2>
-    <p class="hint">拖入 mod / 整合包 / 地图文件，或选择目录 → 自动识别 → 一键翻译</p>
+  <section class="panel scan-panel">
+    <h2>添加文件</h2>
+    <p class="hint">拖入 jar / 整合包 / 地图文件，或选择目录（支持多个，队列逐个翻译）</p>
 
-    <!-- 大拖放区：拖入 jar/压缩包/地图文件，或点击选文件 -->
+    <!-- 大拖放区：拖入多个 jar/压缩包/地图文件，或点击选文件 -->
     <div class="dropzone" :class="{ drag: dragOver }"
-         @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop" @click="onClickDrop">
-      <p class="big">{{ uploading ? '上传中…' : (dragOver ? '松手，放这里！' : '拖入 jar / 压缩包 / 地图文件') }}</p>
-      <p class="small">或点击选择文件（整合包目录请用下方目录浏览）</p>
-      <input ref="fileInput" type="file" style="display:none" @change="onFilePicked" />
+         @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop" @click="onZoneClick">
+      <p class="big">{{ dragOver ? '松手，放这里！' : '拖入 jar / 压缩包 / 地图文件' }}</p>
+      <p class="small">支持多个文件，或点击选择（整合包目录请用下方目录/浏览）</p>
+      <input ref="fileInput" type="file" multiple style="display:none" @change="onFilePicked" />
     </div>
 
-    <!-- 路径输入 + 目录浏览（跨盘）；桌面版额外提供系统对话框直接选文件/目录 -->
-    <div class="field">
-      <label>资源路径</label>
-      <div class="path-row">
-        <input type="text" v-model="path" placeholder="选择整合包目录 / mod jar / 地图存档，或拖入文件" />
-        <template v-if="isDesktop">
-          <button class="btn" @click="pickLocal('file')">选择文件</button>
-          <button class="btn" @click="pickLocal('folder')">选择目录</button>
-        </template>
-        <button class="btn" @click="openBrowser" v-else>浏览</button>
-      </div>
+    <!-- 选择按钮：桌面版系统对话框；浏览器版点选文件 + 目录浏览 -->
+    <div class="path-row pick-row">
+      <template v-if="isDesktop">
+        <button class="btn" :disabled="detecting" @click="pickLocal('file')">选择文件</button>
+        <button class="btn" :disabled="detecting" @click="pickLocal('folder')">选择目录</button>
+      </template>
+      <template v-else>
+        <button class="btn" :disabled="detecting" @click="onClickDrop">选择文件</button>
+        <button class="btn" :disabled="detecting" @click="openBrowser">浏览目录</button>
+      </template>
+      <span v-if="detecting" class="detect-tip">识别中…</span>
     </div>
 
+    <!-- 目录浏览器（浏览器模式） -->
     <div v-if="showBrowser" class="browser">
       <div class="browser-head">
         <span class="cur">{{ browserPath || '（主目录）' }}</span>
@@ -193,55 +156,40 @@ const KIND_TEXT = { modpack: '整合包', modjar: '单个 mod', map: '地图存�
       <p v-else class="tip">该目录下没有可进入的子目录</p>
     </div>
 
-    <!-- 识别按钮 -->
-    <div class="actions detect-actions">
-      <button class="btn" @click="autoDetect" :disabled="detecting || !path">
-        {{ detecting ? '识别中…' : '自动识别' }}
-      </button>
-    </div>
-
-    <!-- 识别结果摘要 -->
-    <div v-if="result && result.kind !== 'unknown'" class="result-box">
-      <h3>识别结果</h3>
-      <div class="detect-grid">
-        <div class="kv"><span>类型</span><strong>{{ KIND_TEXT[result.kind] || result.kind }}</strong></div>
-        <div class="kv" v-if="result.kind !== 'map'">
-          <span>源语言</span>
-          <strong>{{ result.source_lang || '未检测到（可能已汉化）' }}</strong>
-        </div>
-        <div class="kv" v-if="result.kind !== 'map'">
-          <span>资源包格式</span>
-          <strong>{{ result.pack_format > 0 ? result.pack_format : '自动' }}</strong>
-        </div>
+    <!-- 任务列表 -->
+    <div class="job-list" v-if="jobs.length">
+      <div class="job-head">
+        <span class="job-title">任务列表（{{ jobs.length }}）</span>
+        <span class="spacer"></span>
+        <button class="btn mini" :disabled="processing" @click="emit('clear-jobs')">清空</button>
       </div>
-      <template v-if="result.summary">
-        <p class="total">
-          共 <strong>{{ result.summary.jar_count }}</strong> 个 jar、
-          <strong>{{ result.summary.total_lang_files }}</strong> 个语言文件，
-          可翻译词条约 <strong>{{ result.summary.total_entries }}</strong> 条
-        </p>
-        <p v-if="result.summary.total_hardcoded != null" class="total">
-          硬编码字符串约 <strong>{{ result.summary.total_hardcoded }}</strong> 条（一并汉化）
-        </p>
-      </template>
-      <p v-else-if="result.kind === 'map'" class="total">地图存档：翻译时自动扫描并写入，产物为 .mcworld</p>
+      <div v-for="(job, i) in jobs" :key="job.path + '-' + i" class="job-row" :class="'st-' + job.status">
+        <span class="job-icon">{{ STATUS_ICON[job.status] || '•' }}</span>
+        <span class="job-name" :title="job.path">{{ job.name }}</span>
+        <span class="job-kind">{{ KIND_TEXT[job.kind] || (job.kind || '未知') }}</span>
+        <span class="job-status">{{ STATUS_TEXT[job.status] || job.status }}</span>
+        <button class="btn mini x" :disabled="job.status === 'running'" :title="'移除'" @click="emit('remove-job', i)">✕</button>
+      </div>
+      <p v-if="failCountTip" class="tip fail-tip">失败项可在右侧查看原因，也可移除后重新添加</p>
     </div>
+    <p v-else class="tip empty-tip">还没有任务，拖入文件或选择目录开始</p>
 
     <p v-if="error" class="err">{{ error }}</p>
 
+    <!-- 开始翻译：串行队列 -->
     <div class="actions">
-      <button class="btn" @click="props.onBack?.()">上一步</button>
-      <button class="btn primary" :disabled="translating || !result || result.kind === 'unknown'"
-              @click="startTranslate">
-        {{ translating ? '启动中…' : '开始翻译' }}
+      <button class="btn primary start-btn" :disabled="!startEnabled" @click="emit('start-queue')">
+        {{ processing ? '翻译中…' : `开始翻译 · ${pendingCount} 个` }}
       </button>
     </div>
   </section>
 </template>
 
 <style scoped>
-.path-row { display: flex; gap: 10px; }
-.path-row input { flex: 1; }
+.scan-panel { max-width: 100%; padding: 0; }
+
+.pick-row { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; }
+.detect-tip { color: var(--text-dim); font-size: 12px; }
 
 /* 大拖放区 */
 .dropzone {
@@ -266,12 +214,12 @@ const KIND_TEXT = { modpack: '整合包', modjar: '单个 mod', map: '地图存�
   border-radius: 8px;
   background: var(--bg-2);
   padding: 12px;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 .browser-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .browser-head .cur { color: var(--accent); word-break: break-all; font-size: 13px; }
 .spacer { flex: 1; }
-.browser-list { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow: auto; }
+.browser-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow: auto; }
 .browser-list .dir {
   display: block; width: 100%; text-align: left;
   background: transparent; border: none; color: var(--text);
@@ -279,14 +227,37 @@ const KIND_TEXT = { modpack: '整合包', modjar: '单个 mod', map: '地图存�
 }
 .browser-list .dir:hover { background: var(--bg-3); }
 
-/* 识别结果摘要 */
-.detect-actions { margin-top: 0; }
-.result-box { margin-top: 4px; }
-.result-box h3 { margin: 0 0 8px; font-size: 16px; }
-.detect-grid { display: flex; gap: 24px; margin-bottom: 6px; flex-wrap: wrap; }
-.kv { display: flex; flex-direction: column; gap: 2px; }
-.kv span { color: var(--text-dim); font-size: 12px; }
-.kv strong { color: var(--accent); font-size: 14px; }
-.total { color: var(--text-dim); margin: 6px 0 0; }
-.total strong { color: var(--accent); }
+/* 任务列表 */
+.job-list { margin-bottom: 8px; }
+.job-head { display: flex; align-items: center; margin-bottom: 6px; }
+.job-title { color: var(--text-dim); font-size: 13px; font-weight: 600; }
+.job-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg-2); margin-bottom: 6px;
+}
+.job-icon { width: 16px; text-align: center; flex-shrink: 0; color: var(--text-dim); }
+.job-row.st-running { border-color: var(--accent); }
+.job-row.st-running .job-icon { color: var(--accent); }
+.job-row.st-done { border-color: var(--accent-2); }
+.job-row.st-done .job-icon { color: var(--accent); }
+.job-row.st-failed { border-color: var(--danger); }
+.job-row.st-failed .job-icon { color: var(--danger); }
+.job-name {
+  flex: 1; min-width: 0; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.job-kind { color: var(--text-dim); font-size: 12px; flex-shrink: 0; }
+.job-status { font-size: 12px; flex-shrink: 0; color: var(--text-dim); }
+.job-row.st-running .job-status { color: var(--accent); }
+.job-row.st-done .job-status { color: var(--accent); }
+.job-row.st-failed .job-status { color: var(--danger); }
+
+.btn.mini { padding: 3px 8px; font-size: 12px; flex-shrink: 0; }
+.btn.mini.x { padding: 2px 7px; }
+
+.fail-tip { margin-top: 6px; font-size: 12px; }
+.empty-tip { margin-top: 4px; }
+
+.start-btn { width: 100%; }
 </style>
