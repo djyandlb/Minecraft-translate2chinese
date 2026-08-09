@@ -12,10 +12,11 @@ jawa 类名加载方式（已实测，Windows）：
     path_map 的 key 统一规范化为 POSIX 斜杠式，再以相对路径去 .class 后缀加载。
 """
 
+import io
 import re
 import shutil
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from jawa.classloader import ClassLoader
 from jawa.constants import String
@@ -56,16 +57,31 @@ def is_hardcode_translatable(text: str) -> bool:
 
 
 def _extract_jar(jar: Path, work: Path) -> None:
-    """把 jar 解压到 work 目录（已存在先清空）。"""
+    """把 jar 解压到 work 目录（已存在先清空）。
+
+    zip-slip 防护：对 zip 条目名用 PurePosixPath 规范化，含 `..` 段、
+    绝对路径、或解析后逃逸出 work 的条目一律跳过（不入盘），
+    不整体拒绝 jar，保证扫描/替换不因单个恶意条目中断。
+    """
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
+    work_resolved = work.resolve()
     with zipfile.ZipFile(jar, "r") as zf:
         for name in zf.namelist():
-            if name.endswith("/"):
-                (work / name).mkdir(parents=True, exist_ok=True)
+            # 规范化条目名：拒绝 ../ 段与绝对路径
+            clean = PurePosixPath(name)
+            if clean.is_absolute() or ".." in clean.parts:
                 continue
-            target = work / name
+            target = work.joinpath(*clean.parts)
+            try:
+                # 双保险：解析后必须仍在 work 内（防符号链接/规范化逃逸）
+                target.resolve().relative_to(work_resolved)
+            except ValueError:
+                continue
+            if name.endswith("/"):
+                target.mkdir(parents=True, exist_ok=True)
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(name) as src, open(target, "wb") as dst:
                 shutil.copyfileobj(src, dst)
@@ -111,7 +127,10 @@ def scan_hardcoded_strings(jar: Path) -> list[str]:
         loader = _class_loader(work)
         for p in sorted(work.rglob("*.class")):
             name = _class_name(p, work)
-            klass = loader[name]
+            try:
+                klass = loader[name]
+            except Exception:
+                continue  # 单个 class 损坏/不可加载：跳过，不拖垮整包扫描
             for c in klass.constants:
                 if isinstance(c, String):
                     t = c.string.value
@@ -158,20 +177,29 @@ def replace_hardcoded_strings(jar: Path, mapping: dict[str, str]) -> dict:
                         c.string.value = mapping[c.string.value]
                         changed += 1
                 if changed:
-                    with open(p, "wb") as f:
-                        klass.save(f)
-                    # 重读校验：能解析且 String 数不变才认成功
-                    verify = _class_loader(work)[name]
-                    after = [
-                        c.string.value
-                        for c in verify.constants
-                        if isinstance(c, String)
-                    ]
-                    if len(after) != len(before):
-                        raise ValueError(
-                            f"{name}: 替换后 String 数 {len(after)} != 替换前 {len(before)}"
-                        )
-                    replaced += changed
+                    # save 前保留原字节：校验失败时写回还原，
+                    # 确保 failed class 不改坏字节进输出 jar
+                    original_bytes = p.read_bytes()
+                    try:
+                        # 先写入内存，save 本身失败不截断原文件
+                        buf = io.BytesIO()
+                        klass.save(buf)
+                        p.write_bytes(buf.getvalue())
+                        # 重读校验：能解析且 String 数不变才认成功
+                        verify = _class_loader(work)[name]
+                        after = [
+                            c.string.value
+                            for c in verify.constants
+                            if isinstance(c, String)
+                        ]
+                        if len(after) != len(before):
+                            raise ValueError(
+                                f"{name}: 替换后 String 数 {len(after)} != 替换前 {len(before)}"
+                            )
+                        replaced += changed
+                    except Exception:
+                        p.write_bytes(original_bytes)  # 还原为原始字节
+                        raise
             except Exception as exc:
                 failed_classes.append(f"{name} ({type(exc).__name__}: {exc})")
         _repack(work, jar)
