@@ -1,6 +1,7 @@
 # FastAPI 入口（任务 13）：扫描/翻译/任务/浏览/术语表路由，串起 M0-M2 全部模块
 import asyncio
 import re
+import sys
 import uuid
 import zipfile
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.archive import is_archive, extract_modpack
 from app.config import AppConfig
@@ -21,8 +23,16 @@ from app.scanner import scan_modpack, scan_jar
 from app.tasks import TaskStore
 from app.translator import run_translation
 
+def _base() -> Path:
+    """定位可写工作目录（backend/）：
+    PyInstaller frozen 后 __file__ 指向只读 _MEIPASS，必须改用 exe 同目录（config.json/work 才能落盘）。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
 app = FastAPI(title="MC 自动翻译器")
-BASE = Path(__file__).resolve().parent.parent          # backend/
+BASE = _base()                                        # backend/（frozen 后为 exe 同目录）
 CONFIG_PATH = BASE / "config.json"
 WORK_DIR = BASE / "work"
 STORE = TaskStore(WORK_DIR / "tasks")
@@ -225,3 +235,30 @@ async def hardcode_translate(req: HardcodeRequest):
     _TASKS[state.id] = task
     task.add_done_callback(lambda t: _TASKS.pop(state.id, None))
     return {"task_id": state.id}
+
+
+# —— 前端静态服务（桌面版 uvicorn 直接 serve dist；开发期 vite dev proxy 不受影响）——
+def _front_dist() -> Path:
+    """定位前端 dist：frozen 后在 _MEIPASS/frontend/dist，否则项目根 frontend/dist。"""
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", str(BASE))) / "frontend" / "dist"
+    return BASE.parent / "frontend" / "dist"
+
+
+FRONT_DIST = _front_dist()
+if FRONT_DIST.exists() and (FRONT_DIST / "index.html").exists():
+    app.mount("/assets", StaticFiles(directory=FRONT_DIST / "assets"), name="assets")
+
+    @app.get("/")
+    def _index():
+        return FileResponse(FRONT_DIST / "index.html")
+
+    @app.get("/{full_path:path}")
+    def _spa(full_path: str):
+        # vue SPA fallback：非 /api 路径回 index.html；已存在的静态文件直接返回
+        if full_path.startswith("api/"):
+            raise HTTPException(404, "接口不存在")
+        p = FRONT_DIST / full_path
+        if p.is_file():
+            return FileResponse(p)
+        return FileResponse(FRONT_DIST / "index.html")
