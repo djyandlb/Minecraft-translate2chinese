@@ -183,6 +183,10 @@ async def upload(file: UploadFile = File(...)):
     """拖放文件上传：流式分块落盘 work/uploads/<uuid>/<原始文件名>，返回路径供 /api/detect 消费。"""
     # 文件名只取 basename（正反斜杠都剥掉），防路径穿越逃逸出 work 目录
     name = Path((file.filename or "upload").replace("\\", "/")).name or "upload"
+    # ⚪-4：净化后若落在 {"..", ".", ""} 则回退 "upload"，
+    # 否则 dest_dir/".." 落到 uploads 目录 open("wb") 抛 IsADirectoryError → 500
+    if name in {"..", ".", ""}:
+        name = "upload"
     dest_dir = WORK_DIR / "uploads" / uuid.uuid4().hex
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / name
@@ -205,11 +209,16 @@ def _windows_drives() -> list[str]:
 @app.get("/api/browse")
 def browse(path: str = ""):
     p = Path(path) if path else Path.home()
+    # 🟡-2：路径不存在/非目录时统一返回空，不回吐垃圾 parent（如 C:\/D:\ 规范化的 C:\D:）
     if not p.exists() or not p.is_dir():
-        return {"parent": str(p.parent) if p.parent != p else "", "dirs": []}
+        return {"parent": "", "dirs": []}
+    # 🟡-3 盘根：仅起始盘根（第一个存在盘符）列出全部盘符供跨盘；
+    # 其余盘根（如 D:\）直接列该盘子目录，否则用户永远进不去非起始盘
+    if os.name == "nt" and p.parent == p:
+        drives = _windows_drives()
+        if drives and str(p) == drives[0]:
+            return {"parent": "", "dirs": drives}
     try:
-        if os.name == "nt" and p.parent == p:    # 盘根：列出所有盘符供跨盘，否则永远困在当前盘
-            return {"parent": "", "dirs": _windows_drives()}
         dirs = sorted([d.name for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")])
     except (PermissionError, OSError):
         # M3：无权限/读取失败目录返回空列表，不 500

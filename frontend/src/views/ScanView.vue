@@ -48,6 +48,8 @@ async function loadDirs(p) {
   }
 }
 function enterDir(name) {
+  // 🟡-1：盘符（如 D:\）直接进入，不拼接当前路径（防 C:\/D:\ 拼接失效，永远进不了 D/E 盘）
+  if (name.includes(':')) { loadDirs(name); return }
   loadDirs(browserPath.value ? `${browserPath.value}/${name}` : name)
 }
 function goUp() {
