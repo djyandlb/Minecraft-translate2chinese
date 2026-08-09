@@ -60,13 +60,15 @@ class LLMClient:
 
     def __init__(self, base_url: str, api_key: str, model: str,
                  concurrency: int = 5, batch_size: int = 20,
-                 on_usage: Callable[[int, int], None] | None = None):
+                 on_usage: Callable[[int, int], None] | None = None,
+                 glossary_prompt: str = ""):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.concurrency = concurrency
         self.batch_size = batch_size
         self.on_usage = on_usage
+        self.glossary_prompt = glossary_prompt
         self._client: httpx.AsyncClient | None = None
 
     def _get_client(self) -> httpx.AsyncClient:
@@ -111,6 +113,8 @@ class LLMClient:
             "model": self.model,
             "messages": [
                 {"role": "system", "content":
+                    # 术语表注入：glossary_prompt 非空时拼到 system 提示词最前（任务 13）
+                    (self.glossary_prompt + "\n" if self.glossary_prompt else "") +
                     f"把 Minecraft 游戏文本翻译成 {target_lang}。每行以 [i数字] 开头，"
                     f"输出保持 [i数字] 前缀和 %%MC_数字%% 占位符原样，只输出译文，不要解释。"},
                 {"role": "user", "content": prompt},
@@ -151,6 +155,8 @@ class LLMClient:
             "model": self.model,
             "messages": [
                 {"role": "system", "content":
+                    # 术语表注入：glossary_prompt 非空时拼到 system 提示词最前（任务 13）
+                    (self.glossary_prompt + "\n" if self.glossary_prompt else "") +
                     f"把 Minecraft 游戏文本翻译成 {target_lang}。保留 %%MC_数字%% 占位符原样，只输出译文。"},
                 {"role": "user", "content": masked},
             ],

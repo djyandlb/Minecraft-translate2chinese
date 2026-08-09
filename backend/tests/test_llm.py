@@ -92,3 +92,22 @@ async def test_full_failure_returns_original():
     out = await client.translate_batch(["hello world", "good day"], "zh_cn")
     assert out == ["hello world", "good day"]
     await client._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_glossary_prompt_injected():
+    # 术语表注入（任务 13）：glossary_prompt 非空时拼到 system 提示词最前
+    captured = {}
+
+    def handler(request):
+        captured["system"] = json.loads(request.content)["messages"][0]["content"]
+        return Response(200, json={"choices": [{"message": {"content": "[i0] 铁锭"}}]})
+
+    client = LLMClient("https://x", "k", "m",
+                       glossary_prompt="术语表（翻译必须遵守）：\niron_ingot => 铁锭")
+    client._client = AsyncClient(transport=MockTransport(handler))
+    await client.translate_batch(["iron ingot"], "zh_cn")
+    assert captured["system"].startswith("术语表（翻译必须遵守）：")
+    assert "iron_ingot => 铁锭" in captured["system"]
+    assert "把 Minecraft" in captured["system"]
+    await client._client.aclose()
