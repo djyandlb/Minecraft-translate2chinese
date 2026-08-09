@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from httpx import AsyncClient, MockTransport, Response
 from app.translate.llm import LLMClient, build_tagged_texts, parse_tagged, clean_translation
@@ -55,4 +57,38 @@ async def test_http_failure_falls_back_to_original():
     client = _client_with(handler)
     out = await client.translate_batch(["hello world"], "zh_cn")
     assert out == ["hello world"]   # 请求失败 → 回原文
+    await client._client.aclose()
+
+@pytest.mark.asyncio
+async def test_downgrade_half_split_retries():
+    # 首次请求 500 → 触发对半切 → 逐条重试成功
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return Response(500)
+        # 对半切后子块仍走 _request_chunk 拼 prompt（形如 "[i0] hello"），
+        # 需按内容识别子块并返回带 [iN] 前缀的输出才能被 parse_tagged 解析
+        content = json.loads(request.content)["messages"][-1]["content"]
+        if "hello" in content:
+            return Response(200, json={"choices": [{"message": {"content": "[i0] 你好"}}]})
+        return Response(200, json={"choices": [{"message": {"content": "[i0] 再见"}}]})
+
+    client = _client_with(handler)
+    out = await client.translate_batch(["hello", "world"], "zh_cn")
+    assert out == ["你好", "再见"]
+    assert calls["n"] >= 2   # 至少发生了降级重试
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_full_failure_returns_original():
+    # 全链失败 → 全部回原文
+    def handler(request):
+        return Response(500)
+
+    client = _client_with(handler)
+    out = await client.translate_batch(["hello world", "good day"], "zh_cn")
+    assert out == ["hello world", "good day"]
     await client._client.aclose()

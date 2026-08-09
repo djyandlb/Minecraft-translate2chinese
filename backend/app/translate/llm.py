@@ -128,6 +128,7 @@ class LLMClient:
         except Exception:
             out = None
         if out is not None:
+            # 模型漏标的条目保持原文，不触发子块降级（保守行为：宁可保留原文不重复调模型）
             parsed = parse_tagged(out)
             for n, (i, _) in enumerate(todo):
                 if n in parsed:
