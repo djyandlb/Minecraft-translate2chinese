@@ -6,20 +6,25 @@ from pathlib import Path
 _LANG_RE = re.compile(r"^assets/([^/]+)/lang/([a-z0-9_]+)\.(json|lang)$")
 
 
+def lang_files_from_namelist(names: list[str]) -> list[dict]:
+    """从 zip namelist 提取语言文件条目（纯函数，供重复扫描复用，避免二次开 zip）。"""
+    result: list[dict] = []
+    for name in names:
+        m = _LANG_RE.match(name)
+        if m:
+            result.append({
+                "path": name,
+                "modid": m.group(1),
+                "lang": m.group(2),
+                "format": m.group(3),
+            })
+    return result
+
+
 def list_jar_lang_files(jar_path: Path) -> list[dict]:
     """枚举 jar 内所有语言文件条目，每条含 path/modid/lang/format。"""
-    result: list[dict] = []
     with zipfile.ZipFile(jar_path) as zf:
-        for name in zf.namelist():
-            m = _LANG_RE.match(name)
-            if m:
-                result.append({
-                    "path": name,
-                    "modid": m.group(1),
-                    "lang": m.group(2),
-                    "format": m.group(3),
-                })
-    return result
+        return lang_files_from_namelist(zf.namelist())
 
 
 def extract_jar_to(jar_path: Path, out_dir: Path) -> None:

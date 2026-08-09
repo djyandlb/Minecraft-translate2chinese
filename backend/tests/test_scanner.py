@@ -51,3 +51,23 @@ def test_scan_jar_json_with_comments(tmp_path: Path):
     scans = scan_jar(jar, "en_us", "zh_cn")
     assert len(scans) == 1
     assert scans[0].source_entries == {"a": "One", "b": "Two"}
+
+
+def test_scan_modpack_skips_broken_jar(tmp_path: Path):
+    # 坏 jar（纯文本非 zip）+ 好 jar → 只扫出好的，不抛异常
+    mods = tmp_path / "mods"; mods.mkdir()
+    (mods / "broken.jar").write_text("这不是一个 zip 文件", encoding="utf-8")
+    _jar(mods / "good.jar", "good", {"k": "v"}, {})
+    scans = scan_modpack(tmp_path, "en_us", "zh_cn")
+    assert [s.modid for s in scans] == ["good"]
+
+
+def test_scan_modpack_skips_corrupt_lang_json(tmp_path: Path):
+    # jar 本身合法 zip，但语言文件 json 语法损坏 → 跳过该 jar
+    mods = tmp_path / "mods"; mods.mkdir()
+    bad = mods / "bad_json.jar"
+    with zipfile.ZipFile(bad, "w") as zf:
+        zf.writestr("assets/bad_json/lang/en_us.json", "{ 这不是合法 json")
+    _jar(mods / "good.jar", "good", {"k": "v"}, {})
+    scans = scan_modpack(tmp_path, "en_us", "zh_cn")
+    assert [s.modid for s in scans] == ["good"]

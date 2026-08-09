@@ -1299,7 +1299,7 @@ def test_scan_modpack_scope(tmp_path: Path):
 ```python
 # MC 版本 → 资源包格式版本（pack_format）已知映射
 _KNOWN: dict[str, int] = {
-    "1.12.2": 4, "1.13.2": 4, "1.14.4": 4, "1.15.2": 5,
+    "1.12.2": 3, "1.13.2": 4, "1.14.4": 4, "1.15.2": 5,
     "1.16.5": 6, "1.17.1": 7, "1.18.2": 9, "1.19.2": 12,
     "1.20.1": 15, "1.20.4": 22, "1.21": 34, "1.21.4": 46,
     "1.21.5": 55,
@@ -1320,7 +1320,7 @@ from app.version import version_to_pack_format, pack_format_to_lang_ext
 
 def test_known_versions():
     assert version_to_pack_format("1.20.1") == 15
-    assert version_to_pack_format("1.12.2") == 4
+    assert version_to_pack_format("1.12.2") == 3
 
 def test_lang_ext_boundary():
     assert pack_format_to_lang_ext(3) == "lang"   # 1.12
