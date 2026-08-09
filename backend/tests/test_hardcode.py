@@ -2,6 +2,7 @@
 """M5-1 硬编码字节码扫描与替换核心的测试（真实 javac 编译验证）。"""
 
 import json
+import re
 import shutil
 import subprocess
 import zipfile
@@ -442,6 +443,26 @@ def _llm_engine_with(handler) -> "LLMClient":
     return engine
 
 
+def _is_ai_judge_payload(content: str) -> bool:
+    """区分请求消息尾内容：ai_judge 的候选 JSON vs translate_batch 的 [iN] 文本。
+
+    unresolved 默认翻译会走 engine.translate_batch（[iN] 标签行），mock 需据此分流。
+    用前缀判断而非 json.loads：ai_judge 的 user content 以 JSON 数组 `[{` 开头
+    （可能附带「已确认术语」说明文本），translate_batch 以 `[i数字]` 标签行开头。
+    """
+    return content.lstrip().startswith("[{")
+
+
+def _translated_tagged(content: str) -> str:
+    """把 translate_batch 的 [iN] 输入拼成 [iN] 译+原文 的输出（逐行对应）。"""
+    lines = []
+    for line in content.splitlines():
+        m = re.match(r"\[i(\d+)\]\s*(.*)", line)
+        if m:
+            lines.append(f"[i{m.group(1)}] 译{m.group(2)}")
+    return "\n".join(lines)
+
+
 # ---------- P0-2：ai_judge 三分类（translate / exclude / unresolved） ----------
 
 @pytest.mark.asyncio
@@ -451,7 +472,7 @@ async def test_ai_judge_translate():
         return Response(200, json={"choices": [{"message": {"content": json.dumps(
             {"decisions": [
                 {"text": "Hello World", "action": "translate", "translation": "你好世界"},
-                {"text": "stone", "action": "exclude", "reason": "not_user_visible"},
+                {"text": "stone", "action": "exclude", "reason": "developer_log"},
             ]})}}]})
 
     engine = _llm_engine_with(handler)
@@ -488,6 +509,77 @@ async def test_ai_judge_exclude_developer_log_reason():
 
 
 @pytest.mark.asyncio
+async def test_ai_judge_unresolved_missing_default_translated():
+    """宽松策略：批量 LLM 漏返回部分候选 → 重试仍漏 → 默认翻译并入 translations（不丢弃）。"""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        payload = json.loads(request.content)
+        content = payload["messages"][-1]["content"]
+        if _is_ai_judge_payload(content):
+            batch = json.loads(content)
+            if len(batch) == 1:
+                # 单条重试：返回不匹配的 → unresolved（让重试失败，走默认翻译兜底）
+                return Response(200, json={"choices": [{"message": {"content": json.dumps(
+                    {"decisions": [
+                        {"text": "other", "action": "translate", "translation": "x"}
+                    ]})}}]})
+            # 批量：只返回第一个候选 translate，其余漏返回 → unresolved
+            first = batch[0]["text"]
+            return Response(200, json={"choices": [{"message": {"content": json.dumps(
+                {"decisions": [
+                    {"text": first, "action": "translate", "translation": "译" + first}
+                ]})}}]})
+        # translate_batch 兜底
+        return Response(200, json={"choices": [{"message": {"content": _translated_tagged(content)}}]})
+
+    engine = _llm_engine_with(handler)
+    result = await ai_judge_translate(engine, [
+        {"text": "Hello World", "context": []},
+        {"text": "Good day", "context": []},
+    ], "zh_cn")
+    # Hello World 由 ai_judge 直接翻译；Good day 漏返回 → 重试仍漏 → 默认翻译兜底
+    assert result.translations == {"Hello World": "译Hello World", "Good day": "译Good day"}
+    assert result.unresolved == []
+    assert calls["n"] == 4   # 1 批量 + 2 单条重试 + 1 默认翻译兜底
+    await engine._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_judge_exclude_reason_tightened():
+    """exclude 收紧：reason=not_user_visible（软排除，不确定）→ 默认翻译；reason=developer_log（明确技术类）→ 排除。"""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        payload = json.loads(request.content)
+        content = payload["messages"][-1]["content"]
+        if _is_ai_judge_payload(content):
+            batch = json.loads(content)
+            decisions = []
+            for b in batch:
+                if b["text"] == "Sky fog distance":
+                    decisions.append({"text": b["text"], "action": "exclude", "reason": "not_user_visible"})
+                else:
+                    decisions.append({"text": b["text"], "action": "exclude", "reason": "developer_log"})
+            return Response(200, json={"choices": [{"message": {"content": json.dumps({"decisions": decisions})}}]})
+        # translate_batch 兜底
+        return Response(200, json={"choices": [{"message": {"content": _translated_tagged(content)}}]})
+
+    engine = _llm_engine_with(handler)
+    result = await ai_judge_translate(engine, [
+        {"text": "Sky fog distance", "context": []},
+        {"text": "Failed to load config", "context": []},
+    ], "zh_cn")
+    assert result.excluded == ["Failed to load config"]        # developer_log 明确技术类 → 排除
+    assert result.translations.get("Sky fog distance") == "译Sky fog distance"  # not_user_visible → 默认翻译
+    assert result.unresolved == []
+    assert calls["n"] == 4   # 1 批量 + 2 单条重试 + 1 默认翻译兜底
+    await engine._client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_ai_judge_unresolved_retry_single():
     """P0-2：LLM 批量只返回部分候选 → 未返回的进 unresolved 并单独重试，重试成功并入。"""
     calls = {"n": 0}
@@ -515,59 +607,77 @@ async def test_ai_judge_unresolved_retry_single():
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_unresolved_kept_after_retry():
-    """P0-2：unresolved 单条重试最多 2 次仍未解决 → 保留在 unresolved，不静默漏判。"""
+async def test_ai_judge_unresolved_default_translated():
+    """宽松策略：unresolved 单条重试最多 2 次仍未解决 → 默认翻译并入 translations，不丢弃。"""
     calls = {"n": 0}
 
     def handler(request):
         calls["n"] += 1
-        return Response(200, json={"choices": [{"message": {"content": json.dumps(
-            {"decisions": [
-                {"text": "other", "action": "translate", "translation": "x"}
-            ]})}}]})
+        payload = json.loads(request.content)
+        content = payload["messages"][-1]["content"]
+        if _is_ai_judge_payload(content):
+            # ai_judge（批量/单条重试）：一律不返回该候选 → unresolved
+            return Response(200, json={"choices": [{"message": {"content": json.dumps(
+                {"decisions": [
+                    {"text": "other", "action": "translate", "translation": "x"}
+                ]})}}]})
+        # translate_batch 兜底：逐行输出 [iN] 译文
+        return Response(200, json={"choices": [{"message": {"content": _translated_tagged(content)}}]})
 
     engine = _llm_engine_with(handler)
     result = await ai_judge_translate(engine, [{"text": "Ghost", "context": []}], "zh_cn")
-    assert result.translations == {}
-    assert result.unresolved == ["Ghost"]
-    assert calls["n"] == 3   # 1 批量 + 2 次单条重试
+    assert result.translations.get("Ghost") == "译Ghost"
+    assert result.unresolved == []
+    assert calls["n"] == 4   # 1 批量 + 2 次单条重试 + 1 默认翻译兜底
     await engine._client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_translate_invalid_json_unresolved():
-    """LLM 输出非法 JSON → 逐条降级失败 → 进 unresolved（不整批静默丢）。"""
+async def test_ai_judge_translate_invalid_json_default_translated():
+    """LLM 输出非法 JSON → 逐条降级仍 unresolved → 默认翻译兜底（不整批静默丢）。"""
     calls = {"n": 0}
 
     def handler(request):
         calls["n"] += 1
-        return Response(200, json={"choices": [{"message": {"content": "这不是 JSON"}}]})
+        payload = json.loads(request.content)
+        content = payload["messages"][-1]["content"]
+        if _is_ai_judge_payload(content):
+            return Response(200, json={"choices": [{"message": {"content": "这不是 JSON"}}]})
+        return Response(200, json={"choices": [{"message": {"content": _translated_tagged(content)}}]})
 
     engine = _llm_engine_with(handler)
     result = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
-    assert result.translations == {}
-    assert result.unresolved == ["Hello"]
-    assert calls["n"] == 4   # 1 批量 + 1 逐条降级 + 2 次 unresolved 重试
+    assert result.translations.get("Hello") == "译Hello"
+    assert result.unresolved == []
+    assert calls["n"] == 5   # 1 批量 + 1 逐条降级 + 2 次 unresolved 重试 + 1 默认翻译兜底
     await engine._client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_translate_missing_field_unresolved():
-    """LLM 输出缺失 action/translation 字段 → 该条进 unresolved，不崩。"""
+async def test_ai_judge_translate_missing_field_default_translated():
+    """LLM 输出缺失 action/translation 字段 → 该条进 unresolved → 默认翻译兜底，不崩。"""
+    calls = {"n": 0}
+
     def handler(request):
-        return Response(200, json={"choices": [{"message": {"content": json.dumps(
-            {"decisions": [
-                {"text": "Hello World"},                      # 缺 action/translation
-                {"text": "Good day", "action": "translate"},  # 缺 translation
-            ]})}}]})
+        calls["n"] += 1
+        payload = json.loads(request.content)
+        content = payload["messages"][-1]["content"]
+        if _is_ai_judge_payload(content):
+            return Response(200, json={"choices": [{"message": {"content": json.dumps(
+                {"decisions": [
+                    {"text": "Hello World"},                      # 缺 action/translation
+                    {"text": "Good day", "action": "translate"},  # 缺 translation
+                ]})}}]})
+        return Response(200, json={"choices": [{"message": {"content": _translated_tagged(content)}}]})
 
     engine = _llm_engine_with(handler)
     result = await ai_judge_translate(engine, [
         {"text": "Hello World", "context": []},
         {"text": "Good day", "context": []},
     ], "zh_cn")
-    assert result.translations == {}
-    assert set(result.unresolved) == {"Hello World", "Good day"}
+    assert result.unresolved == []
+    assert result.translations.get("Hello World") == "译Hello World"
+    assert result.translations.get("Good day") == "译Good day"
     await engine._client.aclose()
 
 
@@ -610,19 +720,23 @@ async def test_ai_judge_translate_paging_concurrent():
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_translate_null_content_unresolved():
-    """LLM 返回 content=null → 该批全进 unresolved，不抛 AttributeError（B 审查 🟡1）。"""
+async def test_ai_judge_translate_null_content_default_translated():
+    """LLM 返回 content=null → 该批全进 unresolved → 默认翻译兜底，不抛 AttributeError（B 审查 🟡1）。"""
     calls = {"n": 0}
 
     def handler(request):
         calls["n"] += 1
-        return Response(200, json={"choices": [{"message": {"content": None}}]})
+        payload = json.loads(request.content)
+        content = payload["messages"][-1]["content"]
+        if _is_ai_judge_payload(content):
+            return Response(200, json={"choices": [{"message": {"content": None}}]})
+        return Response(200, json={"choices": [{"message": {"content": _translated_tagged(content)}}]})
 
     engine = _llm_engine_with(handler)
     result = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
-    assert result.translations == {}
-    assert result.unresolved == ["Hello"]
-    assert calls["n"] == 3   # 1 批量 + 2 次单条重试
+    assert result.translations.get("Hello") == "译Hello"
+    assert result.unresolved == []
+    assert calls["n"] == 4   # 1 批量 + 2 次单条重试 + 1 默认翻译兜底
     await engine._client.aclose()
 
 
@@ -633,8 +747,12 @@ async def test_ai_judge_system_prompt_uses_target_lang():
 
     def handler(request):
         payload = json.loads(request.content)
-        seen["sys"] = payload["messages"][0]["content"]
-        return Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+        content = payload["messages"][-1]["content"]
+        if _is_ai_judge_payload(content):
+            seen["sys"] = payload["messages"][0]["content"]
+            return Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+        # translate_batch 兜底：返回译文，避免覆盖已记录的 ai_judge sys prompt
+        return Response(200, json={"choices": [{"message": {"content": _translated_tagged(content)}}]})
 
     engine = _llm_engine_with(handler)
     await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_tw")
@@ -644,13 +762,21 @@ async def test_ai_judge_system_prompt_uses_target_lang():
 
 
 def test_ai_judge_system_prompt_mix_rules():
-    """P0-2/P0-3：ai_judge system prompt 含日志排除边界 + 混排约束 + 严格 JSON。"""
+    """宽松策略：ai_judge system prompt 含配置 GUI 必须翻译 + 不确定默认翻译 + 技术类排除边界 + 混排约束 + 严格 JSON。"""
     import app.hardcode as hardcode
     s = hardcode._ai_judge_system_prompt("zh_cn")
     assert "玩家在游戏中能直接看到" in s
-    # 日志/技术串明确排除（照方块译匠）
-    assert "日志" in s and "排除" in s
+    # 配置界面 GUI 文本（设置项名/工具提示/说明/选项标签）必须翻译
+    assert "配置界面" in s and "必须翻译" in s
+    assert "设置项名" in s
+    # 不确定时默认翻译：宁可多翻，不可漏翻玩家看到的界面文本
+    assert "不确定时默认翻译" in s
+    assert "宁可多翻" in s
+    # 仅明确技术类排除（开发日志/序列化格式/本地化键）
+    assert "开发日志" in s and "排除" in s
     assert "developer_log" in s
+    assert "structural_data" in s
+    assert "localization_key" in s
     # 混排约束
     assert "中英" in s and ("混杂" in s or "混排" in s or "硬插" in s)
     # 严格 JSON 结构
@@ -664,8 +790,12 @@ async def test_ai_judge_known_translations_injected():
 
     def handler(request):
         payload = json.loads(request.content)
-        seen["user"] = payload["messages"][-1]["content"]
-        return Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+        content = payload["messages"][-1]["content"]
+        if _is_ai_judge_payload(content):
+            seen["user"] = content
+            return Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+        # translate_batch 兜底：返回译文，避免覆盖已记录的 ai_judge user prompt
+        return Response(200, json={"choices": [{"message": {"content": _translated_tagged(content)}}]})
 
     engine = _llm_engine_with(handler)
     await ai_judge_translate(engine, [{"text": "Sky fog distance", "context": []}], "zh_cn",
