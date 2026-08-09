@@ -114,6 +114,10 @@ class LLMClient:
         self.batch_size = batch_size
         self.on_usage = on_usage
         self.glossary_prompt = glossary_prompt
+        # 技术串过滤开关：默认 True（结构化 JSON/硬编码等 snake_case 标识符跳过）。
+        # 语言文件阶段由 auto_flow 临时置 False——语言文件值是可翻译文本，
+        # "Requires_Armor" 这类 snake_case 真实短语不得被 should_translate 误杀。
+        self.filter_technical = True
         self._client: httpx.AsyncClient | None = None
 
     def _get_client(self) -> httpx.AsyncClient:
@@ -129,7 +133,8 @@ class LLMClient:
         """
         results: list[str] = list(texts)
         protected = [protect(t) for t in texts]
-        todo = [(i, t) for i, (t, _) in enumerate(zip(texts, protected)) if should_translate(t)]
+        todo = [(i, t) for i, (t, _) in enumerate(zip(texts, protected))
+                if (not self.filter_technical) or should_translate(t)]
         if todo:
             client = self._get_client()
             sem = asyncio.Semaphore(self.concurrency)

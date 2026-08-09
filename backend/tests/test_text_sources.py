@@ -40,6 +40,26 @@ def test_discover_lang_properties(tmp_path):
     assert any(s.kind == "lang" and "k2" in s.entries for s in srcs)
 
 
+def test_discover_lang_uppercase_file(tmp_path):
+    # en_US.json（大写）被识别并发现：lang 统一小写后匹配 en_us
+    jar = _make_jar(tmp_path, {
+        "assets/mymod/lang/en_US.json": '{"k": "Hello"}',
+    })
+    srcs = discover_text_sources(jar)
+    assert any(s.kind == "lang" and s.source_path == "assets/mymod/lang/en_US.json"
+               and s.entries.get("k") == "Hello" for s in srcs)
+
+
+def test_discover_lang_snake_case_value(tmp_path):
+    # 语言文件值 Requires_Armor（snake_case 形态真实短语）进入 entries
+    jar = _make_jar(tmp_path, {
+        "assets/mymod/lang/en_us.json": json.dumps({"item.armor": "Requires_Armor"}),
+    })
+    srcs = discover_text_sources(jar)
+    lang = next(s for s in srcs if s.kind == "lang")
+    assert lang.entries.get("item.armor") == "Requires_Armor"
+
+
 def test_discover_lang_target_path_replaces_en_us(tmp_path):
     jar = _make_jar(tmp_path, {
         "assets/mymod/lang/en_us.json": '{"k": "Hello"}',

@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath
 
 from app.jar import lang_files_from_namelist
 from app.langfile import (
+    lang_value_ok,
     parse_json_lang,
     parse_lang,
     parse_properties,
@@ -195,8 +196,11 @@ def discover_text_sources(jar: Path) -> list[TextSource]:
                     entries = _parse_lang_entry(info["format"], raw)
                 except (UnicodeDecodeError, ValueError):
                     continue   # 单个语言文件坏编码/坏 json：跳过该文件
+                # 语言文件值宽松过滤（长度 2-200 + 含字母），不走 should_translate：
+                # "Requires_Armor" 这类 snake_case 真实短语必须放行；只滤过短/纯数字/纯符号
+                entries = {k: v for k, v in entries.items() if lang_value_ok(v)}
                 if not entries:
-                    continue   # 空语言文件无需翻译
+                    continue   # 过滤后空语言文件无需翻译
                 result.append(TextSource(
                     kind="lang",
                     modid=info["modid"],

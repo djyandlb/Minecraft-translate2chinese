@@ -5,6 +5,21 @@ from pathlib import Path
 # 去 // 与 /* */ 注释（部分 mod 语言文件含注释）。已知局限：字符串值内的 "//"（如 URL）会被截断，社区同类工具一致，可接受。
 _COMMENT_RE = re.compile(r"//.*?$|/\*.*?\*/", re.MULTILINE | re.DOTALL)
 
+# 语言文件值「含实际含义」判定：拉丁字母或汉字（纯数字/纯符号串不含，跳过）
+_LANG_VALUE_MEANING_RE = re.compile(r"[a-zA-Z一-鿿]")
+
+
+def lang_value_ok(value: str) -> bool:
+    """语言文件的值是否值得翻译：仅「长度 2-200 + 含字母/汉字」。
+
+    语言文件的值本就是可翻译文本（键才是标识符），因此不走 should_translate
+    的技术标识符规则——"Requires_Armor" 这类 snake_case 形态是真实英文短语，
+    不能被当 iron_ingot 那样的技术串滤掉。只排除过短/纯数字/纯符号值。
+    """
+    if not (2 <= len(value) <= 200):
+        return False
+    return _LANG_VALUE_MEANING_RE.search(value) is not None
+
 def parse_json_lang(text: str) -> dict[str, str]:
     """解析 JSON 语言文件，容忍 // 与 /* */ 注释。只保留字符串值条目。"""
     cleaned = _COMMENT_RE.sub("", text)

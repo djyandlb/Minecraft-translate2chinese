@@ -20,6 +20,18 @@ def test_list_lang_files(tmp_path: Path):
     assert all(f["modid"] == "demo" for f in files)
 
 
+def test_list_lang_files_uppercase_lang(tmp_path: Path):
+    # 语言文件名大小写不敏感：en_US / EN_us / En_us 均识别，lang 统一小写
+    jar = tmp_path / "upper.jar"
+    with zipfile.ZipFile(jar, "w") as zf:
+        zf.writestr("assets/demo/lang/en_US.json", '{"k": "V"}')
+        zf.writestr("assets/demo2/lang/EN_us.properties", "k=World\n")
+    files = list_jar_lang_files(jar)
+    assert {f["lang"] for f in files} == {"en_us"}
+    assert {f["format"] for f in files} == {"json", "properties"}
+    assert all(f["modid"] in ("demo", "demo2") for f in files)
+
+
 def test_pack_roundtrip(tmp_path: Path):
     jar = tmp_path / "a.jar"
     _make_jar(jar)

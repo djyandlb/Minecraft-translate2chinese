@@ -2,9 +2,11 @@ import re
 import zipfile
 from pathlib import Path
 
-# 匹配 assets/<modid>/lang/<lang>.(json|lang|properties)，modid/lang 均为小写字母数字下划线
+# 匹配 assets/<modid>/lang/<lang>.(json|lang|properties)，大小写不敏感：
+# en_US / EN_us / En_us 等语言文件一律识别（实测不少 mod 用大写语言码），
+# 提取后 lang/format 统一小写，与 source_lang（en_us 等）及格式判断对齐。
 # 扩展 properties：部分 mod（含 Java 系）语言文件用 .properties 存储
-_LANG_RE = re.compile(r"^assets/([^/]+)/lang/([a-z0-9_]+)\.(json|lang|properties)$")
+_LANG_RE = re.compile(r"^assets/([^/]+)/lang/([a-zA-Z0-9_]+)\.(json|lang|properties)$", re.IGNORECASE)
 
 
 def lang_files_from_namelist(names: list[str]) -> list[dict]:
@@ -16,8 +18,8 @@ def lang_files_from_namelist(names: list[str]) -> list[dict]:
             result.append({
                 "path": name,
                 "modid": m.group(1),
-                "lang": m.group(2),
-                "format": m.group(3),
+                "lang": m.group(2).lower(),
+                "format": m.group(3).lower(),
             })
     return result
 

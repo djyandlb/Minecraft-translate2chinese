@@ -35,13 +35,17 @@ class MachineClient:
 
     def __init__(self, provider: str = "google"):
         self.provider = provider
+        # 技术串过滤开关：默认 True（结构化 JSON/硬编码等 snake_case 标识符跳过）。
+        # 语言文件阶段由 auto_flow 临时置 False——语言文件值是可翻译文本，
+        # "Requires_Armor" 这类 snake_case 真实短语不得被 should_translate 误杀。
+        self.filter_technical = True
 
     async def translate_batch(self, texts: list[str], target_lang: str) -> list[str]:
         lang = map_lang(target_lang)
         loop = asyncio.get_running_loop()
         results: list[str] = []
         for t in texts:
-            if not should_translate(t):
+            if self.filter_technical and not should_translate(t):
                 results.append(t)
                 continue
             try:

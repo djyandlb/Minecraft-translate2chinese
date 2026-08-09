@@ -5,7 +5,7 @@ import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from app.jar import lang_files_from_namelist
-from app.langfile import parse_lang, parse_json_lang, parse_properties
+from app.langfile import lang_value_ok, parse_lang, parse_json_lang, parse_properties
 
 
 @dataclass
@@ -18,13 +18,20 @@ class ModScan:
 
 
 def _read_entries(zf: zipfile.ZipFile, path: str, fmt: str) -> dict[str, str]:
-    """从 zip 内读语言文件：json 去注释、lang/properties 按 key=value。"""
+    """从 zip 内读语言文件：json 去注释、lang/properties 按 key=value。
+
+    值过滤用宽松的 lang_value_ok（长度 2-200 + 含字母），不套 should_translate
+    的 snake_case 技术标识符规则——语言文件值是可翻译文本，键才是标识符，
+    "Requires_Armor" 这类 snake_case 形态真实短语必须放行。
+    """
     raw = zf.read(path).decode("utf-8")
     if fmt == "lang":
-        return parse_lang(raw)
-    if fmt == "properties":
-        return parse_properties(raw)
-    return parse_json_lang(raw)
+        parsed = parse_lang(raw)
+    elif fmt == "properties":
+        parsed = parse_properties(raw)
+    else:
+        parsed = parse_json_lang(raw)
+    return {k: v for k, v in parsed.items() if lang_value_ok(v)}
 
 
 def _scan_one_jar(jar: Path, source_lang: str, target_lang: str) -> list[ModScan]:

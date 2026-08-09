@@ -39,6 +39,18 @@ async def test_technical_string_unchanged():
     await client._client.aclose()
 
 @pytest.mark.asyncio
+async def test_filter_technical_off_translates_snake_case():
+    """语言文件阶段关闭技术串过滤（filter_technical=False）：
+    Requires_Armor 这类 snake_case 值进 todo 调 API，而非当技术串跳过。"""
+    def handler(request):
+        return Response(200, json={"choices": [{"message": {"content": "[i0] 需要盔甲"}}]})
+    client = _client_with(handler)
+    client.filter_technical = False
+    out = await client.translate_batch(["Requires_Armor"], "zh_cn")
+    assert out == ["需要盔甲"]
+    await client._client.aclose()
+
+@pytest.mark.asyncio
 async def test_usage_callback():
     usages = []
     def handler(request):

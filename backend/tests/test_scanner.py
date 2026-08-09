@@ -53,6 +53,28 @@ def test_scan_jar_json_with_comments(tmp_path: Path):
     assert scans[0].source_entries == {"a": "One", "b": "Two"}
 
 
+def test_scan_jar_lang_snake_case_value(tmp_path: Path):
+    # 语言文件值 snake_case 形态（Requires_Armor）是真实可翻译短语，不被技术串规则滤掉
+    jar = tmp_path / "snake.jar"
+    with zipfile.ZipFile(jar, "w") as zf:
+        zf.writestr("assets/snake/lang/en_us.json",
+                    json.dumps({"item.armor": "Requires_Armor"}))
+    scans = scan_jar(jar, "en_us", "zh_cn")
+    assert len(scans) == 1
+    assert scans[0].source_entries.get("item.armor") == "Requires_Armor"
+
+
+def test_scan_jar_lang_pure_digit_value_filtered(tmp_path: Path):
+    # 纯数字/过短的语言文件值不值得翻译：宽松过滤仅长度 2-200 + 含字母
+    jar = tmp_path / "digit.jar"
+    with zipfile.ZipFile(jar, "w") as zf:
+        zf.writestr("assets/digit/lang/en_us.json",
+                    json.dumps({"num": "123", "short": "x", "txt": "Hello"}))
+    scans = scan_jar(jar, "en_us", "zh_cn")
+    assert len(scans) == 1
+    assert scans[0].source_entries == {"txt": "Hello"}
+
+
 def test_scan_modpack_skips_broken_jar(tmp_path: Path):
     # 坏 jar（纯文本非 zip）+ 好 jar → 只扫出好的，不抛异常
     mods = tmp_path / "mods"; mods.mkdir()

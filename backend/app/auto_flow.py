@@ -21,7 +21,7 @@ from app.archive import extract_modpack, is_archive
 from app.cleanup import cleanup_task_work
 from app.config import AppConfig
 from app.detect import (_HARDCODE_MAX_BYTES, detect_input_type, detect_source_lang,
-                        infer_pack_format, needs_translation)
+                        infer_pack_format, needs_lang_value_translation, needs_translation)
 from app.diff import build_jobs
 from app.glossary import load_glossary, term_inject_prompt
 from app.hardcode import (ai_judge_translate, replace_hardcoded_strings,
@@ -227,7 +227,8 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
             while state.paused and not state.cancelled:
                 await asyncio.sleep(0.5)
 
-        async def _translate_batch_pipeline(items, translate_fn, batch_size: int = 20) -> None:
+        async def _translate_batch_pipeline(items, translate_fn, batch_size: int = 20,
+                                            skip_fn=needs_translation) -> None:
             """批量翻译流水线（语言文件 / json-lines / 兜底硬编码共用）。
 
             逐条预处理（已汉化跳过 / 记忆命中 / 简繁直转）在批外完成，只有
@@ -236,6 +237,8 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
 
             items: 可迭代对象，元素为 {"key", "text", "sink"}（sink 为写回产物字典）；
             translate_fn: async (texts: list[str]) -> list[str]，批量走引擎。
+            skip_fn: 单条「是否跳过翻译」判定，默认 needs_translation（技术串过滤）；
+            语言文件阶段传 needs_lang_value_translation（仅已汉化判断，放行 snake_case 值）。
             """
             pending: list[dict] = []          # 待引擎条目 {key, text, sink}
 
@@ -279,7 +282,7 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                     return
                 await _wait_if_paused()
                 key, text, sink = item["key"], item["text"], item["sink"]
-                if not same_script and not needs_translation(text, req.target_lang):
+                if not same_script and not skip_fn(text, req.target_lang):
                     # 已汉化（含 CJK）/ 技术串：跳过翻译，计 done，不入产物。
                     # 注意：same_script（简繁互转）时中文源文本必须保留翻译，跳过会漏转繁体。
                     state.done += 1
@@ -321,10 +324,21 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
 
         # 阶段 1：语言文件 jobs（批量收集 → 一次 translate_batch → 逐条写回，共用引擎/记忆/状态机）
         batch_size = getattr(engine, "batch_size", 20)
+        # 语言文件值是可翻译文本（键才是标识符）：关闭引擎技术串过滤 + 跳过函数只判已汉化，
+        # 让 "Requires_Armor" 这类 snake_case 真实短语不被 should_translate 误杀。
+        engine_filter_technical = getattr(engine, "filter_technical", None)
+        if engine_filter_technical is not None:
+            engine.filter_technical = False
         lang_items = ({"key": job.key, "text": job.source_text,
                        "sink": by_mod.setdefault(job.modid, {})} for job in jobs)
-        await _translate_batch_pipeline(
-            lang_items, lambda texts: engine.translate_batch(texts, req.target_lang), batch_size)
+        try:
+            await _translate_batch_pipeline(
+                lang_items, lambda texts: engine.translate_batch(texts, req.target_lang),
+                batch_size, skip_fn=needs_lang_value_translation)
+        finally:
+            # 阶段 1 结束立即恢复：阶段 2/3 的结构化 JSON / 硬编码仍走技术串过滤
+            if engine_filter_technical is not None:
+                engine.filter_technical = engine_filter_technical
 
         # 阶段 2：json/lines 全文本覆盖（批量收集 → 一次 translate_batch → 逐条写回）
         for jar, srcs in text_sources_by_jar.items():

@@ -16,8 +16,10 @@ from app.translate.common import should_translate
 # detect 阶段硬编码扫描的 jar 大小上限：超过跳过深扫记 None（轻量识别，深扫留给 A5 流式）
 _HARDCODE_MAX_BYTES = 50 * 1024 * 1024  # 50MB
 
-# 已汉化判定：目标语言为简体/繁体中文且文本含 CJK 统一表意文字块
+# 已汉化判定：目标语言为简体/繁体中文，按「中文字符占比 > 40%」判断
+# （纯中文 → 已汉化跳过；"Click here 点击" 这类英文为主混排 → 仍需翻译）
 _CJK_RE = re.compile(r"[一-鿿㐀-䶿]")
+_ZH_RATIO = 0.4
 
 
 def detect_input_type(path: Path) -> str:
@@ -69,11 +71,31 @@ def detect_source_lang(jars: list[Path], target_lang: str) -> str | None:
 
 
 def needs_translation(text: str, target_lang: str) -> bool:
-    """目标为 zh_cn/zh_tw 且文本已含 CJK → 已汉化，跳过翻译；
-    否则复用 should_translate（注意它保留 "Hello World" 这类纯 ASCII 空格串）。"""
-    if target_lang in ("zh_cn", "zh_tw") and _CJK_RE.search(text):
-        return False
+    """目标为 zh_cn/zh_tw 且中文字符占比 > 40% → 已汉化，跳过翻译；
+    否则复用 should_translate（注意它保留 "Hello World" 这类纯 ASCII 空格串）。
+
+    占比而非「含任意 CJK」：混排文本（"Click here 点击" 英文为主）若只因
+    夹带少量中文就被判已汉化会漏翻——英文主混排仍需翻译。
+    """
+    if target_lang in ("zh_cn", "zh_tw") and text:
+        zh = len(_CJK_RE.findall(text))
+        if zh / max(len(text), 1) > _ZH_RATIO:
+            return False
     return should_translate(text)
+
+
+def needs_lang_value_translation(text: str, target_lang: str) -> bool:
+    """语言文件值翻译判定：仅按中文字符占比判断已汉化，不做 should_translate 技术串过滤。
+
+    语言文件的值本就是可翻译文本（键才是标识符），"Requires_Armor" 这类 snake_case
+    真实短语必须放行；长度/纯数字已在扫描层由 lang_value_ok 宽松过滤。
+    结构化 JSON / 硬编码等技术串过滤仍走 needs_translation（should_translate）。
+    """
+    if target_lang in ("zh_cn", "zh_tw") and text:
+        zh = len(_CJK_RE.findall(text))
+        if zh / max(len(text), 1) > _ZH_RATIO:
+            return False
+    return True
 
 
 def _read_pack_format_bytes(raw: bytes) -> int | None:

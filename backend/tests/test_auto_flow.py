@@ -95,6 +95,40 @@ async def test_auto_modjar_lang_and_hardcode(tmp_path, monkeypatch):
     assert data["key.hello"] == "你好世界"
 
 
+class _SnakeEngine:
+    """假引擎：snake_case 语言文件值 Requires_Armor → 需要盔甲。"""
+
+    async def translate_batch(self, texts, target_lang):
+        return [t.replace("Requires_Armor", "需要盔甲") for t in texts]
+
+
+@pytest.mark.asyncio
+async def test_auto_lang_snake_case_value_translated(tmp_path, monkeypatch):
+    """语言文件 snake_case 值（Requires_Armor）真正被翻译：
+    阶段 1 关闭技术串过滤 + 只判已汉化，值进入引擎并写回产物。"""
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    with zipfile.ZipFile(mods / "m.jar", "w") as zf:
+        zf.writestr("assets/mymod/lang/en_us.json", json.dumps({"item.armor": "Requires_Armor"}))
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _SnakeEngine())
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
+    assert store.load(state.id).status == "done"
+    packs = list((outputs / state.id).glob("模组汉化资源包.zip"))
+    assert packs
+    with zipfile.ZipFile(packs[0]) as zf:
+        data = json.loads(zf.read("assets/mymod/lang/zh_cn.json").decode("utf-8"))
+    assert data["item.armor"] == "需要盔甲"
+
+
 @pytest.mark.asyncio
 async def test_auto_same_script_zh_cn_to_zh_tw(tmp_path, monkeypatch):
     """简繁互转场景：源中文不能被 needs_translation 误判「已汉化」跳过，必须转繁体（回归 bug 修复）。"""

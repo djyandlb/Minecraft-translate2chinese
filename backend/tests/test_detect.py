@@ -5,7 +5,8 @@ import zipfile
 import pytest
 from fastapi.testclient import TestClient
 
-from app.detect import detect_input_type, detect_source_lang, needs_translation, infer_pack_format
+from app.detect import (detect_input_type, detect_source_lang, needs_translation,
+                        needs_lang_value_translation, infer_pack_format)
 from app.main import app
 
 
@@ -67,10 +68,21 @@ def test_needs_translation():
     assert needs_translation("Hello World", "zh_cn") is True
     # 目标 zh 且含 CJK → 已汉化跳过
     assert needs_translation("你好世界", "zh_cn") is False
+    # 混排（英文为主 + 少量中文）→ 中文占比低，仍需翻译
+    assert needs_translation("Click here 点击", "zh_cn") is True
     # 技术标识符（snake_case）→ 不翻译
     assert needs_translation("iron_ingot", "zh_cn") is False
     # target 非 zh 时不做 CJK 跳过，走 should_translate
     assert needs_translation("你好", "en_us") is True
+
+
+def test_needs_lang_value_translation():
+    # 语言文件值：snake_case 真实短语（Requires_Armor）放行，不走 should_translate 技术串过滤
+    assert needs_lang_value_translation("Requires_Armor", "zh_cn") is True
+    # 纯中文（已汉化）→ 跳过
+    assert needs_lang_value_translation("你好世界", "zh_cn") is False
+    # 英文值 → 放行
+    assert needs_lang_value_translation("Hello World", "zh_cn") is True
 
 
 def test_infer_pack_format(tmp_path):
