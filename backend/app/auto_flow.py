@@ -18,6 +18,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 from app.archive import extract_modpack, is_archive
+from app.audit import audit_translation
 from app.cleanup import cleanup_task_work
 from app.config import AppConfig
 from app.detect import (_HARDCODE_MAX_BYTES, detect_input_type, detect_source_lang,
@@ -339,6 +340,21 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
             # 阶段 1 结束立即恢复：阶段 2/3 的结构化 JSON / 硬编码仍走技术串过滤
             if engine_filter_technical is not None:
                 engine.filter_technical = engine_filter_technical
+
+        # 阶段 1 审计：官方简中术语 + 占位符一致性（errors 计 failed，warnings 进 progress）
+        if by_mod:
+            source_by_mod: dict[str, dict[str, str]] = {}
+            for job in jobs:
+                source_by_mod.setdefault(job.modid, {})[job.key] = job.source_text
+            audit_errors, audit_warnings = audit_translation(by_mod, req.target_lang, source_by_mod)
+            if audit_errors:
+                # 质量错误计数进 failed，前端醒目提示
+                state.failed += len(audit_errors)
+                state.progress.append({"status": "warn",
+                                       "error": f"术语审计 {len(audit_errors)} 条不合规"
+                                                f"（官方术语/占位符/键名语义，请在校对台确认）"})
+            for w in audit_warnings:
+                state.progress.append({"status": "warn", "key": w["key"], "error": w["message"]})
 
         # 阶段 2：json/lines 全文本覆盖（批量收集 → 一次 translate_batch → 逐条写回）
         for jar, srcs in text_sources_by_jar.items():
