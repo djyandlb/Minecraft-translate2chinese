@@ -93,3 +93,6 @@ export const uploadGlossary = (path) => req('/glossary', { method: 'POST', body:
 // 测试连接：body 可带当前表单的 engine / llm {base_url, model} / api_key（api_key 仅本次测试用，后端不落盘）
 // 返回 { ok: bool, message: string }，后端绝不回显 key
 export const testConnection = (body = {}) => req('/test-connection', { method: 'POST', body: JSON.stringify(body) })
+
+// 桌面版标记：desktop.py 起服务时 /api/desktop 返回 {desktop:true}（前端下载等据此走桌面路径）
+export const getDesktop = () => req('/desktop')

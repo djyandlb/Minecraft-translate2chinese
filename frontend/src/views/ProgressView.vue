@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { cancelTask, downloadUrl, getTask, pauseTask } from '../api'
+import { cancelTask, downloadUrl, getDesktop, getTask, pauseTask } from '../api'
 
 // props：taskId（App 持有的当前运行任务）+ jobs（共享任务队列，已完成汇总从这里取）
 const props = defineProps({
@@ -72,11 +72,16 @@ async function doCancel() {
     refresh()
   } catch (e) { error.value = e.message }
 }
-// 桌面版（pywebview）检测：存在 window.pywebview → 下载走 js_api.save_output 弹系统保存框直接写盘
-const isDesktop = typeof window !== 'undefined' && !!window.pywebview
+// 桌面版检测：优先后端 /api/desktop 标记（desktop.py 设 MC_DESKTOP=1），不依赖 window.pywebview 存在性
+const isDesktop = ref(false)
 
 // 桌面版保存：后端解析产物文件名 → 弹「保存」对话框 → 从 OUTPUTS_DIR 复制到用户选的位置
 async function saveToDisk(taskId) {
+  // pywebview js_api 探针：存在才弹系统保存框；不存在（注入失败）兜底 window.open 浏览器下载
+  if (!window.pywebview?.api?.save_output) {
+    window.open(downloadUrl(taskId), '_blank')
+    return
+  }
   try {
     const r = await window.pywebview.api.save_output(taskId)
     if (!r.ok) error.value = r.error || '保存失败'
@@ -86,13 +91,13 @@ async function saveToDisk(taskId) {
 }
 function doDownload() {
   // 分流：桌面版弹保存框直接存（不再跳浏览器）；浏览器版保持 window.open 走 /api/download
-  if (isDesktop) saveToDisk(props.taskId)
+  if (isDesktop.value) saveToDisk(props.taskId)
   else window.open(downloadUrl(props.taskId), '_blank')
 }
 // 汇总项下载：与当前任务同规则分流（桌面版 save_output / 浏览器 window.open）
 function downloadJob(taskId) {
   if (!taskId) return
-  if (isDesktop) saveToDisk(taskId)
+  if (isDesktop.value) saveToDisk(taskId)
   else window.open(downloadUrl(taskId), '_blank')
 }
 
@@ -108,7 +113,12 @@ watch(() => props.taskId, (newId) => {
   }
 })
 
-onMounted(() => { refresh(); startPolling() })
+onMounted(async () => {
+  // 桌面版标记：/api/desktop 返回 desktop=true（desktop.py 设环境变量），前端据此走桌面下载
+  try { isDesktop.value = (await getDesktop()).desktop } catch { isDesktop.value = false }
+  refresh()
+  startPolling()
+})
 onUnmounted(stopPolling)
 </script>
 

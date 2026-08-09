@@ -171,6 +171,8 @@ class _JsApi:
 
 def main() -> None:
     """启动后台 API 服务 + 桌面窗口。"""
+    # 标记桌面壳：/api/desktop 据此返回 true（前端下载等走桌面路径，不依赖 window.pywebview 检测）
+    os.environ["MC_DESKTOP"] = "1"
     logger.info("桌面壳启动，端口 %s", (port := _free_port()))
     threading.Thread(target=_run_server, args=(port,), daemon=True).start()
     import webview  # 延迟导入：未装 pywebview 时不影响其余代码
