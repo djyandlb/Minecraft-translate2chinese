@@ -8,6 +8,8 @@ import uuid
 import zipfile
 from pathlib import Path
 
+import httpx  # /api/test-connection 连接检测用（任务 O1）
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
@@ -82,6 +84,63 @@ def set_key(payload: dict):
     import keyring
     keyring.set_password(AppConfig(CONFIG_PATH).get("api_key_ref", "mc-translator"), "api_key", api_key)
     return {"ok": True}
+
+
+def _read_api_key(cfg: AppConfig) -> str:
+    """从系统 keyring 读 api_key（复用 create_engine 前的取 key 逻辑）；读不到返回空串。"""
+    try:
+        import keyring
+        return keyring.get_password(cfg.get("api_key_ref", "mc-translator"), "api_key") or ""
+    except Exception:
+        return ""
+
+
+@app.post("/api/test-connection")
+def test_connection(payload: dict = None):
+    """用当前配置验证翻译引擎连通性（任务 O1）。
+    - LLM：httpx 发最小 chat 请求（1 token，10s 超时）；
+    - machine：deep_translator 翻译一个词验证 Google 通道可达。
+    只返回 {"ok": bool, "message": str}，绝不泄露 api_key 与请求细节。"""
+    payload = payload or {}
+    cfg = AppConfig(CONFIG_PATH)
+    engine = payload.get("engine") or cfg.get("engine", "llm")
+
+    # 机翻分支：免费 Google 通道翻译一个词
+    if engine != "llm":
+        import deep_translator
+        try:
+            deep_translator.GoogleTranslator(source="auto", target="zh-CN").translate("test")
+        except Exception:
+            return {"ok": False, "message": "机翻服务不可用（可能需要网络代理）"}
+        return {"ok": True, "message": "连接成功"}
+
+    # LLM 分支：复用 create_engine 的厂商智能默认 + config 覆盖 + keyring 取 key
+    from app.translate.providers import smart_defaults
+    provider = payload.get("provider") or cfg.get("provider", "DeepSeek")
+    d = smart_defaults(provider)
+    saved_llm = cfg.get("llm", {}) or {}
+    override_llm = payload.get("llm", {}) or {}
+    base_url = (override_llm.get("base_url") or saved_llm.get("base_url") or d["base_url"] or "").strip()
+    model = (override_llm.get("model") or saved_llm.get("model") or d["model"] or "").strip()
+    api_key = (payload.get("api_key") or "").strip() or _read_api_key(cfg)
+    if not api_key:
+        return {"ok": False, "message": "尚未配置 API Key"}
+    if not base_url or not model:
+        return {"ok": False, "message": "base_url/model 未配置"}
+    try:
+        resp = httpx.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
+            timeout=10,
+        )
+    except Exception:
+        return {"ok": False, "message": "无法连接服务器（网络/地址错误）"}
+    if resp.status_code == 200:
+        return {"ok": True, "message": "连接成功"}
+    if resp.status_code in (401, 403):
+        return {"ok": False, "message": "API Key 无效或无权限"}
+    return {"ok": False, "message": f"HTTP {resp.status_code}"}
 
 
 @app.post("/api/detect")

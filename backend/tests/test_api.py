@@ -156,3 +156,58 @@ def test_hardcode_translate_invalid(tmp_path):
     # 非 .jar 文件 → 400（与 scan 端点对称校验，避免误选目录白白启动必失败任务）
     r = client.post("/api/hardcode-translate", json={"path": str(tmp_path / "notajar.txt")})
     assert r.status_code == 400
+
+
+# —— 任务 O1：/api/test-connection 连接检测 ——
+def test_test_connection_llm_bad_key(tmp_path, monkeypatch):
+    # LLM 分支：httpx.post 模拟 401 → ok=False，message 不含 api_key
+    import app.main as main
+    import types
+    (tmp_path / "config.json").write_text(
+        '{"engine": "llm", "provider": "DeepSeek", "llm": {"base_url": "https://x", "model": "m"}}',
+        encoding="utf-8")
+    monkeypatch.setattr(main, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(main, "_read_api_key", lambda cfg: "sk-secret")
+    monkeypatch.setattr(main.httpx, "post",
+                        lambda *a, **k: types.SimpleNamespace(status_code=401))
+    r = client.post("/api/test-connection", json={})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "API Key 无效" in body["message"]
+    assert "sk-secret" not in str(body)
+
+
+def test_test_connection_llm_ok(tmp_path, monkeypatch):
+    # LLM 分支：httpx.post 模拟 200 → ok=True，响应不含 api_key
+    import app.main as main
+    import types
+    (tmp_path / "config.json").write_text(
+        '{"engine": "llm", "provider": "DeepSeek", "llm": {"base_url": "https://x", "model": "m"}}',
+        encoding="utf-8")
+    monkeypatch.setattr(main, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(main, "_read_api_key", lambda cfg: "sk-secret")
+    monkeypatch.setattr(main.httpx, "post",
+                        lambda *a, **k: types.SimpleNamespace(status_code=200))
+    r = client.post("/api/test-connection", json={})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert "sk-secret" not in str(r.json())
+
+
+def test_test_connection_machine_down(tmp_path, monkeypatch):
+    # 机翻分支：deep_translator 抛异常 → ok=False，提示机翻服务不可用（不真发外网）
+    import app.main as main
+    (tmp_path / "config.json").write_text(
+        '{"engine": "machine", "machine": {"provider": "google"}}', encoding="utf-8")
+    monkeypatch.setattr(main, "CONFIG_PATH", tmp_path / "config.json")
+    # 防御：machine 分支不应触发任何 httpx 请求
+    monkeypatch.setattr(main.httpx, "post",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应发请求")))
+
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+    monkeypatch.setattr("deep_translator.GoogleTranslator", boom)
+    r = client.post("/api/test-connection", json={})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False and "机翻服务不可用" in body["message"]

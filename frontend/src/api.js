@@ -82,3 +82,7 @@ export const browse = (path = '') => {
 
 // 术语表：body { path }，返回 { loaded }
 export const uploadGlossary = (path) => req('/glossary', { method: 'POST', body: JSON.stringify({ path }) })
+
+// 测试连接：body 可带当前表单的 engine / llm {base_url, model} / api_key（api_key 仅本次测试用，后端不落盘）
+// 返回 { ok: bool, message: string }，后端绝不回显 key
+export const testConnection = (body = {}) => req('/test-connection', { method: 'POST', body: JSON.stringify(body) })

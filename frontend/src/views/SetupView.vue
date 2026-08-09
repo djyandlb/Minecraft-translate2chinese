@@ -1,6 +1,6 @@
 <script setup>
 import { nextTick, onMounted, ref, watch } from 'vue'
-import { getConfig, saveConfig, saveKey } from '../api'
+import { getConfig, saveConfig, saveKey, testConnection } from '../api'
 
 // props：onDone(配置对象) / onNext() 由 App 注入，走完一步 → next()
 const props = defineProps({ onDone: Function, onNext: Function })
@@ -33,6 +33,30 @@ const targetLang = ref('zh_cn')
 const saving = ref(false)
 const error = ref('')
 const tip = ref('')
+// 测试连接状态：testing 进行中 / testResult 结果文本 / testOk 成功与否
+const testing = ref(false)
+const testResult = ref('')
+const testOk = ref(null)
+
+async function runTest(which) {
+  testing.value = true
+  testResult.value = ''
+  testOk.value = null
+  try {
+    // 传当前表单值（base_url/model/api_key），后端仅本次测试使用，不落盘
+    const body = which === 'llm'
+      ? { engine: 'llm', llm: { base_url: baseUrl.value.trim(), model: model.value.trim() }, api_key: apiKey.value || undefined }
+      : { engine: 'machine' }
+    const r = await testConnection(body)
+    testOk.value = !!r.ok
+    testResult.value = r.message || ''
+  } catch (e) {
+    testOk.value = false
+    testResult.value = e.message
+  } finally {
+    testing.value = false
+  }
+}
 
 // 回填配置期间为 true：applyProvider 只在用户手动切换厂商下拉时覆盖 base_url/model，
 // 避免 onMounted 回填用户保存过的自定义值时被厂商预置覆盖
@@ -123,6 +147,14 @@ async function saveAndNext() {
         <input type="password" v-model="apiKey" placeholder="sk-..." autocomplete="off" />
         <small class="sub">经后端写入本机系统凭据库（keyring），不落配置文件</small>
       </div>
+      <div class="field test-row">
+        <button class="btn" :disabled="testing" @click="runTest('llm')">
+          {{ testing ? '测试中…' : '测试连接' }}
+        </button>
+        <span v-if="testResult" class="test-result" :class="testOk ? 'ok' : 'fail'">
+          {{ testOk ? '✓ 连接成功' : '✗ ' + testResult }}
+        </span>
+      </div>
     </template>
 
     <!-- 在线机翻区 -->
@@ -130,6 +162,14 @@ async function saveAndNext() {
       <div class="field">
         <label>翻译方式</label>
         <div class="tip-box">使用 Google 免费翻译（免 Key）</div>
+      </div>
+      <div class="field test-row">
+        <button class="btn" :disabled="testing" @click="runTest('machine')">
+          {{ testing ? '测试中…' : '测试连接' }}
+        </button>
+        <span v-if="testResult" class="test-result" :class="testOk ? 'ok' : 'fail'">
+          {{ testOk ? '✓ 连接成功' : '✗ ' + testResult }}
+        </span>
       </div>
     </template>
 
@@ -151,3 +191,11 @@ async function saveAndNext() {
     </div>
   </section>
 </template>
+
+<style scoped>
+/* 测试连接：按钮 + 结果横排，结果绿=成功 / 红=失败 */
+.test-row { display: flex; align-items: center; gap: 12px; }
+.test-result { font-size: 13px; }
+.test-result.ok { color: var(--accent); }
+.test-result.fail { color: var(--danger); white-space: pre-wrap; }
+</style>

@@ -1,5 +1,6 @@
 <script setup>
-import { ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
+import { getConfig } from './api'
 import SetupView from './views/SetupView.vue'
 import ScanView from './views/ScanView.vue'
 import ProgressView from './views/ProgressView.vue'
@@ -9,6 +10,25 @@ const current = ref(0)
 const taskId = ref('')
 // 配置收敛：源语言/版本由后端自动识别，前端只保留目标语言
 const config = ref({ target_lang: 'zh_cn' })
+
+// 后端连接状态：checking(检测中…) / ok(已连接) / fail(未连接)
+const backendStatus = ref('checking')
+let backendTimer = null
+
+async function pingBackend() {
+  try {
+    await getConfig()
+    backendStatus.value = 'ok'
+  } catch (e) {
+    backendStatus.value = 'fail'
+  }
+}
+
+onMounted(() => {
+  pingBackend()                       // 挂载即 ping 一次
+  backendTimer = setInterval(pingBackend, 30000)   // 每 30 秒复查
+})
+onUnmounted(() => clearInterval(backendTimer))      // 页面卸载清定时器
 
 const steps = [
   { title: '配置', desc: '引擎与目标语言' },
@@ -27,6 +47,10 @@ function onTranslate(id) { taskId.value = id; next() }
     <aside class="sidebar">
       <h1 class="brand">MC 自动翻译器</h1>
       <p class="slogan">资源包一键汉化</p>
+      <div class="conn" :class="backendStatus">
+        <span class="dot"></span>
+        <span>{{ backendStatus === 'ok' ? '已连接' : backendStatus === 'fail' ? '未连接' : '检测中…' }}</span>
+      </div>
       <nav class="steps">
         <button v-for="(s, i) in steps" :key="i" class="step"
                 :class="{ active: current === i, done: i < current }" @click="current = i">
@@ -59,7 +83,15 @@ function onTranslate(id) { taskId.value = id; next() }
   flex-direction: column;
 }
 .brand { font-size: 18px; margin: 0 0 2px; color: var(--accent); }
-.slogan { color: var(--text-dim); font-size: 12px; margin: 0 0 28px; }
+.slogan { color: var(--text-dim); font-size: 12px; margin: 0 0 10px; }
+
+/* 后端连接状态指示：绿=已连接 / 红=未连接 / 灰=检测中 */
+.conn { display: flex; align-items: center; gap: 8px; margin: 0 0 22px; font-size: 12px; color: var(--text-dim); }
+.conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); flex-shrink: 0; }
+.conn.ok { color: var(--accent); }
+.conn.ok .dot { background: var(--accent); }
+.conn.fail { color: var(--danger); }
+.conn.fail .dot { background: var(--danger); }
 
 .steps { display: flex; flex-direction: column; gap: 8px; flex: 1; }
 .step {
