@@ -22,7 +22,6 @@ const LANGUAGES = [
   { code: 'fr_fr', label: '法文' },
   { code: 'de_de', label: '德文' },
 ]
-const MC_VERSIONS = ['1.12.2', '1.16.5', '1.18.2', '1.19.2', '1.20.1', '1.21']
 const API_KEY_STORE = 'mc_translator_api_key'
 
 const engine = ref('llm')            // llm | machine，互斥
@@ -30,9 +29,7 @@ const provider = ref('DeepSeek')
 const baseUrl = ref('')
 const model = ref('')
 const apiKey = ref(localStorage.getItem(API_KEY_STORE) || '')
-const sourceLang = ref('en_us')
 const targetLang = ref('zh_cn')
-const mcVersion = ref('1.20.1')
 const saving = ref(false)
 const error = ref('')
 const tip = ref('')
@@ -53,9 +50,7 @@ onMounted(async () => {
     const cfg = await getConfig()
     if (cfg.engine) engine.value = cfg.engine
     if (cfg.provider && PROVIDERS[cfg.provider]) provider.value = cfg.provider
-    if (cfg.source_lang) sourceLang.value = cfg.source_lang
     if (cfg.target_lang) targetLang.value = cfg.target_lang
-    if (cfg.mc_version) mcVersion.value = cfg.mc_version
     if (cfg.llm) {
       baseUrl.value = cfg.llm.base_url || ''
       model.value = cfg.llm.model || ''
@@ -80,9 +75,7 @@ async function saveAndNext() {
     const body = {
       engine: engine.value,
       provider: provider.value,
-      source_lang: sourceLang.value,
       target_lang: targetLang.value,
-      mc_version: mcVersion.value,
       llm: { base_url: baseUrl.value.trim(), model: model.value.trim() },
     }
     await saveConfig(body)
@@ -99,7 +92,7 @@ async function saveAndNext() {
 <template>
   <section class="panel">
     <h2>① 配置</h2>
-    <p class="hint">选择翻译引擎与语言设置</p>
+    <p class="hint">选择翻译引擎与目标语言（源语言自动识别）</p>
 
     <div class="field">
       <label>翻译引擎</label>
@@ -140,27 +133,12 @@ async function saveAndNext() {
       </div>
     </template>
 
-    <div class="field-row">
-      <div class="field">
-        <label>源语言</label>
-        <select v-model="sourceLang">
-          <option v-for="l in LANGUAGES" :key="l.code" :value="l.code">{{ l.label }}</option>
-        </select>
-      </div>
-      <div class="field">
-        <label>目标语言</label>
-        <select v-model="targetLang">
-          <option v-for="l in LANGUAGES" :key="l.code" :value="l.code">{{ l.label }}</option>
-        </select>
-      </div>
-    </div>
-
     <div class="field">
-      <label>MC 版本</label>
-      <select v-model="mcVersion">
-        <option v-for="v in MC_VERSIONS" :key="v" :value="v">{{ v }}</option>
+      <label>目标语言</label>
+      <select v-model="targetLang">
+        <option v-for="l in LANGUAGES" :key="l.code" :value="l.code">{{ l.label }}</option>
       </select>
-      <small class="sub">资源包格式（pack_format）由后端按版本默认处理</small>
+      <small class="sub">源语言无需选择，识别步骤会自动判断</small>
     </div>
 
     <p v-if="tip" class="tip">{{ tip }}</p>

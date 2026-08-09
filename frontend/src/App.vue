@@ -4,15 +4,16 @@ import SetupView from './views/SetupView.vue'
 import ScanView from './views/ScanView.vue'
 import ProgressView from './views/ProgressView.vue'
 
-// 三步向导：0 配置 / 1 扫描 / 2 翻译
+// 三步向导：0 配置 / 1 汉化 / 2 进度
 const current = ref(0)
 const taskId = ref('')
-const config = ref({ source_lang: 'en_us', target_lang: 'zh_cn' })
+// 配置收敛：源语言/版本由后端自动识别，前端只保留目标语言
+const config = ref({ target_lang: 'zh_cn' })
 
 const steps = [
-  { title: '配置', desc: '引擎与语言' },
-  { title: '扫描', desc: '选择资源' },
-  { title: '翻译', desc: '进度与结果' },
+  { title: '配置', desc: '引擎与目标语言' },
+  { title: '汉化', desc: '识别与翻译' },
+  { title: '进度', desc: '下载产物' },
 ]
 
 function next() { current.value = Math.min(2, current.value + 1) }
@@ -38,8 +39,7 @@ function onTranslate(id) { taskId.value = id; next() }
 
     <main class="main">
       <SetupView v-show="current === 0" :on-done="onConfigSaved" :on-next="next" />
-      <ScanView v-show="current === 1" :source-lang="config.source_lang"
-                :target-lang="config.target_lang" :mc-version="config.mc_version"
+      <ScanView v-show="current === 1" :target-lang="config.target_lang"
                 :on-translate="onTranslate" :on-back="back" />
       <ProgressView v-show="current === 2" :task-id="taskId" :on-back="back" />
     </main>

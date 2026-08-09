@@ -29,6 +29,25 @@ export const saveConfig = (cfg) => req('/config', { method: 'POST', body: JSON.s
 // API Key：写入后端 keyring（前端 localStorage 仅作 UI 回显，真正生效靠后端 keyring）
 export const saveKey = (apiKey) => req('/key', { method: 'POST', body: JSON.stringify({ api_key: apiKey }) })
 
+// 自动识别：POST /api/detect，返回 {kind, source_lang, pack_format, summary}
+export const detect = (body) => req('/detect', { method: 'POST', body: JSON.stringify(body) })
+
+// 统一全自动翻译：POST /api/auto-translate，返回 {task_id}
+export const autoTranslate = (body) => req('/auto-translate', { method: 'POST', body: JSON.stringify(body) })
+
+// 文件上传：multipart，返回 {path, name, size}
+export async function uploadFile(file) {
+  const fd = new FormData()
+  fd.append('file', file)
+  const res = await fetch(BASE + '/upload', { method: 'POST', body: fd })
+  if (!res.ok) {
+    let msg = `上传失败（HTTP ${res.status}）`
+    try { const d = await res.json(); if (d.detail) msg = String(d.detail) } catch (e) {}
+    throw new Error(msg)
+  }
+  return res.json()
+}
+
 // 扫描：返回 { mods:[{modid,entries,gaps}], total_gaps }
 export const scan = (body) => req('/scan', { method: 'POST', body: JSON.stringify(body) })
 

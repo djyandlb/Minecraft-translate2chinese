@@ -1,31 +1,27 @@
 <script setup>
 import { ref } from 'vue'
-import { browse, hardcodeScan, hardcodeTranslate, mapScan, mapTranslate, scan, translate } from '../api'
+import { autoTranslate, browse, detect, uploadFile } from '../api'
 
-// props：sourceLang/targetLang/mcVersion（来自配置步）、onTranslate(taskId)、onBack()
+// props：targetLang（来自 App 配置）+ onTranslate(taskId) / onBack()
 const props = defineProps({
-  sourceLang: { type: String, default: 'en_us' },
   targetLang: { type: String, default: 'zh_cn' },
-  mcVersion: { type: String, default: '1.20.1' },
   onTranslate: Function,
   onBack: Function,
 })
 
-const mode = ref('modpack')          // modpack 整合包目录 / jar 单文件
-const scope = ref('mods')            // 整合包模式下：mods 模组 / all 全部
 const path = ref('')
+const result = ref(null)          // /api/detect 返回 {kind, source_lang, pack_format, summary}
+const detecting = ref(false)
+const uploading = ref(false)
+const translating = ref(false)
+const error = ref('')
 
-// 目录浏览器
+// —— 目录浏览器（跨盘浏览复用现有 browser，盘根可列盘符）——
 const showBrowser = ref(false)
 const browserPath = ref('')
 const dirs = ref([])
 const parent = ref('')
 const browsing = ref(false)
-
-const result = ref(null)             // { mods:[{modid,entries,gaps}], total_gaps }
-const scanning = ref(false)
-const translating = ref(false)
-const error = ref('')
 
 async function openBrowser() {
   showBrowser.value = true
@@ -48,77 +44,73 @@ async function loadDirs(p) {
   }
 }
 function enterDir(name) {
-  // 🟡-1：盘符（如 D:\）直接进入，不拼接当前路径（防 C:\/D:\ 拼接失效，永远进不了 D/E 盘）
+  // 盘符（如 D:\）直接进入，不拼接当前路径（防 C:\/D:\ 拼接失效，永远进不了 D/E 盘）
   if (name.includes(':')) { loadDirs(name); return }
   loadDirs(browserPath.value ? `${browserPath.value}/${name}` : name)
 }
 function goUp() {
   if (parent.value) loadDirs(parent.value)
 }
-function pickPath() {
+// 选中目录后收浏览器并立即自动识别
+async function pickPath() {
   path.value = browserPath.value
   showBrowser.value = false
+  await autoDetect()
 }
 
-async function startScan() {
-  if (!path.value) { error.value = '请先选择路径' ; return }
-  scanning.value = true
-  error.value = ''
+// —— 拖放 / 点选上传 ——
+const dragOver = ref(false)
+const fileInput = ref(null)
+function onDragOver(e) { e.preventDefault(); dragOver.value = true }
+function onDragLeave() { dragOver.value = false }
+async function onDrop(e) {
+  e.preventDefault(); dragOver.value = false
+  const file = e.dataTransfer.files?.[0]
+  if (!file) return
+  await handleFile(file)
+}
+function onClickDrop() { fileInput.value?.click() }
+async function onFilePicked(e) {
+  const file = e.target.files?.[0]
+  if (file) await handleFile(file)
+  e.target.value = ''     // 允许连续选择同一文件
+}
+// 统一上传入口：POST /api/upload → 拿到落盘路径 → 自动识别
+async function handleFile(file) {
+  uploading.value = true; error.value = ''
   try {
-    // 地图存档走 map-scan（返回 {entries, preview}），硬编码 jar 走 hardcode-scan
-    // （返回 {strings, count}），其余走 scan
-    const payload = {
-      path: path.value,
-      source_lang: props.sourceLang,
-      target_lang: props.targetLang,
-    }
-    if (mode.value === 'map') {
-      result.value = await mapScan(payload)
-    } else if (mode.value === 'hardcode') {
-      result.value = await hardcodeScan(payload)
-    } else {
-      result.value = await scan({
-        path: path.value,
-        mode: mode.value,
-        scope: scope.value,
-        source_lang: props.sourceLang,
-        target_lang: props.targetLang,
-      })
-    }
-  } catch (e) {
-    error.value = `扫描失败：${e.message}`
+    const r = await uploadFile(file)
+    path.value = r.path
+    await autoDetect()
+  } catch (err) {
+    error.value = `上传失败：${err.message}`
   } finally {
-    scanning.value = false
+    uploading.value = false
   }
 }
 
-async function startTranslate() {
-  if (!result.value) { error.value = '请先完成扫描' ; return }
-  translating.value = true
-  error.value = ''
+// —— 自动识别 ——
+async function autoDetect() {
+  if (!path.value) { error.value = '请选择路径或拖入文件'; return }
+  detecting.value = true; error.value = ''
   try {
-    // 地图存档走 map-translate（后台复制→翻译→写回→mcworld），硬编码 jar 走
-    // hardcode-translate（后台复制→扫描→翻译→替换校验→输出新 jar），其余走 translate
-    const payload = {
-      path: path.value,
-      source_lang: props.sourceLang,
-      target_lang: props.targetLang,
+    result.value = await detect({ path: path.value, target_lang: props.targetLang })
+    if (result.value.kind === 'unknown') {
+      error.value = '无法识别输入类型，请确认是整合包目录 / mod jar / 地图存档'
     }
-    let r
-    if (mode.value === 'map') {
-      r = await mapTranslate(payload)
-    } else if (mode.value === 'hardcode') {
-      r = await hardcodeTranslate(payload)
-    } else {
-      r = await translate({
-        path: path.value,
-        mode: mode.value,
-        scope: scope.value,
-        source_lang: props.sourceLang,
-        target_lang: props.targetLang,
-        mc_version: props.mcVersion,
-      })
-    }
+  } catch (e) {
+    error.value = `识别失败：${e.message}`
+  } finally {
+    detecting.value = false
+  }
+}
+
+// —— 一键全部翻译（语言文件 + 硬编码并入，产物资源包 + 汉化 jar）——
+async function startTranslate() {
+  if (!result.value || result.value.kind === 'unknown') { error.value = '请先完成识别'; return }
+  translating.value = true; error.value = ''
+  try {
+    const r = await autoTranslate({ path: path.value, target_lang: props.targetLang })
     props.onTranslate?.(r.task_id)
   } catch (e) {
     error.value = `启动翻译失败：${e.message}`
@@ -126,39 +118,29 @@ async function startTranslate() {
     translating.value = false
   }
 }
+
+const KIND_TEXT = { modpack: '整合包', modjar: '单个 mod', map: '地图存档' }
 </script>
 
 <template>
   <section class="panel">
-    <h2>② 扫描</h2>
-    <p class="hint">选择要翻译的资源，扫描空缺词条</p>
+    <h2>② 汉化</h2>
+    <p class="hint">拖入 mod / 整合包 / 地图文件，或选择目录 → 自动识别 → 一键翻译</p>
 
-    <div class="field">
-      <label>输入方式</label>
-      <div class="radio-row">
-        <label class="radio"><input type="radio" value="modpack" v-model="mode" /> 整合包目录</label>
-        <label class="radio"><input type="radio" value="jar" v-model="mode" /> 单个 jar 文件</label>
-        <label class="radio"><input type="radio" value="map" v-model="mode" /> 地图存档</label>
-        <label class="radio"><input type="radio" value="hardcode" v-model="mode" /> 硬编码 jar 汉化</label>
-      </div>
+    <!-- 大拖放区：拖入 jar/压缩包/地图文件，或点击选文件 -->
+    <div class="dropzone" :class="{ drag: dragOver }"
+         @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop" @click="onClickDrop">
+      <p class="big">{{ uploading ? '上传中…' : (dragOver ? '松手，放这里！' : '拖入 jar / 压缩包 / 地图文件') }}</p>
+      <p class="small">或点击选择文件（整合包目录请用下方目录浏览）</p>
+      <input ref="fileInput" type="file" style="display:none" @change="onFilePicked" />
     </div>
 
+    <!-- 路径输入 + 目录浏览（跨盘） -->
     <div class="field">
       <label>资源路径</label>
       <div class="path-row">
-        <input type="text" v-model="path"
-               :placeholder="mode === 'map' ? '选择世界存档目录（含 level.dat）'
-                 : mode === 'hardcode' ? '选择 .jar 文件（硬编码字符串汉化）'
-                 : '选择整合包目录或 jar 文件'" />
+        <input type="text" v-model="path" placeholder="选择整合包目录 / mod jar / 地图存档，或拖入文件" />
         <button class="btn" @click="openBrowser">浏览</button>
-      </div>
-    </div>
-
-    <div class="field" v-if="mode === 'modpack'">
-      <label>扫描范围</label>
-      <div class="radio-row">
-        <label class="radio"><input type="radio" value="mods" v-model="scope" /> 仅模组目录</label>
-        <label class="radio"><input type="radio" value="all" v-model="scope" /> 全部资源</label>
       </div>
     </div>
 
@@ -178,70 +160,46 @@ async function startTranslate() {
       <p v-else class="tip">该目录下没有可进入的子目录</p>
     </div>
 
-    <!-- 扫描结果表：整合包 / jar 模式 -->
-    <div v-if="result && (mode === 'modpack' || mode === 'jar')" class="result-box">
-      <h3>扫描结果</h3>
-      <table>
-        <thead>
-          <tr><th>模组 ID</th><th>词条数</th><th>空缺数</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="m in result.mods" :key="m.modid">
-            <td>{{ m.modid }}</td>
-            <td>{{ m.entries }}</td>
-            <td>{{ m.gaps }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p class="total">空缺词条总数：<strong>{{ result.total_gaps }}</strong></p>
+    <!-- 识别按钮 -->
+    <div class="actions detect-actions">
+      <button class="btn" @click="autoDetect" :disabled="detecting || !path">
+        {{ detecting ? '识别中…' : '自动识别' }}
+      </button>
     </div>
 
-    <!-- 扫描结果表：地图存档模式（entries + 预览前 50 条） -->
-    <div v-else-if="result && mode === 'map'" class="result-box">
-      <h3>扫描结果</h3>
-      <p class="total">可翻译词条数：<strong>{{ result.entries }}</strong></p>
-      <p v-if="result.mca_skipped > 0" class="tip warn-tip">
-        含 {{ result.mca_skipped }} 条暂不支持写回的 .mca 区块文本
-      </p>
-      <table v-if="result.preview && result.preview.length">
-        <thead>
-          <tr><th>文件</th><th>原文</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="(e, i) in result.preview" :key="i">
-            <td class="fname">{{ e.file }}</td>
-            <td>{{ e.text }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p v-else class="tip">未扫描到可翻译词条</p>
-    </div>
-
-    <!-- 扫描结果表：硬编码 jar 模式（硬编码字符串数 + 原文预览前 50 条） -->
-    <div v-else-if="result && mode === 'hardcode'" class="result-box">
-      <h3>扫描结果</h3>
-      <p class="total">硬编码字符串数：<strong>{{ result.count }}</strong></p>
-      <table v-if="result.strings && result.strings.length">
-        <thead>
-          <tr><th>原文</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="(s, i) in result.strings.slice(0, 50)" :key="i">
-            <td>{{ s }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p v-else class="tip">未扫描到可翻译的硬编码字符串</p>
+    <!-- 识别结果摘要 -->
+    <div v-if="result && result.kind !== 'unknown'" class="result-box">
+      <h3>识别结果</h3>
+      <div class="detect-grid">
+        <div class="kv"><span>类型</span><strong>{{ KIND_TEXT[result.kind] || result.kind }}</strong></div>
+        <div class="kv" v-if="result.kind !== 'map'">
+          <span>源语言</span>
+          <strong>{{ result.source_lang || '未检测到（可能已汉化）' }}</strong>
+        </div>
+        <div class="kv" v-if="result.kind !== 'map'">
+          <span>资源包格式</span>
+          <strong>{{ result.pack_format ?? '自动' }}</strong>
+        </div>
+      </div>
+      <template v-if="result.summary">
+        <p class="total">
+          共 <strong>{{ result.summary.jar_count }}</strong> 个 jar、
+          <strong>{{ result.summary.total_lang_files }}</strong> 个语言文件，
+          可翻译词条约 <strong>{{ result.summary.total_entries }}</strong> 条
+        </p>
+        <p v-if="result.summary.total_hardcoded != null" class="total">
+          硬编码字符串约 <strong>{{ result.summary.total_hardcoded }}</strong> 条（一并汉化）
+        </p>
+      </template>
+      <p v-else-if="result.kind === 'map'" class="total">地图存档：翻译时自动扫描并写入，产物为 .mcworld</p>
     </div>
 
     <p v-if="error" class="err">{{ error }}</p>
 
     <div class="actions">
       <button class="btn" @click="props.onBack?.()">上一步</button>
-      <button class="btn" :disabled="scanning" @click="startScan">
-        {{ scanning ? '扫描中…' : '开始扫描' }}
-      </button>
-      <button class="btn primary" :disabled="translating || !result" @click="startTranslate">
+      <button class="btn primary" :disabled="translating || !result || result.kind === 'unknown'"
+              @click="startTranslate">
         {{ translating ? '启动中…' : '开始翻译' }}
       </button>
     </div>
@@ -252,6 +210,24 @@ async function startTranslate() {
 .path-row { display: flex; gap: 10px; }
 .path-row input { flex: 1; }
 
+/* 大拖放区 */
+.dropzone {
+  border: 2px dashed var(--line);
+  border-radius: 10px;
+  padding: 34px 20px;
+  text-align: center;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all .15s;
+  margin-bottom: 16px;
+}
+.dropzone:hover { border-color: var(--accent-2); }
+.dropzone.drag { border-color: var(--accent); background: var(--bg-3); color: var(--accent); }
+.dropzone .big { margin: 0 0 4px; font-size: 15px; }
+.dropzone .small { margin: 0; font-size: 12px; }
+
+/* 目录浏览器 */
 .browser {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -270,10 +246,14 @@ async function startTranslate() {
 }
 .browser-list .dir:hover { background: var(--bg-3); }
 
+/* 识别结果摘要 */
+.detect-actions { margin-top: 0; }
 .result-box { margin-top: 4px; }
-.result-box h3 { margin: 0 0 4px; font-size: 16px; }
-.total { color: var(--text-dim); margin: 10px 0 0; }
+.result-box h3 { margin: 0 0 8px; font-size: 16px; }
+.detect-grid { display: flex; gap: 24px; margin-bottom: 6px; flex-wrap: wrap; }
+.kv { display: flex; flex-direction: column; gap: 2px; }
+.kv span { color: var(--text-dim); font-size: 12px; }
+.kv strong { color: var(--accent); font-size: 14px; }
+.total { color: var(--text-dim); margin: 6px 0 0; }
 .total strong { color: var(--accent); }
-.fname { word-break: break-all; font-size: 12px; color: var(--text-dim); max-width: 300px; }
-.warn-tip { color: var(--warn); }
 </style>
