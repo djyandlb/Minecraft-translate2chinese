@@ -77,10 +77,15 @@ def needs_translation(text: str, target_lang: str) -> bool:
 
 
 def _read_pack_format_bytes(raw: bytes) -> int | None:
-    """从 pack.mcmeta 字节读 pack_format；缺失/损坏返回 None。"""
+    """从 pack.mcmeta 字节读 pack_format；缺失/损坏返回 None（A1-review：畸形 pack 字段不 500）。"""
     try:
         data = json.loads(raw.decode("utf-8"))
-        return int(data.get("pack", {}).get("pack_format"))
+        if not isinstance(data, dict):
+            return None
+        pack = data.get("pack")
+        if not isinstance(pack, dict):
+            return None
+        return int(pack.get("pack_format"))
     except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
         return None
 
