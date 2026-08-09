@@ -11,7 +11,8 @@ from app.archive import is_archive, extract_modpack
 from app.config import AppConfig
 from app.diff import build_jobs
 from app.glossary import load_glossary
-from app.models import ScanRequest, TranslateRequest
+from app.maps import flow as maps_flow, scan as maps_scan, world as maps_world
+from app.models import MapScanRequest, MapTranslateRequest, ScanRequest, TranslateRequest
 from app.scanner import scan_modpack, scan_jar
 from app.tasks import TaskStore
 from app.translator import run_translation
@@ -154,3 +155,26 @@ def upload_glossary(payload: dict):
         raise HTTPException(404, "术语表文件不存在")
     (WORK_DIR / "glossary.json").write_bytes(src.read_bytes())
     return {"loaded": len(load_glossary(WORK_DIR / "glossary.json"))}
+
+
+@app.post("/api/map-scan")
+def map_scan(req: MapScanRequest):
+    """地图汉化：校验世界目录合法性并扫描可翻译词条（仅读原档，不复制）。"""
+    world = Path(req.path)
+    if not maps_world.validate_world(world):
+        raise HTTPException(400, "不是有效的世界存档目录（缺少可加载的 level.dat）")
+    entries = maps_scan.scan_world(world)
+    return {"entries": len(entries), "preview": entries[:50]}
+
+
+@app.post("/api/map-translate")
+async def map_translate(req: MapTranslateRequest):
+    """地图汉化：调度后台翻译任务（复制→扫描→翻译→写回→mcworld），复用 _TASKS 持有引用防 GC。"""
+    cfg = AppConfig(CONFIG_PATH)
+    state = STORE.new()
+    state.status = "running"
+    STORE.save(state)
+    task = asyncio.create_task(maps_flow.run_map_translation(state.id, req, cfg, STORE, WORK_DIR))
+    _TASKS[state.id] = task
+    task.add_done_callback(lambda t: _TASKS.pop(state.id, None))
+    return {"task_id": state.id}

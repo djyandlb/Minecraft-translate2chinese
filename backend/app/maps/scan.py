@@ -211,9 +211,10 @@ def scan_file(file: Path, keys: set[str]) -> list[dict]:
 
 
 def scan_world(world: Path) -> list[dict]:
-    """扫描整档副本。"""
+    """扫描整档副本。给每个 entry 补 file 字段（写回需要知道目标文件）。"""
     keys = load_scan_keys(Path(__file__).parent / "scan_keys.json")
     acc: list[dict] = []
     for f in list_world_files(world):
-        acc.extend(scan_file(f, keys))
+        for e in scan_file(f, keys):
+            acc.append({**e, "file": str(f)})
     return acc

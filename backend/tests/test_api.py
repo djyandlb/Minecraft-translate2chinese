@@ -91,3 +91,18 @@ def test_cancel_pause_flags(tmp_path, monkeypatch):
     # 再次 pause 应回切为 False
     r = client.post(f"/api/task/{task_id}/pause")
     assert r.status_code == 200 and r.json()["paused"] is False
+
+
+def test_map_scan_invalid_world(tmp_path):
+    # 不存在的世界目录 → 400（validate_world 拒绝）
+    r = client.post("/api/map-scan", json={"path": str(tmp_path / "nope")})
+    assert r.status_code == 400
+
+
+def test_map_scan_valid_world(tmp_path):
+    # 合法世界（含 level.dat + Command 文本）→ 200，至少命中 1 个词条
+    from nbtlib import File, Compound, String
+    w = tmp_path / "world"; w.mkdir()
+    File({"Data": Compound({"Command": String("say Hello world")})}).save(w / "level.dat", gzipped=True)
+    r = client.post("/api/map-scan", json={"path": str(w)})
+    assert r.status_code == 200 and r.json()["entries"] >= 1

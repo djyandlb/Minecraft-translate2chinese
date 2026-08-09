@@ -35,6 +35,10 @@ export const scan = (body) => req('/scan', { method: 'POST', body: JSON.stringif
 // 翻译：返回 { task_id }
 export const translate = (body) => req('/translate', { method: 'POST', body: JSON.stringify(body) })
 
+// 地图汉化：扫描世界存档返回 { entries, preview }；翻译返回 { task_id }
+export const mapScan = (body) => req('/map-scan', { method: 'POST', body: JSON.stringify(body) })
+export const mapTranslate = (body) => req('/map-translate', { method: 'POST', body: JSON.stringify(body) })
+
 // 任务状态 / 控制
 export const getTask = (id) => req(`/task/${id}`)
 export const cancelTask = (id) => req(`/task/${id}/cancel`, { method: 'POST' })

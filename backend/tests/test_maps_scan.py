@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 from nbtlib import File, Compound, String
-from app.maps.scan import load_scan_keys, is_translatable_text, scan_nbt, scan_dat, scan_json_text, scan_mcfunction, scan_file
+from app.maps.scan import load_scan_keys, is_translatable_text, scan_nbt, scan_dat, scan_json_text, scan_mcfunction, scan_file, scan_world
 
 
 def test_load_scan_keys(tmp_path: Path):
@@ -28,6 +28,9 @@ def test_scan_dat_hits_command(tmp_path: Path):
     _make_dat(p, {"Command": "say Hello world", "Unrelated": "skip me"})
     hits = scan_dat(p, {"Command"})
     assert len(hits) == 1 and hits[0]["text"] == "say Hello world"
+    # M4-6：scan_world 给每个 entry 补 file 字段，写回需要知道目标文件
+    world_hits = scan_world(tmp_path)
+    assert world_hits and world_hits[0]["file"] == str(p)
 
 
 def test_scan_nbt_pages_list_of_string(tmp_path):

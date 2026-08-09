@@ -1,6 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import { browse, scan, translate } from '../api'
+import { browse, mapScan, mapTranslate, scan, translate } from '../api'
 
 // props：sourceLang/targetLang/mcVersion（来自配置步）、onTranslate(taskId)、onBack()
 const props = defineProps({
@@ -63,13 +63,20 @@ async function startScan() {
   scanning.value = true
   error.value = ''
   try {
-    result.value = await scan({
-      path: path.value,
-      mode: mode.value,
-      scope: scope.value,
-      source_lang: props.sourceLang,
-      target_lang: props.targetLang,
-    })
+    // 地图存档走 map-scan（返回 {entries, preview}），其余走 scan
+    result.value = mode.value === 'map'
+      ? await mapScan({
+          path: path.value,
+          source_lang: props.sourceLang,
+          target_lang: props.targetLang,
+        })
+      : await scan({
+          path: path.value,
+          mode: mode.value,
+          scope: scope.value,
+          source_lang: props.sourceLang,
+          target_lang: props.targetLang,
+        })
   } catch (e) {
     error.value = `扫描失败：${e.message}`
   } finally {
@@ -82,14 +89,21 @@ async function startTranslate() {
   translating.value = true
   error.value = ''
   try {
-    const r = await translate({
-      path: path.value,
-      mode: mode.value,
-      scope: scope.value,
-      source_lang: props.sourceLang,
-      target_lang: props.targetLang,
-      mc_version: props.mcVersion,
-    })
+    // 地图存档走 map-translate（后台复制→翻译→写回→mcworld），其余走 translate
+    const r = mode.value === 'map'
+      ? await mapTranslate({
+          path: path.value,
+          source_lang: props.sourceLang,
+          target_lang: props.targetLang,
+        })
+      : await translate({
+          path: path.value,
+          mode: mode.value,
+          scope: scope.value,
+          source_lang: props.sourceLang,
+          target_lang: props.targetLang,
+          mc_version: props.mcVersion,
+        })
     props.onTranslate?.(r.task_id)
   } catch (e) {
     error.value = `启动翻译失败：${e.message}`
@@ -109,13 +123,15 @@ async function startTranslate() {
       <div class="radio-row">
         <label class="radio"><input type="radio" value="modpack" v-model="mode" /> 整合包目录</label>
         <label class="radio"><input type="radio" value="jar" v-model="mode" /> 单个 jar 文件</label>
+        <label class="radio"><input type="radio" value="map" v-model="mode" /> 地图存档</label>
       </div>
     </div>
 
     <div class="field">
       <label>资源路径</label>
       <div class="path-row">
-        <input type="text" v-model="path" placeholder="选择整合包目录或 jar 文件" />
+        <input type="text" v-model="path"
+               :placeholder="mode === 'map' ? '选择世界存档目录（含 level.dat）' : '选择整合包目录或 jar 文件'" />
         <button class="btn" @click="openBrowser">浏览</button>
       </div>
     </div>
@@ -144,8 +160,8 @@ async function startTranslate() {
       <p v-else class="tip">该目录下没有可进入的子目录</p>
     </div>
 
-    <!-- 扫描结果表 -->
-    <div v-if="result" class="result-box">
+    <!-- 扫描结果表：整合包 / jar 模式 -->
+    <div v-if="result && mode !== 'map'" class="result-box">
       <h3>扫描结果</h3>
       <table>
         <thead>
@@ -160,6 +176,24 @@ async function startTranslate() {
         </tbody>
       </table>
       <p class="total">空缺词条总数：<strong>{{ result.total_gaps }}</strong></p>
+    </div>
+
+    <!-- 扫描结果表：地图存档模式（entries + 预览前 50 条） -->
+    <div v-else-if="result" class="result-box">
+      <h3>扫描结果</h3>
+      <p class="total">可翻译词条数：<strong>{{ result.entries }}</strong></p>
+      <table v-if="result.preview && result.preview.length">
+        <thead>
+          <tr><th>文件</th><th>原文</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="(e, i) in result.preview" :key="i">
+            <td class="fname">{{ e.file }}</td>
+            <td>{{ e.text }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="tip">未扫描到可翻译词条</p>
     </div>
 
     <p v-if="error" class="err">{{ error }}</p>
@@ -202,4 +236,5 @@ async function startTranslate() {
 .result-box h3 { margin: 0 0 4px; font-size: 16px; }
 .total { color: var(--text-dim); margin: 10px 0 0; }
 .total strong { color: var(--accent); }
+.fname { word-break: break-all; font-size: 12px; color: var(--text-dim); max-width: 300px; }
 </style>
