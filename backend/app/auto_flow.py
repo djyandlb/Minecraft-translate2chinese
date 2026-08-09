@@ -240,22 +240,36 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
         if isinstance(engine, LLMClient):
             # LLM 引擎：AI 判断「是否用户可见」并翻译（批量）
             for jar, cands in hard_candidates_by_jar.items():
+                if state.cancelled:
+                    # B 审查 🟡3：LLM 分支同样响应取消（照阶段 1/2 模式）
+                    state.status = "cancelled"
+                    store.save(state)
+                    return
+                await _wait_if_paused()
                 try:
                     mapping = await ai_judge_translate(engine, cands, req.target_lang)
                 except Exception as exc:
+                    # 失败 → 仅计 failed 并跳过本批（不再累加 done，
+                    # 避免异常路径 done+failed 双计超 total，B 审查 🟡4）
                     state.failed += len(cands)
                     state.progress.append({"status": "warn",
                                            "error": f"{jar.name} AI 判断硬编码失败：{exc}"})
-                else:
-                    if mapping:
-                        hard_mappings[jar] = mapping
-                    skipped = len(cands) - len(mapping)
-                    if skipped > 0:
-                        state.progress.append({"status": "warn",
-                                               "error": (f"{jar.name}: AI 判定 {skipped} 条硬编码"
-                                                         f"非用户可见文本，已跳过")})
+                    continue
+                if mapping:
+                    hard_mappings[jar] = mapping
+                    # B 审查 🔵5：AI 判断译文写回记忆，后续语言文件/其他 jar 同串直接命中
+                    for text, trans in mapping.items():
+                        memory.set(text, req.target_lang, trans)
+                skipped = len(cands) - len(mapping)
+                if skipped > 0:
+                    state.progress.append({"status": "warn",
+                                           "error": (f"{jar.name}: AI 判定 {skipped} 条硬编码"
+                                                     f"非用户可见文本，已跳过")})
                 # AI 判断已批量处理这批候选，进度按候选数推进
                 state.done += len(cands)
+                # B 审查 🔵6：LLM 分支补一条汇总 progress（judged/visible 便于前端展示）
+                state.progress.append({"jar": jar.name, "judged": len(cands),
+                                       "visible": len(mapping), "status": "done"})
                 if state.done % 10 == 0:
                     memory.save()
                     store.save(state)

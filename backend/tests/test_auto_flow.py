@@ -406,3 +406,75 @@ async def test_auto_llm_ai_judge_only_visible(tmp_path, monkeypatch):
     # AI 判定不可翻译数量有 warn 提示
     warns = [p for p in st.progress if p.get("status") == "warn"]
     assert any("非用户可见" in str(p.get("error", "")) for p in warns)
+    # LLM 分支补汇总 progress（🔵6）：judged 数 = 候选数，visible 数 = 映射数
+    done_items = [p for p in st.progress if p.get("status") == "done" and "judged" in p]
+    assert done_items, "LLM 硬编码批处理应有汇总 progress 记录"
+    assert done_items[0]["judged"] == 2 and done_items[0]["visible"] == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_llm_ai_judge_failure_no_double_count(tmp_path, monkeypatch):
+    """LLM 引擎：ai_judge 整批抛异常 → 仅计 failed 不重复计 done（done+failed 不超 total）（B 审查 🟡4）。"""
+    from app.translate.llm import LLMClient
+
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    _make_jar_with_two_hardcode(mods, name="two.jar")   # "Hello World" + "Welcome" 两条候选
+    engine = LLMClient("https://x", "k", "m")
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: engine)
+
+    async def boom_judge(engine, candidates, target):
+        raise RuntimeError("LLM 服务不可用")
+
+    monkeypatch.setattr("app.auto_flow.ai_judge_translate", boom_judge)
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work)
+    st = store.load(state.id)
+    assert st.status == "done"
+    assert st.failed >= 1                       # 异常整批计入 failed
+    assert st.done + st.failed <= st.total      # 不双计：done+failed 不超 total
+    hard_dir = work / "outputs" / state.id / "hardcoded"
+    assert not hard_dir.exists() or not list(hard_dir.glob("*.jar"))
+
+
+@pytest.mark.asyncio
+async def test_auto_llm_ai_judge_cancel_between_jars(tmp_path, monkeypatch):
+    """LLM 引擎：多 jar 硬编码批处理中取消 → 下一个 jar 前停下，状态 cancelled（B 审查 🟡3）。"""
+    from app.translate.llm import LLMClient
+
+    mods = tmp_path / "mods"
+    (mods / "a").mkdir(parents=True)
+    (mods / "b").mkdir(parents=True)
+    _make_jar_with_hardcode(mods / "a", name="a.jar")
+    _make_jar_with_hardcode(mods / "b", name="b.jar")
+    engine = LLMClient("https://x", "k", "m")
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: engine)
+
+    calls = {"n": 0}
+
+    async def judge_then_cancel(engine, candidates, target):
+        calls["n"] += 1
+        # 处理完第一个 jar 后立即置取消（TaskStore 缓存使 auto_flow 与本测试共享同一 state 对象）
+        if calls["n"] == 1:
+            state.cancelled = True
+            store.save(state)
+        return {"Hello World": "你好世界"}
+
+    monkeypatch.setattr("app.auto_flow.ai_judge_translate", judge_then_cancel)
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work)
+    st = store.load(state.id)
+    assert st.status == "cancelled"
+    assert calls["n"] == 1        # 第二个 jar 前被取消拦截，不再调用 ai_judge

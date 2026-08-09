@@ -397,3 +397,32 @@ async def test_ai_judge_translate_paging():
     assert len(mapping) == 60
     assert seen_sizes == [25, 25, 10]   # 60 → 25 + 25 + 10
     await engine._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_judge_translate_null_content_skips():
+    """LLM 返回 content=null → 该批跳过，不抛 AttributeError，返回空映射（B 审查 🟡1）。"""
+    def handler(request):
+        return Response(200, json={"choices": [{"message": {"content": None}}]})
+
+    engine = _llm_engine_with(handler)
+    mapping = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
+    assert mapping == {}
+    await engine._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_judge_system_prompt_uses_target_lang():
+    """target_lang 注入 system prompt：zh_tw → 提示繁体中文，不写死简体（B 审查 🟡2）。"""
+    seen = {}
+
+    def handler(request):
+        payload = json.loads(request.content)
+        seen["sys"] = payload["messages"][0]["content"]
+        return Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+
+    engine = _llm_engine_with(handler)
+    await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_tw")
+    assert "zh_tw" in seen["sys"]
+    assert "繁体中文" in seen["sys"]
+    await engine._client.aclose()

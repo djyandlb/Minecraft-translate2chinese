@@ -300,15 +300,20 @@ def replace_hardcoded_strings(jar: Path, mapping: dict[str, str]) -> dict:
 # 每批发送给 LLM 判断的候选上限
 _AI_JUDGE_PAGE = 25
 
-# system 提示词：判断「是否用户可见文本」并翻译，严格 JSON 数组输出
-_AI_JUDGE_SYSTEM_PROMPT = (
-    "你是 Minecraft 模组汉化助手。判断每段字符串是否是「玩家在游戏中能直接看到的文本」"
-    "（GUI 标题、物品/工具提示、聊天消息、成就名等）。技术标识符（JSON 键、资源路径、"
-    "注册 ID、方法签名、包名）→ translatable=false。是用户可见文本 → translatable=true "
-    "并给出简体中文翻译（保留 %s %d 等占位符）。严格输出 JSON 数组，不要任何解释或 Markdown："
-    '[{"text": "...", "translatable": true, "translation": "..."},'
-    ' {"text": "...", "translatable": false, "translation": ""}]'
-)
+def _ai_judge_system_prompt(target_lang: str) -> str:
+    """system 提示词：判断「是否用户可见文本」并翻译成 target_lang 对应语言。
+
+    不再写死简体中文——zh_tw 时提示繁体中文，避免繁体目标产出简体（B 审查 🟡2）。
+    """
+    return (
+        "你是 Minecraft 模组汉化助手。判断每段字符串是否是「玩家在游戏中能直接看到的文本」"
+        "（GUI 标题、物品/工具提示、聊天消息、成就名等）。技术标识符（JSON 键、资源路径、"
+        "注册 ID、方法签名、包名）→ translatable=false。是用户可见文本 → translatable=true "
+        f"并翻译成 {target_lang} 对应语言（如 zh_cn 为简体中文、zh_tw 为繁体中文），"
+        "保留 %s %d 等占位符。严格输出 JSON 数组，不要任何解释或 Markdown："
+        '[{"text": "...", "translatable": true, "translation": "..."},'
+        ' {"text": "...", "translatable": false, "translation": ""}]'
+    )
 
 
 def _parse_ai_judge_response(content: str) -> list[dict] | None:
@@ -357,7 +362,7 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str) -
         body = {
             "model": engine.model,
             "messages": [
-                {"role": "system", "content": _AI_JUDGE_SYSTEM_PROMPT},
+                {"role": "system", "content": _ai_judge_system_prompt(target_lang)},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             "temperature": 0.2,
@@ -370,6 +375,11 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str) -
             if engine.on_usage:
                 u = data.get("usage") or {}
                 engine.on_usage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+            if not content:
+                # content 为 null（部分供应商流式/拒绝场景）：按整批跳过，
+                # 若交给 _parse 会在 content.strip() 抛 AttributeError（B 审查 🟡1）
+                logger.warning("ai_judge 返回空内容，跳过 %d 条", len(batch))
+                continue
         except Exception as exc:
             # 请求失败（网络/API/HTTP 错误）→ 整批跳过，不中断其他批次
             logger.warning("ai_judge 批次请求失败，跳过 %d 条：%s", len(batch), exc)
