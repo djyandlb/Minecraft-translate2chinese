@@ -247,7 +247,10 @@ def _front_dist() -> Path:
 
 FRONT_DIST = _front_dist()
 if FRONT_DIST.exists() and (FRONT_DIST / "index.html").exists():
-    app.mount("/assets", StaticFiles(directory=FRONT_DIST / "assets"), name="assets")
+    # Minor：assets 目录缺失时跳过 mount，避免 StaticFiles 构造抛 RuntimeError 崩导入
+    _assets = FRONT_DIST / "assets"
+    if _assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=_assets), name="assets")
 
     @app.get("/")
     def _index():
@@ -256,9 +259,12 @@ if FRONT_DIST.exists() and (FRONT_DIST / "index.html").exists():
     @app.get("/{full_path:path}")
     def _spa(full_path: str):
         # vue SPA fallback：非 /api 路径回 index.html；已存在的静态文件直接返回
-        if full_path.startswith("api/"):
+        # Important-2：/api（无斜杠）也必须 404，不被 fallback 吞成 200 HTML
+        if full_path.split("/", 1)[0] == "api":
             raise HTTPException(404, "接口不存在")
-        p = FRONT_DIST / full_path
-        if p.is_file():
+        # Critical-1：resolve 后校验仍在 dist 内才返回文件，防 ../ 与盘符路径穿越读任意文件
+        root = FRONT_DIST.resolve()
+        p = (FRONT_DIST / full_path).resolve()
+        if p.is_relative_to(root) and p.is_file():
             return FileResponse(p)
         return FileResponse(FRONT_DIST / "index.html")

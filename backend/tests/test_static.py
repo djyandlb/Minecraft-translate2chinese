@@ -22,6 +22,46 @@ def test_static_served_when_dist_exists():
     assert r3.status_code == 200
 
 
+def test_traversal_relative_escapes_dist_blocked():
+    """M6-1 Critical-1：相对路径穿越必须被拦。../ 逃逸出 dist 的请求不得返回任意文件原文（应回 index.html fallback）。"""
+    if not (FRONT_DIST / "index.html").exists():
+        import pytest
+        pytest.skip("前端 dist 不存在（先 npm run build）")
+    client = TestClient(app)
+    # 穿越到 backend/app/main.py（本文件所在源码，修复前会被直接读出）
+    r = client.get("/..%2f..%2fbackend%2fapp%2fmain.py")
+    assert r.status_code in (200, 404)
+    assert "text/html" in r.headers["content-type"], "路径穿越不应返回任意文件原文"
+    assert "# FastAPI 入口" not in r.text, "main.py 源码不应经穿越泄露"
+
+
+def test_traversal_windows_abs_path_blocked():
+    """M6-1 Critical-1：Windows 盘符绝对路径穿越必须被拦，C:/Windows/win.ini 不能被读出。"""
+    import sys
+    if sys.platform != "win32":
+        import pytest
+        pytest.skip("Windows 盘符穿越仅适用于 win32")
+    if not (FRONT_DIST / "index.html").exists():
+        import pytest
+        pytest.skip("前端 dist 不存在（先 npm run build）")
+    client = TestClient(app)
+    r = client.get("/C:/Windows/win.ini")
+    assert r.status_code in (200, 404)
+    assert "text/html" in r.headers["content-type"], "盘符绝对路径穿越不应返回 win.ini 原文"
+    assert "for 16-bit" not in r.text
+
+
+def test_api_without_slash_not_swallowed():
+    """M6-1 Important-2：/api（无斜杠）必须 404，不能被 SPA fallback 吞成 200 HTML。"""
+    if not (FRONT_DIST / "index.html").exists():
+        import pytest
+        pytest.skip("前端 dist 不存在（先 npm run build）")
+    client = TestClient(app)
+    r = client.get("/api")
+    assert r.status_code == 404
+    assert "text/html" not in r.headers["content-type"]
+
+
 def test_frozen_base_switches_to_executable_dir(monkeypatch):
     """frozen 时 _base() 指向 exe 同目录（可写），非 frozen 指向 backend/。"""
     from app import main as m
