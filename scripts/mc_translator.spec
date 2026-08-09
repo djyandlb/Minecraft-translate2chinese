@@ -12,7 +12,13 @@
 #   - keyring 在 frozen 下需显式收集 Windows 后端（keyring.backends.Windows），
 #     否则 set_password 抛 NoKeyringError。
 #   - anvil 在 app/maps/scan.py 内是延迟 import，需 hiddenimports 强制收集。
+#   - jawa/opencc/anvil 运行时用 pkgutil.get_data 读包内数据文件（bytecode.json、
+#     config/*.json、dictionary/*.txt、legacy_blocks.json），PyInstaller 默认不收非 .py，
+#     必须用 collect_data_files 显式收，否则 frozen 下 FileNotFoundError 崩启动。
+#   - jawa 按需 import_module 动态加载 attributes 子模块，用 collect_submodules 兜底。
 from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).parent                  # 项目根（SPECPATH = scripts/，其父目录即项目根）
 BACKEND = ROOT / "backend"                   # Python 包根（app/ 在其下）
@@ -24,18 +30,25 @@ a = Analysis(
     datas=[
         (str(ROOT / "frontend" / "dist"), "frontend/dist"),                    # 前端静态资源 → _MEIPASS/frontend/dist
         (str(APP / "maps" / "scan_keys.json"), "app/maps/scan_keys.json"),    # 地图扫描关键词表
+        *collect_data_files("jawa"),        # jawa/util/bytecode.{json,yaml}：反编译常量/指令表
+        *collect_data_files("opencc"),      # 简繁转换 config/*.json + dictionary/*.txt
+        *collect_data_files("anvil"),       # legacy_blocks.json（区块版本回退表）
     ],
     hiddenimports=[
         # 对象导入双保险：入口显式收集 app 包与地图扫描
         "app.main", "app.maps.scan",
+        # 重构新增：detect/auto_flow/hardcode_flow/langfile/translate 子包（顶层链已静态分析，双保险）
+        "app.detect", "app.auto_flow", "app.hardcode_flow", "app.langfile",
+        "app.translate", "app.translate.engine", "app.translate.machine", "app.translate.llm",
         # uvicorn 运行链（有 hook-uvicorn，补全保险）
         "uvicorn.logging", "uvicorn.loops", "uvicorn.protocols", "uvicorn.lifespan",
         "uvicorn.loops.auto", "uvicorn.protocols.http.auto", "uvicorn.protocols.websockets.auto",
         # keyring：frozen 下必须显式收 Windows 后端（依赖 win32ctypes）
         "keyring.backends.Windows", "win32ctypes",
-        # 字节码/存档/地图/简繁/机器翻译：jawa/nbtlib 顶层 import 已被静态分析收集，
-        # anvil 是延迟 import 必须补；opencc/deep_translator 走顶层链，一并列上防漏
-        "jawa", "jawa.constants", "nbtlib", "anvil", "opencc", "deep_translator",
+        # 字节码/存档/地图/简繁/机器翻译：nbtlib/deep_translator 顶层 import 已静态收集；
+        # anvil 是延迟 import 必须补；opencc 顶层链 + collect_submodules 兜底
+        *collect_submodules("jawa"),        # jawa.attributes.* 动态 import_module
+        "nbtlib", "anvil", "opencc", "deep_translator",
     ],
     binaries=[],
     excludes=["tkinter"],
@@ -51,7 +64,7 @@ exe = EXE(
     debug=False,
     strip=False,
     upx=False,
-    console=True,                             # 桌面 GUI 应用，不开控制台窗口
+    console=False,                            # 桌面 GUI 应用，不开控制台窗口
     disable_windowed_traceback=False,         # 出错时弹 traceback 窗口便于排查
 )
 coll = COLLECT(
@@ -68,6 +81,6 @@ exe_one = EXE(
     debug=False,
     strip=False,
     upx=False,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
 )
