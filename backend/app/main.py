@@ -10,10 +10,11 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.archive import is_archive, extract_modpack
+from app.auto_flow import run_auto_translation
 from app.config import AppConfig
 from app.detect import build_detect_summary, detect_input_type, detect_source_lang, infer_pack_format
 from app.diff import build_jobs
@@ -21,7 +22,7 @@ from app.glossary import load_glossary
 from app.hardcode import scan_hardcoded_strings
 from app.hardcode_flow import run_hardcode_translation
 from app.maps import flow as maps_flow, scan as maps_scan, world as maps_world
-from app.models import (DetectRequest, HardcodeRequest, MapScanRequest,
+from app.models import (AutoRequest, DetectRequest, HardcodeRequest, MapScanRequest,
                         MapTranslateRequest, ScanRequest, TranslateRequest)
 from app.scanner import scan_modpack, scan_jar
 from app.tasks import TaskStore
@@ -134,6 +135,19 @@ async def translate(req: TranslateRequest):
     return {"task_id": state.id}
 
 
+@app.post("/api/auto-translate")
+async def auto_translate(req: AutoRequest):
+    """统一全自动翻译入口：后台任务，复用 _TASKS 持有引用防 GC。"""
+    cfg = AppConfig(CONFIG_PATH)
+    state = STORE.new()
+    state.status = "running"
+    STORE.save(state)
+    task = asyncio.create_task(run_auto_translation(state.id, req, cfg, STORE, WORK_DIR))
+    _TASKS[state.id] = task
+    task.add_done_callback(lambda t: _TASKS.pop(state.id, None))
+    return {"task_id": state.id}
+
+
 @app.get("/api/task/{task_id}")
 def get_task(task_id: str):
     state = STORE.load(task_id)
@@ -172,10 +186,22 @@ def download(task_id: str):
     # task_id 为 12 位十六进制 uuid 前缀，先校验再拼路径，防路径注入（F6）
     if not re.fullmatch(r"[0-9a-f]{12}", task_id):
         raise HTTPException(404, "任务不存在")
+    # A5：产物目录优先（资源包 + hardcoded jar）→ 打包成 {task_id}.zip；否则旧单文件兼容
+    out_dir = WORK_DIR / "outputs" / task_id
+    if out_dir.is_dir():
+        import io
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(out_dir.rglob("*")):
+                if f.is_file():
+                    zf.write(f, f.relative_to(out_dir).as_posix())
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="application/zip",
+                                 headers={"Content-Disposition": f'attachment; filename="{task_id}.zip"'})
     # M4-6：资源包任务导出 .zip，地图任务导出 .mcworld，两者都匹配，避免地图产物 404
     for f in (WORK_DIR / "outputs").glob(f"{task_id}_*.*"):
         return FileResponse(f, filename=f.name)
-    raise HTTPException(404, "尚未生成资源包")
+    raise HTTPException(404, "尚未生成产物")
 
 
 @app.post("/api/upload")
