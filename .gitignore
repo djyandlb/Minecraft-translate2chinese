@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 node_modules/
+build/
 dist/
 _upstream/
 *.log

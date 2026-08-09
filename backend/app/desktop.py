@@ -16,7 +16,8 @@ def _free_port() -> int:
 
 def _run_server(port: int) -> None:
     import uvicorn
-    uvicorn.run("app.main:app", host="127.0.0.1", port=port, log_level="warning")
+    from app.main import app   # 对象导入：PyInstaller 静态分析可收集整个 app 包
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 
 
 def _wait_port(port: int, timeout: float = 10.0) -> None:
