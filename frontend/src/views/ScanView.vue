@@ -1,6 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import { browse, mapScan, mapTranslate, scan, translate } from '../api'
+import { browse, hardcodeScan, hardcodeTranslate, mapScan, mapTranslate, scan, translate } from '../api'
 
 // props：sourceLang/targetLang/mcVersion（来自配置步）、onTranslate(taskId)、onBack()
 const props = defineProps({
@@ -63,20 +63,26 @@ async function startScan() {
   scanning.value = true
   error.value = ''
   try {
-    // 地图存档走 map-scan（返回 {entries, preview}），其余走 scan
-    result.value = mode.value === 'map'
-      ? await mapScan({
-          path: path.value,
-          source_lang: props.sourceLang,
-          target_lang: props.targetLang,
-        })
-      : await scan({
-          path: path.value,
-          mode: mode.value,
-          scope: scope.value,
-          source_lang: props.sourceLang,
-          target_lang: props.targetLang,
-        })
+    // 地图存档走 map-scan（返回 {entries, preview}），硬编码 jar 走 hardcode-scan
+    // （返回 {strings, count}），其余走 scan
+    const payload = {
+      path: path.value,
+      source_lang: props.sourceLang,
+      target_lang: props.targetLang,
+    }
+    if (mode.value === 'map') {
+      result.value = await mapScan(payload)
+    } else if (mode.value === 'hardcode') {
+      result.value = await hardcodeScan(payload)
+    } else {
+      result.value = await scan({
+        path: path.value,
+        mode: mode.value,
+        scope: scope.value,
+        source_lang: props.sourceLang,
+        target_lang: props.targetLang,
+      })
+    }
   } catch (e) {
     error.value = `扫描失败：${e.message}`
   } finally {
@@ -89,21 +95,28 @@ async function startTranslate() {
   translating.value = true
   error.value = ''
   try {
-    // 地图存档走 map-translate（后台复制→翻译→写回→mcworld），其余走 translate
-    const r = mode.value === 'map'
-      ? await mapTranslate({
-          path: path.value,
-          source_lang: props.sourceLang,
-          target_lang: props.targetLang,
-        })
-      : await translate({
-          path: path.value,
-          mode: mode.value,
-          scope: scope.value,
-          source_lang: props.sourceLang,
-          target_lang: props.targetLang,
-          mc_version: props.mcVersion,
-        })
+    // 地图存档走 map-translate（后台复制→翻译→写回→mcworld），硬编码 jar 走
+    // hardcode-translate（后台复制→扫描→翻译→替换校验→输出新 jar），其余走 translate
+    const payload = {
+      path: path.value,
+      source_lang: props.sourceLang,
+      target_lang: props.targetLang,
+    }
+    let r
+    if (mode.value === 'map') {
+      r = await mapTranslate(payload)
+    } else if (mode.value === 'hardcode') {
+      r = await hardcodeTranslate(payload)
+    } else {
+      r = await translate({
+        path: path.value,
+        mode: mode.value,
+        scope: scope.value,
+        source_lang: props.sourceLang,
+        target_lang: props.targetLang,
+        mc_version: props.mcVersion,
+      })
+    }
     props.onTranslate?.(r.task_id)
   } catch (e) {
     error.value = `启动翻译失败：${e.message}`
@@ -124,6 +137,7 @@ async function startTranslate() {
         <label class="radio"><input type="radio" value="modpack" v-model="mode" /> 整合包目录</label>
         <label class="radio"><input type="radio" value="jar" v-model="mode" /> 单个 jar 文件</label>
         <label class="radio"><input type="radio" value="map" v-model="mode" /> 地图存档</label>
+        <label class="radio"><input type="radio" value="hardcode" v-model="mode" /> 硬编码 jar 汉化</label>
       </div>
     </div>
 
@@ -131,7 +145,9 @@ async function startTranslate() {
       <label>资源路径</label>
       <div class="path-row">
         <input type="text" v-model="path"
-               :placeholder="mode === 'map' ? '选择世界存档目录（含 level.dat）' : '选择整合包目录或 jar 文件'" />
+               :placeholder="mode === 'map' ? '选择世界存档目录（含 level.dat）'
+                 : mode === 'hardcode' ? '选择 .jar 文件（硬编码字符串汉化）'
+                 : '选择整合包目录或 jar 文件'" />
         <button class="btn" @click="openBrowser">浏览</button>
       </div>
     </div>
@@ -161,7 +177,7 @@ async function startTranslate() {
     </div>
 
     <!-- 扫描结果表：整合包 / jar 模式 -->
-    <div v-if="result && mode !== 'map'" class="result-box">
+    <div v-if="result && (mode === 'modpack' || mode === 'jar')" class="result-box">
       <h3>扫描结果</h3>
       <table>
         <thead>
@@ -179,7 +195,7 @@ async function startTranslate() {
     </div>
 
     <!-- 扫描结果表：地图存档模式（entries + 预览前 50 条） -->
-    <div v-else-if="result" class="result-box">
+    <div v-else-if="result && mode === 'map'" class="result-box">
       <h3>扫描结果</h3>
       <p class="total">可翻译词条数：<strong>{{ result.entries }}</strong></p>
       <p v-if="result.mca_skipped > 0" class="tip warn-tip">
@@ -197,6 +213,23 @@ async function startTranslate() {
         </tbody>
       </table>
       <p v-else class="tip">未扫描到可翻译词条</p>
+    </div>
+
+    <!-- 扫描结果表：硬编码 jar 模式（硬编码字符串数 + 原文预览前 50 条） -->
+    <div v-else-if="result && mode === 'hardcode'" class="result-box">
+      <h3>扫描结果</h3>
+      <p class="total">硬编码字符串数：<strong>{{ result.count }}</strong></p>
+      <table v-if="result.strings && result.strings.length">
+        <thead>
+          <tr><th>原文</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="(s, i) in result.strings.slice(0, 50)" :key="i">
+            <td>{{ s }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="tip">未扫描到可翻译的硬编码字符串</p>
     </div>
 
     <p v-if="error" class="err">{{ error }}</p>

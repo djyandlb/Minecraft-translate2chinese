@@ -11,8 +11,10 @@ from app.archive import is_archive, extract_modpack
 from app.config import AppConfig
 from app.diff import build_jobs
 from app.glossary import load_glossary
+from app.hardcode import scan_hardcoded_strings
+from app.hardcode_flow import run_hardcode_translation
 from app.maps import flow as maps_flow, scan as maps_scan, world as maps_world
-from app.models import MapScanRequest, MapTranslateRequest, ScanRequest, TranslateRequest
+from app.models import HardcodeRequest, MapScanRequest, MapTranslateRequest, ScanRequest, TranslateRequest
 from app.scanner import scan_modpack, scan_jar
 from app.tasks import TaskStore
 from app.translator import run_translation
@@ -180,6 +182,33 @@ async def map_translate(req: MapTranslateRequest):
     state.status = "running"
     STORE.save(state)
     task = asyncio.create_task(maps_flow.run_map_translation(state.id, req, cfg, STORE, WORK_DIR))
+    _TASKS[state.id] = task
+    task.add_done_callback(lambda t: _TASKS.pop(state.id, None))
+    return {"task_id": state.id}
+
+
+@app.post("/api/hardcode-scan")
+def hardcode_scan(req: HardcodeRequest):
+    """硬编码汉化：扫描 jar 内可翻译的字节码字符串（复制到 work 副本再扫，原 jar 只读）。"""
+    import shutil
+    src = Path(req.path)
+    if not src.is_file() or src.suffix.lower() != ".jar":
+        raise HTTPException(400, "请选择 .jar 文件")
+    dest = WORK_DIR / "hardcode" / "scan" / src.name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    strings = scan_hardcoded_strings(dest)
+    return {"strings": strings, "count": len(strings)}
+
+
+@app.post("/api/hardcode-translate")
+async def hardcode_translate(req: HardcodeRequest):
+    """硬编码汉化：调度后台翻译任务（复制→扫描→翻译→替换校验→输出新 jar），复用 _TASKS 持有引用防 GC。"""
+    cfg = AppConfig(CONFIG_PATH)
+    state = STORE.new()
+    state.status = "running"
+    STORE.save(state)
+    task = asyncio.create_task(run_hardcode_translation(state.id, req, cfg, STORE, WORK_DIR))
     _TASKS[state.id] = task
     task.add_done_callback(lambda t: _TASKS.pop(state.id, None))
     return {"task_id": state.id}

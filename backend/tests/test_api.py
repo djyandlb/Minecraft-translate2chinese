@@ -2,6 +2,7 @@
 import asyncio
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -106,3 +107,37 @@ def test_map_scan_valid_world(tmp_path):
     File({"Data": Compound({"Command": String("say Hello world")})}).save(w / "level.dat", gzipped=True)
     r = client.post("/api/map-scan", json={"path": str(w)})
     assert r.status_code == 200 and r.json()["entries"] >= 1
+
+
+def test_hardcode_scan_invalid(tmp_path):
+    # 非 .jar 文件 → 400（原 jar 只读，接口拒绝非 jar 输入）
+    r = client.post("/api/hardcode-scan", json={"path": str(tmp_path / "notajar.txt")})
+    assert r.status_code == 400
+
+
+def test_hardcode_scan_valid(tmp_path):
+    # 复用 test_hardcode 的造 jar 逻辑（javac 编译；无 javac 时造一个含 class 的空 zip 即可测 200）
+    import shutil, subprocess, zipfile
+    if shutil.which("javac"):
+        srcdir = tmp_path / "s"; srcdir.mkdir()
+        (srcdir / "HelloMod.java").write_text(
+            'public class HelloMod { public static void main(String[] a) { System.out.println("Hello World"); } }',
+            encoding="utf-8")
+        classes = tmp_path / "c"; classes.mkdir()
+        subprocess.run(["javac", "-d", str(classes), str(srcdir / "HelloMod.java")], check=True)
+        jar = tmp_path / "mod.jar"
+        with zipfile.ZipFile(jar, "w") as zf:
+            for f in classes.rglob("*.class"):
+                zf.write(f, f.relative_to(classes).as_posix())
+        r = client.post("/api/hardcode-scan", json={"path": str(jar)})
+        assert r.status_code == 200 and r.json()["count"] >= 1 and "Hello World" in r.json()["strings"]
+    else:
+        pytest.skip("无 javac")
+
+
+def test_hardcode_translate_returns_task(tmp_path):
+    # 端点应返回 {task_id}，不等待后台跑完（参照地图 translate 测试模式）
+    jar = tmp_path / "mod.jar"
+    jar.write_bytes(b"PK\x05\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")  # 空 zip
+    r = client.post("/api/hardcode-translate", json={"path": str(jar)})
+    assert r.status_code == 200 and "task_id" in r.json()

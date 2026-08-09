@@ -39,6 +39,10 @@ export const translate = (body) => req('/translate', { method: 'POST', body: JSO
 export const mapScan = (body) => req('/map-scan', { method: 'POST', body: JSON.stringify(body) })
 export const mapTranslate = (body) => req('/map-translate', { method: 'POST', body: JSON.stringify(body) })
 
+// 硬编码汉化：扫描 jar 内硬编码字符串返回 {strings, count}；翻译返回 { task_id }
+export const hardcodeScan = (body) => req('/hardcode-scan', { method: 'POST', body: JSON.stringify(body) })
+export const hardcodeTranslate = (body) => req('/hardcode-translate', { method: 'POST', body: JSON.stringify(body) })
+
 // 任务状态 / 控制
 export const getTask = (id) => req(`/task/${id}`)
 export const cancelTask = (id) => req(`/task/${id}/cancel`, { method: 'POST' })
