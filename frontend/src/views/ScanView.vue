@@ -34,7 +34,9 @@ async function loadDirs(p) {
   browsing.value = true
   try {
     const r = await browse(p)
-    browserPath.value = p
+    // 首次（p 为空）时 browse('') 返回的 parent 即 home 绝对路径，
+    // 始终用绝对路径作为当前目录，后续点入子目录拼出的子路径才不偏位
+    browserPath.value = p || r.parent || ''
     dirs.value = r.dirs
     parent.value = r.parent || ''
     error.value = ''

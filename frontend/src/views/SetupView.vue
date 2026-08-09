@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { getConfig, saveConfig } from '../api'
 
 // props：onDone(配置对象) / onNext() 由 App 注入，走完一步 → next()
@@ -37,7 +37,12 @@ const saving = ref(false)
 const error = ref('')
 const tip = ref('')
 
+// 回填配置期间为 true：applyProvider 只在用户手动切换厂商下拉时覆盖 base_url/model，
+// 避免 onMounted 回填用户保存过的自定义值时被厂商预置覆盖
+let loading = true
+
 function applyProvider(name) {
+  if (loading) return
   const p = PROVIDERS[name]
   if (p) { baseUrl.value = p.base_url; model.value = p.model }
 }
@@ -57,6 +62,11 @@ onMounted(async () => {
     }
   } catch (e) {
     tip.value = '读取后端配置失败（后端未启动？将使用默认值）'
+  } finally {
+    // watch(provider) 默认 pre-flush，回调在下一微任务才执行；
+    // nextTick 等它跑完再放开 loading，确保回填的 base_url/model 不被厂商预置覆盖
+    await nextTick()
+    loading = false
   }
 })
 

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { cancelTask, downloadUrl, getTask, pauseTask } from '../api'
 
 // props：taskId（由 App 持有，从扫描步传入）、onBack()
@@ -40,7 +40,7 @@ async function refresh() {
   }
 }
 function startPolling() {
-  stopPolling()
+  stopPolling()                        // 幂等：若已有 timer 先清再设
   timer = setInterval(refresh, 1000)   // running/paused 时每秒轮询
 }
 function stopPolling() {
@@ -63,6 +63,19 @@ function doDownload() {
   window.open(downloadUrl(props.taskId), '_blank')
 }
 
+// App 用 v-show 常驻挂载，onMounted 只跑一次；第一个任务结束 stopPolling 后，
+// 第二次任务 taskId 变化时需重置旧数据并重启轮询，否则进度页停留在旧任务状态
+watch(() => props.taskId, (newId) => {
+  if (newId) {
+    task.value = null
+    error.value = ''
+    refresh()
+    startPolling()
+  } else {
+    stopPolling()
+  }
+})
+
 onMounted(() => { refresh(); startPolling() })
 onUnmounted(stopPolling)
 </script>
@@ -77,7 +90,7 @@ onUnmounted(stopPolling)
     <template v-else-if="task">
       <div class="status-bar">
         <span class="status" :class="STATUS_CLS[task.status] || ''">
-          状态：{{ STATUS_TEXT[task.status] || task.status }}
+          状态：{{ task.paused ? '已暂停' : (STATUS_TEXT[task.status] || task.status) }}
         </span>
         <span class="tokens" v-if="task.tokens_in || task.tokens_out">
           Token：进 {{ task.tokens_in }} / 出 {{ task.tokens_out }}
@@ -106,7 +119,7 @@ onUnmounted(stopPolling)
       <div class="detail" v-if="rows.length">
         <h3>翻译明细（最新在前）</h3>
         <div class="detail-list">
-          <div v-for="(r, i) in rows" :key="i" class="detail-row"
+          <div v-for="(r, i) in rows" :key="r.key + '-' + i" class="detail-row"
                :class="{ errrow: r.status === 'error' }">
             <div class="row-key">{{ r.key }}</div>
             <div class="row-langs">
