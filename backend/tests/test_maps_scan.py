@@ -30,6 +30,24 @@ def test_scan_dat_hits_command(tmp_path: Path):
     assert len(hits) == 1 and hits[0]["text"] == "say Hello world"
 
 
+def test_scan_nbt_pages_list_of_string(tmp_path):
+    from nbtlib import List as NbtList
+    p = tmp_path / "book.dat"
+    File({"Data": Compound({"pages": NbtList([String("Chapter one begins"), String("And then it ends")])})}).save(p, gzipped=True)
+    hits = scan_dat(p, {"pages"})
+    texts = [h["text"] for h in hits]
+    assert "Chapter one begins" in texts and "And then it ends" in texts
+
+
+def test_scan_nbt_front_text_compound(tmp_path):
+    from nbtlib import List as NbtList
+    p = tmp_path / "sign.dat"
+    ft = Compound({"messages": NbtList([String("Hello sign reader")])})
+    File({"Data": Compound({"front_text": ft})}).save(p, gzipped=True)
+    hits = scan_dat(p, {"front_text"})
+    assert any("Hello sign reader" in h["text"] for h in hits)
+
+
 def test_scan_json_text(tmp_path: Path):
     p = tmp_path / "advancement.json"
     p.write_text(json.dumps({"title": {"text": "Welcome to the world"}, "key2": {"text": "iron_ingot"}}), encoding="utf-8")
@@ -43,6 +61,20 @@ def test_scan_mcfunction(tmp_path: Path):
     p.write_text('say Hello there\ntellraw @a {"text":"Greetings player"}\n', encoding="utf-8")
     hits = scan_mcfunction(p, set())
     assert any("Hello there" in h["text"] for h in hits)
+    assert any("Greetings player" in h["text"] for h in hits)   # tellraw JSON 提取整段 text
+
+
+def test_scan_mcfunction_tellraw_extra(tmp_path: Path):
+    p = tmp_path / "b.mcfunction"
+    p.write_text(
+        'tellraw @a {"text":"Prefix","extra":[{"text":"Middle"},{"text":"tail"}]}\n'
+        'title @a title {"text":"Pure title"}\n',
+        encoding="utf-8",
+    )
+    hits = scan_mcfunction(p, set())
+    texts = [h["text"] for h in hits]
+    assert "Prefix" in texts and "Middle" in texts and "tail" in texts
+    assert "Pure title" in texts   # title 的 JSON 参数同样被解析
 
 
 def _build_mca_bytes(chunk_nbt: bytes, cx: int = 0, cz: int = 0) -> bytes:
