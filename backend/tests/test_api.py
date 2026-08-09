@@ -63,3 +63,31 @@ def test_translate_starts_background_task(tmp_path, monkeypatch):
             break
         time.sleep(0.02)
     assert calls and calls[0][0] == task_id
+
+
+def test_cancel_pause_flags(tmp_path, monkeypatch):
+    # F8：cancel/pause 端点应立即生效——依赖 F1 内存缓存，端点与后台任务共享同一 TaskState 对象
+    import app.main as main
+    monkeypatch.setattr(main, "WORK_DIR", tmp_path)
+    store = TaskStore(tmp_path / "tasks")
+    monkeypatch.setattr(main, "STORE", store)
+
+    async def fake_run(task_id, req, cfg, s, work_dir):
+        await asyncio.sleep(0)   # 立即完成，不真正调引擎
+
+    monkeypatch.setattr(main, "run_translation", fake_run)
+    r = client.post("/api/translate", json={"path": str(tmp_path)})
+    assert r.status_code == 200
+    task_id = r.json()["task_id"]
+
+    r = client.post(f"/api/task/{task_id}/cancel")
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert store.load(task_id).cancelled is True
+
+    r = client.post(f"/api/task/{task_id}/pause")
+    assert r.status_code == 200 and r.json()["paused"] is True
+    assert store.load(task_id).paused is True
+
+    # 再次 pause 应回切为 False
+    r = client.post(f"/api/task/{task_id}/pause")
+    assert r.status_code == 200 and r.json()["paused"] is False

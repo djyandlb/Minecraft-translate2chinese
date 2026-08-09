@@ -23,11 +23,13 @@ class TaskState:
 
 
 class TaskStore:
-    """任务状态 json 持久化（每个任务一个文件）。"""
+    """任务状态 json 持久化（每个任务一个文件）。
+    带内存缓存：new/save 更新缓存，load 先查缓存，保证端点与后台任务拿到同一对象（F1）。"""
 
     def __init__(self, dir: Path):
         self.dir = dir
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._cache: dict[str, TaskState] = {}
 
     def _path(self, task_id: str) -> Path:
         return self.dir / f"{task_id}.json"
@@ -39,12 +41,17 @@ class TaskStore:
 
     def save(self, state: TaskState) -> None:
         self._path(state.id).write_text(json.dumps(asdict(state), ensure_ascii=False), encoding="utf-8")
+        self._cache[state.id] = state
 
     def load(self, task_id: str) -> TaskState | None:
+        if task_id in self._cache:
+            return self._cache[task_id]
         p = self._path(task_id)
         if not p.exists():
             return None
-        return TaskState(**json.loads(p.read_text(encoding="utf-8")))
+        state = TaskState(**json.loads(p.read_text(encoding="utf-8")))
+        self._cache[task_id] = state
+        return state
 
     def list(self) -> list[TaskState]:
         return [self.load(p.stem) for p in self.dir.glob("*.json") if p.stem]

@@ -1,5 +1,6 @@
 # FastAPI 入口（任务 13）：扫描/翻译/任务/浏览/术语表路由，串起 M0-M2 全部模块
 import asyncio
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -20,15 +21,16 @@ BASE = Path(__file__).resolve().parent.parent          # backend/
 CONFIG_PATH = BASE / "config.json"
 WORK_DIR = BASE / "work"
 STORE = TaskStore(WORK_DIR / "tasks")
+_TASKS: dict[str, asyncio.Task] = {}    # 保存后台任务引用，防止被 GC 回收（F2）
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 def _resolve(path_str: str) -> Path:
-    """整合包输入：目录或压缩包。压缩包解压到 work/extracted。"""
+    """整合包输入：目录或压缩包。扫描用压缩包解压到 work/extracted/scan，独立于任务解压目录（F4）。"""
     p = Path(path_str)
     if is_archive(p):
-        p = extract_modpack(p, WORK_DIR / "extracted")
+        p = extract_modpack(p, WORK_DIR / "extracted" / "scan")
     return p
 
 
@@ -69,7 +71,9 @@ async def translate(req: TranslateRequest):
     state = STORE.new()
     state.status = "running"
     STORE.save(state)
-    asyncio.create_task(run_translation(state.id, req, cfg, STORE, WORK_DIR))
+    task = asyncio.create_task(run_translation(state.id, req, cfg, STORE, WORK_DIR))
+    _TASKS[state.id] = task
+    task.add_done_callback(lambda t: _TASKS.pop(state.id, None))
     return {"task_id": state.id}
 
 
@@ -107,6 +111,9 @@ def pause_task(task_id: str):
 
 @app.get("/api/task/{task_id}/download")
 def download(task_id: str):
+    # task_id 为 12 位十六进制 uuid 前缀，先校验再拼路径，防路径注入（F6）
+    if not re.fullmatch(r"[0-9a-f]{12}", task_id):
+        raise HTTPException(404, "任务不存在")
     for f in (WORK_DIR / "outputs").glob(f"{task_id}_*.zip"):
         return FileResponse(f, filename=f.name)
     raise HTTPException(404, "尚未生成资源包")
@@ -114,7 +121,7 @@ def download(task_id: str):
 
 @app.get("/api/browse")
 def browse(path: str = ""):
-    p = Path(path) if path else Path("C:/")
+    p = Path(path) if path else Path.home()
     if not p.exists() or not p.is_dir():
         return {"parent": str(p.parent), "dirs": []}
     dirs = sorted([d.name for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")])

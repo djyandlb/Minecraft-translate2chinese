@@ -12,7 +12,7 @@ from app.resourcepack import build_resource_pack
 from app.scanner import scan_modpack, scan_jar
 from app.tasks import TaskState, TaskStore
 from app.translate.engine import create_engine
-from app.translate.han import is_same_script, traditional
+from app.translate.han import is_same_script, simplify, traditional
 from app.translate.llm import LLMClient
 from app.version import version_to_pack_format
 
@@ -27,7 +27,8 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
     try:
         path = Path(req.path)
         if is_archive(path):
-            path = extract_modpack(path, work_dir / "extracted")
+            # 按任务隔离解压目录，避免并发任务共用 extracted/ 互相覆盖（F4）
+            path = extract_modpack(path, work_dir / "extracted" / task_id)
         scans = (scan_jar(path, req.source_lang, req.target_lang)
                  if req.mode == "jar"
                  else scan_modpack(path, req.source_lang, req.target_lang))
@@ -57,14 +58,15 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
                 return
             while state.paused:
                 await asyncio.sleep(0.5)
-            cached = memory.get(job.source_text)
+            cached = memory.get(job.source_text, req.target_lang)
             if cached:
                 translated = cached
-            elif same_script and req.target_lang == "zh_tw":
-                translated = traditional(job.source_text)   # 简繁直转，免 AI
+            elif same_script:
+                # 简繁双向直转，免 AI：zh_tw 走繁化，zh_cn 走简化（F5）
+                translated = traditional(job.source_text) if req.target_lang == "zh_tw" else simplify(job.source_text)
             else:
                 translated = (await engine.translate_batch([job.source_text], req.target_lang))[0]
-            memory.set(job.source_text, translated)
+            memory.set(job.source_text, req.target_lang, translated)
             by_mod.setdefault(job.modid, {})[job.key] = translated
             state.done += 1
             state.progress.append({"key": job.key, "source": job.source_text,
@@ -79,6 +81,11 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
         state.status = "done"
         state.progress.append({"status": "done", "file": str(out)})
         store.save(state)
+    except asyncio.CancelledError:
+        # CancelledError 继承 BaseException，逃过 except Exception 会状态卡死（F2）
+        state.status = "cancelled"
+        store.save(state)
+        raise
     except Exception as e:
         state.status = "failed"
         state.progress.append({"status": "error", "error": str(e)})

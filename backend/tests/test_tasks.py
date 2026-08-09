@@ -29,3 +29,12 @@ def test_list_returns_saved(tmp_path: Path):
     store.new()
     store.new()
     assert len(store.list()) == 2
+
+
+def test_load_returns_same_cached_object(tmp_path: Path):
+    # F1：load 应返回内存缓存中的同一对象，端点与后台 translator 共享状态变更（cancel/pause 立即可见）
+    store = TaskStore(tmp_path / "tasks")
+    t = store.new()
+    assert store.load(t.id) is store.load(t.id)
+    store.load(t.id).cancelled = True
+    assert store.load(t.id).cancelled is True
