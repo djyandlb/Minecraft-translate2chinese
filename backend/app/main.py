@@ -1,12 +1,14 @@
 # FastAPI 入口（任务 13）：扫描/翻译/任务/浏览/术语表路由，串起 M0-M2 全部模块
 import asyncio
+import os
 import re
+import string
 import sys
 import uuid
 import zipfile
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -176,12 +178,38 @@ def download(task_id: str):
     raise HTTPException(404, "尚未生成资源包")
 
 
+@app.post("/api/upload")
+async def upload(file: UploadFile = File(...)):
+    """拖放文件上传：流式分块落盘 work/uploads/<uuid>/<原始文件名>，返回路径供 /api/detect 消费。"""
+    # 文件名只取 basename（正反斜杠都剥掉），防路径穿越逃逸出 work 目录
+    name = Path((file.filename or "upload").replace("\\", "/")).name or "upload"
+    dest_dir = WORK_DIR / "uploads" / uuid.uuid4().hex
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / name
+    with dest.open("wb") as out:          # 流式分块写盘（1MB/块），防大整合包整读进内存
+        while chunk := await file.read(1024 * 1024):
+            out.write(chunk)
+    return {"path": str(dest), "name": name, "size": dest.stat().st_size}
+
+
+def _windows_drives() -> list[str]:
+    """探测存在的盘符，如 ['C:\\', 'D:\\', ...]，供跨盘导航。"""
+    drives = []
+    for letter in string.ascii_uppercase:
+        root = f"{letter}:\\"
+        if os.path.exists(root):
+            drives.append(root)
+    return drives
+
+
 @app.get("/api/browse")
 def browse(path: str = ""):
     p = Path(path) if path else Path.home()
     if not p.exists() or not p.is_dir():
-        return {"parent": str(p.parent), "dirs": []}
+        return {"parent": str(p.parent) if p.parent != p else "", "dirs": []}
     try:
+        if os.name == "nt" and p.parent == p:    # 盘根：列出所有盘符供跨盘，否则永远困在当前盘
+            return {"parent": "", "dirs": _windows_drives()}
         dirs = sorted([d.name for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")])
     except (PermissionError, OSError):
         # M3：无权限/读取失败目录返回空列表，不 500
