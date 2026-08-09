@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 """M5-1 硬编码字节码扫描与替换核心的测试（真实 javac 编译验证）。"""
 
+import json
 import shutil
 import subprocess
 import zipfile
 from pathlib import Path
 
 import pytest
+from httpx import Response
 
 import app.hardcode as hardcode
 from app.hardcode import (
+    ai_judge_translate,
     is_hardcode_translatable,
     replace_hardcoded_strings,
     scan_hardcoded_candidates,
@@ -294,3 +297,103 @@ def test_replace_emoji_content_damage_restores(tmp_path):
     found = scan_hardcoded_strings(jar)
     assert "Hello World" in found          # 原字节已还原
     assert "🎉 你好世界" not in found       # 损坏内容不得进输出 jar
+
+
+# ---------- B 阶段：scan 候选带相邻常量上下文（供 AI 判断） ----------
+
+def test_scan_candidates_context(tmp_path):
+    """scan_hardcoded_candidates 返回带 context 的候选；context 含同 class 的其他字符串常量。"""
+    jar = _make_test_jar(tmp_path)
+    cands = scan_hardcoded_candidates(jar)
+    hw = next(c for c in cands if c["text"] == "Hello World")
+    assert "context" in hw and isinstance(hw["context"], list)
+    # context 含同 class 的其他 String 常量（排除自身）
+    assert "Welcome to the server" in hw["context"]
+    # context 去重截断：≤30 条、每条 ≤80 字符
+    assert len(hw["context"]) <= 30
+    assert all(len(s) <= 80 for s in hw["context"])
+    # 其余候选同样带 context 字段
+    assert all("context" in c for c in cands)
+
+
+# ---------- B 阶段：ai_judge_translate（LLM 判断 + 翻译） ----------
+
+def _llm_engine_with(handler) -> "LLMClient":
+    """构造注入 MockTransport 的 LLMClient（ai_judge 测试用，不走真实网络）。"""
+    from httpx import AsyncClient, MockTransport
+    from app.translate.llm import LLMClient
+
+    engine = LLMClient("https://x", "k", "m", concurrency=2, batch_size=10)
+    engine._client = AsyncClient(transport=MockTransport(handler))
+    return engine
+
+
+@pytest.mark.asyncio
+async def test_ai_judge_translate():
+    """LLM 判断：只返回 translatable=true 的 {text: translation}，不可见文本不返回。"""
+    def handler(request):
+        return Response(200, json={"choices": [{"message": {"content": json.dumps([
+            {"text": "Hello World", "translatable": True, "translation": "你好世界"},
+            {"text": "stone", "translatable": False, "translation": ""},
+        ])}}]})
+
+    engine = _llm_engine_with(handler)
+    candidates = [
+        {"text": "Hello World", "context": ["Welcome to the server"]},
+        {"text": "stone", "context": ["iron_ingot"]},
+    ]
+    mapping = await ai_judge_translate(engine, candidates, "zh_cn")
+    assert mapping == {"Hello World": "你好世界"}   # stone 判定不可见 → 不返回
+    await engine._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_judge_translate_invalid_json_skips():
+    """LLM 输出非法 JSON → 该批跳过，不抛异常，返回空映射（容错）。"""
+    def handler(request):
+        return Response(200, json={"choices": [{"message": {"content": "这不是 JSON"}}]})
+
+    engine = _llm_engine_with(handler)
+    mapping = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
+    assert mapping == {}
+    await engine._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_judge_translate_missing_field_skips():
+    """LLM 输出缺失 translatable/translation 字段 → 该条忽略，不崩。"""
+    def handler(request):
+        return Response(200, json={"choices": [{"message": {"content": json.dumps([
+            {"text": "Hello World"},                      # 缺字段
+            {"text": "Good day", "translatable": True},   # 缺 translation
+        ])}}]})
+
+    engine = _llm_engine_with(handler)
+    mapping = await ai_judge_translate(engine, [
+        {"text": "Hello World", "context": []},
+        {"text": "Good day", "context": []},
+    ], "zh_cn")
+    assert mapping == {}
+    await engine._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_judge_translate_paging():
+    """分页：候选超过 25 条时分多批请求，每批 ≤25 条。"""
+    seen_sizes = []
+
+    def handler(request):
+        payload = json.loads(request.content)
+        batch = json.loads(payload["messages"][-1]["content"])
+        seen_sizes.append(len(batch))
+        return Response(200, json={"choices": [{"message": {"content": json.dumps([
+            {"text": item["text"], "translatable": True, "translation": "译"}
+            for item in batch
+        ])}}]})
+
+    engine = _llm_engine_with(handler)
+    candidates = [{"text": f"t{i}", "context": []} for i in range(60)]
+    mapping = await ai_judge_translate(engine, candidates, "zh_cn")
+    assert len(mapping) == 60
+    assert seen_sizes == [25, 25, 10]   # 60 → 25 + 25 + 10
+    await engine._client.aclose()

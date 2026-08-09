@@ -13,11 +13,15 @@ jawa 类名加载方式（已实测，Windows）：
 """
 
 import io
+import json
+import logging
 import re
 import shutil
 import zipfile
 from collections import Counter
 from pathlib import Path, PurePosixPath
+
+logger = logging.getLogger(__name__)
 
 from jawa.classloader import ClassLoader
 from jawa.constants import String
@@ -144,15 +148,31 @@ def _repack(work: Path, jar: Path) -> None:
             zf.write(p, rel)
 
 
-def scan_hardcoded_candidates(jar: Path) -> list[dict]:
-    """扫描硬编码候选：返回 [{"text": str, "occurrences": int}]，按出现频率降序。
+def _trim_context(raw: set[str], max_items: int = 30, max_chars: int = 80) -> list[str]:
+    """context 去重截断：保持出现顺序，最多 max_items 条，每条最多 max_chars 字符。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for s in raw:
+        s2 = s[:max_chars]
+        if s2 in seen:
+            continue
+        seen.add(s2)
+        out.append(s2)
+        if len(out) >= max_items:
+            break
+    return out
 
-    与 scan_hardcoded_strings 同一提取逻辑（解压 → 遍历 *.class → jawa 提取
-    String 字面量 → is_hardcode_translatable 过滤），但用 Counter 保留频率，
-    供前端候选选择列表按频率排序展示。
+
+def scan_hardcoded_candidates(jar: Path) -> list[dict]:
+    """扫描硬编码候选：返回 [{"text", "occurrences", "context"}]，按出现频率降序。
+
+    context = 同一 class 内相邻的字符串常量（排除自身，去重，最多前 30 条、
+    每条 ≤80 字符），供 AI 判断「该字符串是否用户可见文本」
+    （方块译匠 inspect_class_context 思路）。
     """
     work = jar.parent / f".{jar.stem}_hw"
     counts: Counter[str] = Counter()
+    contexts: dict[str, set[str]] = {}
     try:
         _extract_jar(jar, work)
         loader = _class_loader(work)
@@ -162,14 +182,24 @@ def scan_hardcoded_candidates(jar: Path) -> list[dict]:
                 klass = loader[name]
             except Exception:
                 continue  # 单个 class 损坏/不可加载：跳过，不拖垮整包扫描
+            class_strings = [
+                c.string.value
+                for c in klass.constants
+                if isinstance(c, String)
+            ]
             for c in klass.constants:
                 if isinstance(c, String):
                     t = c.string.value
                     if is_hardcode_translatable(t):
                         counts[t] += 1
+                        # context：同 class 的其他 String 常量（原始、不过滤，供 AI 判断语境）
+                        contexts.setdefault(t, set()).update(s for s in class_strings if s != t)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    return [{"text": t, "occurrences": n} for t, n in counts.most_common()]
+    return [
+        {"text": t, "occurrences": n, "context": _trim_context(contexts.get(t, set()))}
+        for t, n in counts.most_common()
+    ]
 
 
 def scan_hardcoded_strings(jar: Path) -> list[str]:
@@ -263,3 +293,97 @@ def replace_hardcoded_strings(jar: Path, mapping: dict[str, str]) -> dict:
         "failed_classes": failed_classes,
         "skipped": skipped,
     }
+
+
+# ---------- B 阶段：硬编码 AI 自动判断 + 翻译（方块译匠 scan_class_text 思路） ----------
+
+# 每批发送给 LLM 判断的候选上限
+_AI_JUDGE_PAGE = 25
+
+# system 提示词：判断「是否用户可见文本」并翻译，严格 JSON 数组输出
+_AI_JUDGE_SYSTEM_PROMPT = (
+    "你是 Minecraft 模组汉化助手。判断每段字符串是否是「玩家在游戏中能直接看到的文本」"
+    "（GUI 标题、物品/工具提示、聊天消息、成就名等）。技术标识符（JSON 键、资源路径、"
+    "注册 ID、方法签名、包名）→ translatable=false。是用户可见文本 → translatable=true "
+    "并给出简体中文翻译（保留 %s %d 等占位符）。严格输出 JSON 数组，不要任何解释或 Markdown："
+    '[{"text": "...", "translatable": true, "translation": "..."},'
+    ' {"text": "...", "translatable": false, "translation": ""}]'
+)
+
+
+def _parse_ai_judge_response(content: str) -> list[dict] | None:
+    """解析 LLM 输出的 JSON 数组；非法 JSON / 顶层不是数组 → None（该批跳过）。
+
+    容错：剥 Markdown 代码块围栏；容忍顶层为 {"results": [...]} 或 {"items": [...]}
+    对象包装（兼容 response_format json_object 约束下的对象输出形态）。
+    """
+    s = content.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
+        s = re.sub(r"\n?```$", "", s)
+    try:
+        data = json.loads(s)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, dict):
+        for key in ("results", "items"):
+            v = data.get(key)
+            if isinstance(v, list):
+                return [x for x in v if isinstance(x, dict)]
+    return None
+
+
+async def ai_judge_translate(engine, candidates: list[dict], target_lang: str) -> dict[str, str]:
+    """LLM 判断硬编码候选是否用户可见并翻译。
+
+    分页 ≤25 条/批；每批把 [{text, context}] 发 LLM，要求严格 JSON 数组输出：
+    [{"text": "...", "translatable": true/false, "translation": "..."}]
+    只返回 translatable=true 的 {text: translation}。
+    解析容错：非法 JSON / 缺失字段 → 该批跳过，logger.warning 记录。
+    复用 engine（LLMClient）的 base_url/model 与 httpx 客户端发 /chat/completions。
+    """
+    if not candidates:
+        return {}
+    client = engine._get_client()  # LLMClient 内部复用的 httpx.AsyncClient
+    result: dict[str, str] = {}
+    for start in range(0, len(candidates), _AI_JUDGE_PAGE):
+        batch = candidates[start:start + _AI_JUDGE_PAGE]
+        payload = [
+            {"text": c["text"], "context": c.get("context") or []}
+            for c in batch
+        ]
+        body = {
+            "model": engine.model,
+            "messages": [
+                {"role": "system", "content": _AI_JUDGE_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            "temperature": 0.2,
+        }
+        try:
+            resp = await client.post(f"{engine.base_url}/chat/completions", json=body)
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            if engine.on_usage:
+                u = data.get("usage") or {}
+                engine.on_usage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+        except Exception as exc:
+            # 请求失败（网络/API/HTTP 错误）→ 整批跳过，不中断其他批次
+            logger.warning("ai_judge 批次请求失败，跳过 %d 条：%s", len(batch), exc)
+            continue
+        items = _parse_ai_judge_response(content)
+        if items is None:
+            # 非法 JSON / 顶层非数组 → 该批跳过
+            logger.warning("ai_judge 输出非法 JSON，跳过 %d 条", len(batch))
+            continue
+        for item in items:
+            text = item.get("text")
+            if not text:
+                continue
+            # 仅接受显式 translatable=true 且带非空 translation 的条目
+            if item.get("translatable") and item.get("translation"):
+                result[text] = item["translation"]
+    return result

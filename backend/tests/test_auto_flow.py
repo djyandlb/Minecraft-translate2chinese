@@ -268,8 +268,8 @@ def _make_jar_with_two_hardcode(tmp_path, name="two.jar"):
 
 
 @pytest.mark.asyncio
-async def test_auto_selected_hardcoded_only(tmp_path, monkeypatch):
-    """selected_hardcoded 只选 "Hello World" → 硬编码阶段只翻选中项，"Welcome" 保持原文。"""
+async def test_auto_selected_hardcoded_ignored(tmp_path, monkeypatch):
+    """取消 selected_hardcoded 生效：即使只传 "Hello World"，硬编码仍全翻（不再手动勾选）。"""
     mods = tmp_path / "mods"
     mods.mkdir()
     _make_jar_with_two_hardcode(mods, name="two.jar")
@@ -287,7 +287,122 @@ async def test_auto_selected_hardcoded_only(tmp_path, monkeypatch):
     hards = list((work / "outputs" / state.id / "hardcoded").glob("*.jar"))
     assert hards, "应产出汉化 jar"
     found = scan_hardcoded_strings(hards[0])
-    assert "你好世界" in found            # 选中的 "Hello World" 已翻译替换
+    assert "你好世界" in found            # "Hello World" 已翻译替换
     assert "Hello World" not in found
-    assert "Welcome" in found             # 未选中的 "Welcome" 保持原文
-    assert "欢迎" not in found            # 未选中的不应出现译文
+    assert "欢迎" in found                 # "Welcome" 也被翻译（selected_hardcoded 不再生效）
+    assert "Welcome" not in found
+
+
+@pytest.mark.asyncio
+async def test_auto_machine_skips_hardcode(tmp_path, monkeypatch):
+    """machine 引擎：硬编码跳过 + progress warn，但语言文件仍正常翻译成资源包。"""
+    from app.translate.machine import MachineClient
+
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    _make_mod_jar(mods)                                    # 语言文件 mod
+    _make_jar_with_hardcode(mods, name="h.jar")            # 硬编码 mod（应被跳过）
+
+    eng = MachineClient(provider="google")
+    async def fake_batch(texts, target_lang):
+        return [t.replace("Hello World", "你好世界") for t in texts]
+    eng.translate_batch = fake_batch
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: eng)
+
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work)
+    st = store.load(state.id)
+    assert st.status == "done"
+    # 语言文件正常翻 → 资源包产出
+    packs = list((work / "outputs" / state.id).glob("*_zh_cn.zip"))
+    assert packs, "语言文件应正常翻译成资源包"
+    with zipfile.ZipFile(packs[0]) as zf:
+        data = json.loads(zf.read("assets/mymod/lang/zh_cn.json").decode("utf-8"))
+    assert data["key.hello"] == "你好世界"
+    # 硬编码跳过：无 hardcoded jar 产物 + warn 明确提示
+    hard_dir = work / "outputs" / state.id / "hardcoded"
+    assert not hard_dir.exists() or not list(hard_dir.glob("*.jar"))
+    warns = [p for p in st.progress if p.get("status") == "warn"]
+    assert any("硬编码" in str(p.get("error", "")) for p in warns), "machine 跳过硬编码应有 warn 提示"
+
+
+class _JsonLinesEngine:
+    """假引擎：结构化 json / md 行文本专用翻译。"""
+
+    async def translate_batch(self, texts, target_lang):
+        m = {"Welcome": "欢迎", "Welcome to the mod": "欢迎来到本模组"}
+        return [m.get(t, t) for t in texts]
+
+
+@pytest.mark.asyncio
+async def test_auto_json_lines_written_back(tmp_path, monkeypatch):
+    """json/lines 全文本覆盖：mod jar 含结构化 json + en_us md → 汉化 jar 内写回译文。"""
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    jar = mods / "j.jar"
+    with zipfile.ZipFile(jar, "w") as zf:
+        zf.writestr("assets/mymod/advancement.json", json.dumps({"title": {"text": "Welcome"}}))
+        zf.writestr("assets/mymod/patchouli_books/guide/en_us/entries/intro.md",
+                    "# Intro\r\nWelcome to the mod\r\n")
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _JsonLinesEngine())
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work)
+    assert store.load(state.id).status == "done"
+    # 汉化 jar 产物（json/lines 写回 jar 副本）
+    hards = list((work / "outputs" / state.id / "hardcoded").glob("*.jar"))
+    assert hards, "json/lines 写回应产出汉化 jar"
+    with zipfile.ZipFile(hards[0]) as zf:
+        data = json.loads(zf.read("assets/mymod/advancement.json").decode("utf-8"))
+        md = zf.read("assets/mymod/patchouli_books/guide/zh_cn/entries/intro.md").decode("utf-8")
+    assert data["title"]["text"] == "欢迎"       # 结构化 json 译文写回
+    assert "欢迎来到本模组" in md                 # lines 译文写回 zh_cn 路径
+    assert "# Intro" in md                       # 未翻译行保留
+
+
+@pytest.mark.asyncio
+async def test_auto_llm_ai_judge_only_visible(tmp_path, monkeypatch):
+    """LLM 引擎：ai_judge_translate 只替换 AI 判定可见的硬编码（mock ai_judge）。"""
+    from app.translate.llm import LLMClient
+
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    _make_jar_with_two_hardcode(mods, name="two.jar")   # "Hello World" + "Welcome"
+    engine = LLMClient("https://x", "k", "m")
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: engine)
+
+    async def fake_judge(engine, candidates, target):
+        return {"Hello World": "你好世界"}   # AI 只判定 Hello World 可见
+
+    monkeypatch.setattr("app.auto_flow.ai_judge_translate", fake_judge)
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work)
+    st = store.load(state.id)
+    assert st.status == "done"
+    hards = list((work / "outputs" / state.id / "hardcoded").glob("*.jar"))
+    assert hards, "LLM AI 判断应产出汉化 jar"
+    found = scan_hardcoded_strings(hards[0])
+    assert "你好世界" in found                # AI 判定可见 → 替换
+    assert "Hello World" not in found
+    assert "Welcome" in found                 # AI 判定不可见 → 保持原文
+    assert "欢迎" not in found
+    # AI 判定不可翻译数量有 warn 提示
+    warns = [p for p in st.progress if p.get("status") == "warn"]
+    assert any("非用户可见" in str(p.get("error", "")) for p in warns)
