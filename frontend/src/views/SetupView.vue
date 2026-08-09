@@ -1,6 +1,6 @@
 <script setup>
 import { nextTick, onMounted, ref, watch } from 'vue'
-import { getConfig, getKeyStatus, saveConfig, saveKey, testConnection } from '../api'
+import { clearCache, getCacheSize, getConfig, getKeyStatus, saveConfig, saveKey, testConnection } from '../api'
 
 // props：onDone(配置对象) / onClose() 由 App 注入（保存后回调）；closable=false 时隐藏「取消」（首次开屏强制配置）
 const props = defineProps({ onDone: Function, onClose: Function, closable: { type: Boolean, default: true } })
@@ -39,6 +39,35 @@ const tip = ref('')
 const testing = ref(false)
 const testResult = ref('')
 const testOk = ref(null)
+
+// 缓存管理：占用显示（临时 WORK_DIR + 产物 OUTPUTS_DIR）+ 清除按钮
+const cacheSize = ref(null)      // { work_bytes, outputs_bytes, total_mb, work_path, outputs_path }
+const cacheMsg = ref('')         // 清理结果提示
+const clearing = ref(false)      // 清除缓存进行中
+
+async function refreshCacheSize() {
+  try {
+    cacheSize.value = await getCacheSize()
+  } catch (e) {
+    cacheSize.value = null       // 后端不可用 → 显示 —，不清空已展示路径
+  }
+}
+
+async function onClearCache() {
+  // 确认弹窗：清缓存会删运行中任务的中间文件，明确警示再动手
+  if (!window.confirm('将删除临时文件与旧产物，正在翻译的任务会受影响。确定清除？')) return
+  clearing.value = true
+  cacheMsg.value = ''
+  try {
+    const r = await clearCache()
+    cacheMsg.value = `已清除 ${r.cleared_mb} MB 缓存`
+    await refreshCacheSize()      // 清理后刷新占用显示
+  } catch (e) {
+    cacheMsg.value = `清除失败：${e.message}`
+  } finally {
+    clearing.value = false
+  }
+}
 
 async function runTest(which) {
   testing.value = true
@@ -88,6 +117,7 @@ onMounted(async () => {
         if (st.configured) apiKey.value = API_KEY_PLACEHOLDER
       } catch (e) { /* 后端不可用则保持空白，让用户手动填 */ }
     }
+    await refreshCacheSize()      // 回填配置后顺带加载缓存占用
   } catch (e) {
     tip.value = '读取后端配置失败（后端未启动？将使用默认值）'
   } finally {
@@ -199,6 +229,24 @@ async function saveAndClose() {
       <small class="sub">源语言无需选择，识别步骤会自动判断</small>
     </div>
 
+    <!-- 缓存管理：占用显示 + 清除按钮（清临时中间产物与旧产物） -->
+    <div class="field cache-block">
+      <label>缓存管理</label>
+      <div class="cache-line">
+        <span class="cache-size">
+          缓存占用：{{ cacheSize ? cacheSize.total_mb + ' MB' : '—' }}
+        </span>
+        <button class="btn danger" :disabled="clearing" @click="onClearCache">
+          {{ clearing ? '清理中…' : '清除缓存' }}
+        </button>
+      </div>
+      <small v-if="cacheSize" class="sub">
+        临时文件：{{ cacheSize.work_path }}<br />
+        产物目录：{{ cacheSize.outputs_path }}
+      </small>
+      <p v-if="cacheMsg" class="tip">{{ cacheMsg }}</p>
+    </div>
+
     <p v-if="tip" class="tip">{{ tip }}</p>
     <p v-if="error" class="err">{{ error }}</p>
 
@@ -217,4 +265,10 @@ async function saveAndClose() {
 .test-result { font-size: 13px; }
 .test-result.ok { color: var(--accent); }
 .test-result.fail { color: var(--danger); white-space: pre-wrap; }
+
+/* 缓存管理：占用文本 + 清除按钮横排；危险按钮红色 */
+.cache-block { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 6px; }
+.cache-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.cache-size { font-weight: 600; color: var(--text); }
+.btn.danger { background: var(--danger); color: #fff; border-color: transparent; }
 </style>

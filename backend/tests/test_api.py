@@ -213,3 +213,78 @@ def test_test_connection_machine_down(tmp_path, monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False and "机翻服务不可用" in body["message"]
+
+
+# —— 缓存清理 + 占用统计（任务：缓存清理与配置持久化开屏修复）——
+def test_cache_size_empty(tmp_path, monkeypatch):
+    # 空目录（WORK_DIR/OUTPUTS_DIR 均无文件）→ total_mb=0，路径返回
+    import app.main as main
+    work = tmp_path / "work"; work.mkdir()
+    out = tmp_path / "outputs"; out.mkdir()
+    monkeypatch.setattr(main, "WORK_DIR", work)
+    monkeypatch.setattr(main, "OUTPUTS_DIR", out)
+    r = client.get("/api/cache-size")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total_mb"] == 0
+    assert body["work_bytes"] == 0 and body["outputs_bytes"] == 0
+    assert body["work_path"] == str(work) and body["outputs_path"] == str(out)
+
+
+def test_cache_size_counts(tmp_path, monkeypatch):
+    # 目录里放文件（含嵌套子目录）→ work/outputs 字节数分别统计，total_mb 保留 1 位小数
+    import app.main as main
+    work = tmp_path / "work"; work.mkdir()
+    out = tmp_path / "outputs"; out.mkdir()
+    (work / "a.bin").write_bytes(b"x" * (1024 * 1024))          # 1 MB
+    (out / "sub").mkdir()
+    (out / "sub" / "b.bin").write_bytes(b"y" * (512 * 1024))    # 0.5 MB
+    monkeypatch.setattr(main, "WORK_DIR", work)
+    monkeypatch.setattr(main, "OUTPUTS_DIR", out)
+    r = client.get("/api/cache-size")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["work_bytes"] == 1024 * 1024
+    assert body["outputs_bytes"] == 512 * 1024
+    assert body["total_mb"] == 1.5
+
+
+def test_clear_cache_removes(tmp_path, monkeypatch):
+    # 放文件 → clear_cache → 两目录重建且空，cleared_bytes/cleared_mb 正确
+    import app.main as main
+    work = tmp_path / "work"; work.mkdir()
+    out = tmp_path / "outputs"; out.mkdir()
+    (work / "a.bin").write_bytes(b"x" * (1024 * 1024))
+    (out / "b.bin").write_bytes(b"y" * (1024 * 1024))
+    monkeypatch.setattr(main, "WORK_DIR", work)
+    monkeypatch.setattr(main, "OUTPUTS_DIR", out)
+    r = client.post("/api/clear-cache")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cleared_bytes"] == 2 * 1024 * 1024
+    assert body["cleared_mb"] == 2.0
+    # 目录重建且空（TaskStore 等依赖 WORK_DIR 存在）
+    assert work.is_dir() and list(work.iterdir()) == []
+    assert out.is_dir() and list(out.iterdir()) == []
+
+
+def test_config_marks_configured(tmp_path, monkeypatch):
+    # 保存配置（engine 等）→ GET /api/config 返回含 engine（前端据此不弹开屏设置）
+    import app.main as main
+    monkeypatch.setattr(main, "CONFIG_PATH", tmp_path / "config.json")
+    r = client.post("/api/config", json={"engine": "llm"})
+    assert r.status_code == 200
+    r = client.get("/api/config")
+    assert r.status_code == 200 and r.json()["engine"] == "llm"
+
+
+def test_config_configured_flag(tmp_path, monkeypatch):
+    # 开屏判断依据：未保存过配置 → GET 无 configured；保存后 → configured=True
+    import app.main as main
+    monkeypatch.setattr(main, "CONFIG_PATH", tmp_path / "config.json")
+    r = client.get("/api/config")
+    assert r.status_code == 200 and "configured" not in r.json()
+    r = client.post("/api/config", json={"engine": "llm", "target_lang": "zh_tw"})
+    assert r.status_code == 200 and r.json().get("configured") is True
+    r = client.get("/api/config")
+    assert r.status_code == 200 and r.json().get("configured") is True

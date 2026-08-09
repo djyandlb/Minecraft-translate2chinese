@@ -2,6 +2,7 @@
 import asyncio
 import os
 import re
+import shutil
 import string
 import sys
 import tempfile
@@ -75,6 +76,44 @@ def post_config(payload: dict):
         cfg.set(k, v)
     cfg.save()
     return cfg.data
+
+
+def _dir_bytes(d: Path) -> int:
+    """递归统计目录内所有文件字节数；目录不存在/为空返回 0。"""
+    if not d.is_dir():
+        return 0
+    return sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+
+
+@app.get("/api/cache-size")
+def cache_size():
+    """缓存占用：返回 WORK_DIR（临时中间产物）+ OUTPUTS_DIR（exe 旁产物）的大小与路径。
+
+    供设置页「缓存占用：xxx MB」显示；目录不存在按 0 计。"""
+    work_bytes = _dir_bytes(WORK_DIR)
+    outputs_bytes = _dir_bytes(OUTPUTS_DIR)
+    return {
+        "work_bytes": work_bytes,
+        "outputs_bytes": outputs_bytes,
+        "total_mb": round((work_bytes + outputs_bytes) / (1024 * 1024), 1),
+        "work_path": str(WORK_DIR),
+        "outputs_path": str(OUTPUTS_DIR),
+    }
+
+
+@app.post("/api/clear-cache")
+def clear_cache():
+    """清除缓存：删除 WORK_DIR（中间产物）+ OUTPUTS_DIR（旧产物）内容，重建空目录。
+
+    - 重建目录是必须的：TaskStore（tasks 子目录）与 memory 依赖 WORK_DIR 存在；
+    - 删除运行中任务的中间文件有风险，由前端确认弹窗提示，后端不检查（用户主动清）。"""
+    cleared = _dir_bytes(WORK_DIR) + _dir_bytes(OUTPUTS_DIR)
+    shutil.rmtree(WORK_DIR, ignore_errors=True)
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(OUTPUTS_DIR, ignore_errors=True)
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    STORE.dir.mkdir(parents=True, exist_ok=True)   # tasks 子目录重建，TaskStore.save 不自动建目录
+    return {"cleared_bytes": cleared, "cleared_mb": round(cleared / (1024 * 1024), 1)}
 
 
 @app.post("/api/key")

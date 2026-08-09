@@ -38,6 +38,9 @@ class AppConfig:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # 兜底：api_key 绝不落盘
         self.data.pop("api_key", None)
+        # configured 标记：任何一次保存都视为「用户已配置过」，前端据此判断是否弹开屏设置
+        # （pywebview 的 localStorage 不持久，改用后端 config.json 持久标记跨启动保留）
+        self.data["configured"] = True
         self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def get(self, key: str, default=None):

@@ -26,6 +26,10 @@ async function req(path, options = {}) {
 export const getConfig = () => req('/config')
 export const saveConfig = (cfg) => req('/config', { method: 'POST', body: JSON.stringify(cfg) })
 
+// 缓存：查询占用（{work_bytes, outputs_bytes, total_mb, work_path, outputs_path}）/ 清除（返回清理大小）
+export const getCacheSize = () => req('/cache-size')
+export const clearCache = () => req('/clear-cache', { method: 'POST' })
+
 // API Key：写入后端 keyring（前端 localStorage 仅作 UI 回显，真正生效靠后端 keyring）
 export const saveKey = (apiKey) => req('/key', { method: 'POST', body: JSON.stringify({ api_key: apiKey }) })
 

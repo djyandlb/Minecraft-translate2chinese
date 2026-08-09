@@ -5,10 +5,10 @@ import SetupView from './views/SetupView.vue'
 import ScanView from './views/ScanView.vue'
 import ProgressView from './views/ProgressView.vue'
 
-// —— 配置持久：localStorage 记录「已配置过」→ 首次开屏弹配置面板，非首次直接主界面 ——
-const CONFIGURED_KEY = 'mc_translator_configured'
-const configured = ref(localStorage.getItem(CONFIGURED_KEY) === '1')
-const showSetup = ref(!configured.value)        // 首次开屏 → 弹配置面板
+// —— 配置持久：开屏判断改后端 config.json（pywebview 的 localStorage 不持久，
+//    改用后端 configured 标记跨启动保留：保存过 → 不弹，否则首次开屏弹配置）——
+const configured = ref(false)
+const showSetup = ref(false)                    // getConfig 返回后：未配置才弹（已配置用户不闪窗）
 const config = ref({ target_lang: 'zh_cn' })    // 前端只保留目标语言（源语言/版本后端自动识别）
 
 // —— 后端连接状态：O1 逻辑，/api/config 定时 ping ——
@@ -22,9 +22,17 @@ async function pingBackend() {
     backendStatus.value = 'fail'
   }
 }
-onMounted(() => {
+onMounted(async () => {
   pingBackend()
   backendTimer = setInterval(pingBackend, 30000)   // 每 30 秒复查
+  // 开屏判断：后端 config 已保存过（configured 标记）→ 直接主界面；否则首次开屏弹配置
+  try {
+    const cfg = await getConfig()
+    if (cfg.configured) configured.value = true
+    else showSetup.value = true
+  } catch (e) {
+    showSetup.value = true           // 后端不可用/无配置依据 → 弹配置
+  }
 })
 onUnmounted(() => clearInterval(backendTimer))
 
@@ -126,12 +134,11 @@ function clearJobs() {
   currentTaskId.value = ''
 }
 
-// —— 配置弹窗：保存后写 localStorage 标记；设置按钮可随时重开 ——
+// —— 配置弹窗：保存由后端 config.json 持久（configured 标记），不再依赖 localStorage；设置按钮可随时重开 ——
 function onConfigSaved(cfg) { config.value = { ...config.value, ...cfg } }
 function closeSetup() {
   showSetup.value = false
   configured.value = true
-  localStorage.setItem(CONFIGURED_KEY, '1')
 }
 function openSetup() { showSetup.value = true }
 </script>
