@@ -340,6 +340,62 @@ def _parse_ai_judge_response(content: str) -> list[dict] | None:
     return None
 
 
+def _ai_judge_item_result(items: list[dict], cand: dict) -> dict[str, str] | None:
+    """从解析出的条目里取与 cand.text 匹配的结果。
+
+    返回 {text: translation}（translatable=true 且带译文）、{}（判定不可见）、
+    或 None（未匹配到该候选）。
+    """
+    for item in items:
+        if item.get("text") == cand["text"]:
+            if item.get("translatable") and item.get("translation"):
+                return {cand["text"]: item["translation"]}
+            return {}
+    return None
+
+
+async def _ai_judge_single(engine, client, cand: dict, target_lang: str) -> dict[str, str] | None:
+    """ai_judge 单条降级：对单个候选单独发请求判断并翻译（P0 根因 3）。
+
+    成功返回 {text: translation} 或 {}（判定不可见），失败/未匹配返回 None。
+    """
+    body = {
+        "model": engine.model,
+        "messages": [
+            {"role": "system", "content": _ai_judge_system_prompt(target_lang)},
+            {"role": "user", "content": json.dumps(
+                [{"text": cand["text"], "context": cand.get("context") or []}],
+                ensure_ascii=False)},
+        ],
+        "temperature": 0.2,
+    }
+    try:
+        resp = await client.post(f"{engine.base_url}/chat/completions", json=body)
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        if engine.on_usage:
+            u = data.get("usage") or {}
+            engine.on_usage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+        if not content:
+            return None
+    except Exception as exc:
+        logger.warning("ai_judge 单条降级请求失败 %s：%s", cand["text"], exc)
+        return None
+    items = _parse_ai_judge_response(content)
+    if not items:
+        # 兼容单对象输出：{"text": ..., "translatable": ..., "translation": ...}
+        try:
+            obj = json.loads(content.strip().strip("`"))
+            if isinstance(obj, dict):
+                items = [obj]
+        except (ValueError, json.JSONDecodeError):
+            items = []
+    if not items:
+        return None
+    return _ai_judge_item_result(items, cand)
+
+
 async def ai_judge_translate(engine, candidates: list[dict], target_lang: str) -> dict[str, str]:
     """LLM 判断硬编码候选是否用户可见并翻译。
 
@@ -385,9 +441,15 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str) -
             logger.warning("ai_judge 批次请求失败，跳过 %d 条：%s", len(batch), exc)
             continue
         items = _parse_ai_judge_response(content)
-        if items is None:
-            # 非法 JSON / 顶层非数组 → 该批跳过
-            logger.warning("ai_judge 输出非法 JSON，跳过 %d 条", len(batch))
+        if not items:
+            # 非法 JSON / 空数组 → 不整批丢，对该批候选逐条降级（P0 根因 3）
+            logger.warning("ai_judge 输出非法 JSON/空数组，%d 条逐条降级", len(batch))
+            for cand in batch:
+                single = await _ai_judge_single(engine, client, cand, target_lang)
+                if single is None:
+                    logger.warning("ai_judge 单条降级失败：%s", cand["text"])
+                    continue
+                result.update(single)
             continue
         for item in items:
             text = item.get("text")

@@ -111,3 +111,100 @@ async def test_glossary_prompt_injected():
     assert "iron_ingot => 铁锭" in captured["system"]
     assert "把 Minecraft" in captured["system"]
     await client._client.aclose()
+
+
+# ---------- P0 止血：单条/批量翻译丢失容错 ----------
+
+@pytest.mark.asyncio
+async def test_translate_batch_single_no_tag():
+    """单条翻译：模型输出无 [iN] 标签的纯译文 → 直接采用，不得回原文（P0 根因 1）。"""
+    def handler(request):
+        return Response(200, json={"choices": [{"message": {"content": "你好世界"}}]})
+
+    client = _client_with(handler)
+    out = await client.translate_batch(["Hello World"], "zh_cn")
+    assert out == ["你好世界"]
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_translate_batch_single_tagged_also_ok():
+    """单条翻译：模型仍输出 [i0] 前缀（旧行为）→ 剥标签后采用。"""
+    def handler(request):
+        return Response(200, json={"choices": [{"message": {"content": "[i0] 你好世界"}}]})
+
+    client = _client_with(handler)
+    out = await client.translate_batch(["Hello World"], "zh_cn")
+    assert out == ["你好世界"]
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_translate_batch_single_placeholder_restored():
+    """单条翻译带占位符：无标签译文里的 %%MC_0%% 要还原回 %s。"""
+    def handler(request):
+        return Response(200, json={"choices": [{"message": {"content": "你好 %s"}}]})
+
+    client = _client_with(handler)
+    out = await client.translate_batch(["Hello %s"], "zh_cn")
+    assert out == ["你好 %s"]
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_translate_batch_missing_tag_downgrades():
+    """批量缺标：模型只输出 [i0] 缺 i1 → i1 逐条降级 _translate_single，不静默保留原文（P0 根因 2）。"""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return Response(200, json={"choices": [{"message": {"content": "[i0] 你好"}}]})
+        # 第二次请求是 i1 的逐条降级：单条 prompt，无标签直接出译文
+        return Response(200, json={"choices": [{"message": {"content": "再见"}}]})
+
+    client = _client_with(handler)
+    out = await client.translate_batch(["hello", "world"], "zh_cn")
+    assert out == ["你好", "再见"]
+    assert calls["n"] == 2   # 一次批量 + 一次逐条降级
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_translate_batch_bad_format_half_split():
+    """整批格式不符（无任何标签）→ 对半切批重试，逐条降级成功（P0 根因 2）。"""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return Response(200, json={"choices": [{"message": {"content": "整体一句话"}}]})
+        # 对半切后单条请求：按内容返回对应译文
+        content = json.loads(request.content)["messages"][-1]["content"]
+        if "hello" in content:
+            return Response(200, json={"choices": [{"message": {"content": "你好"}}]})
+        return Response(200, json={"choices": [{"message": {"content": "再见"}}]})
+
+    client = _client_with(handler)
+    out = await client.translate_batch(["hello", "world"], "zh_cn")
+    assert out == ["你好", "再见"]
+    assert calls["n"] == 3   # 1 批量 + 2 单条降级
+    await client._client.aclose()
+
+
+def test_parse_tagged_numeric_and_note():
+    """parse_tagged 容错：数字. 前缀映射索引 + 忽略末尾「以上是全部译文」说明行。"""
+    parsed = parse_tagged("1. 甲\n2. 乙\n以上是全部译文")
+    assert parsed == {0: "甲", 1: "乙"}
+
+
+def test_parse_tagged_mixed_prefixes():
+    """parse_tagged 容错：混合 [iN] 与 **iN** 前缀。"""
+    parsed = parse_tagged("**i0** 甲\n[i1] 乙")
+    assert parsed == {0: "甲", 1: "乙"}
+
+
+def test_parse_tagged_inline_split():
+    """parse_tagged 容错：合并行 '[i0] 甲 [i1] 乙' 拆成两条。"""
+    parsed = parse_tagged("[i0] 甲 [i1] 乙")
+    assert parsed == {0: "甲", 1: "乙"}

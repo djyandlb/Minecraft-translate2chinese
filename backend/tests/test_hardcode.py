@@ -426,3 +426,55 @@ async def test_ai_judge_system_prompt_uses_target_lang():
     assert "zh_tw" in seen["sys"]
     assert "繁体中文" in seen["sys"]
     await engine._client.aclose()
+
+
+# ---------- P0 止血：ai_judge 非法 JSON 逐条降级（不整批丢） ----------
+
+@pytest.mark.asyncio
+async def test_ai_judge_invalid_json_downgrades_per_item():
+    """ai_judge 整批非法 JSON → 对该批候选逐条降级，不整批丢（P0 根因 3）。"""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return Response(200, json={"choices": [{"message": {"content": "这不是 JSON"}}]})
+        # 逐条降级：单候选返回合法 JSON
+        payload = json.loads(request.content)
+        batch = json.loads(payload["messages"][-1]["content"])
+        return Response(200, json={"choices": [{"message": {"content": json.dumps([
+            {"text": b["text"], "translatable": True, "translation": "译" + b["text"]}
+            for b in batch
+        ])}}]})
+
+    engine = _llm_engine_with(handler)
+    mapping = await ai_judge_translate(engine, [
+        {"text": "Hello World", "context": []},
+        {"text": "Good day", "context": []},
+    ], "zh_cn")
+    assert mapping == {"Hello World": "译Hello World", "Good day": "译Good day"}
+    assert calls["n"] == 3   # 1 批量 + 2 逐条降级
+    await engine._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_judge_empty_array_downgrades():
+    """ai_judge 输出空数组 [] → 逐条降级，不静默丢（P0 根因 3）。"""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+        payload = json.loads(request.content)
+        batch = json.loads(payload["messages"][-1]["content"])
+        return Response(200, json={"choices": [{"message": {"content": json.dumps([
+            {"text": b["text"], "translatable": True, "translation": "译" + b["text"]}
+            for b in batch
+        ])}}]})
+
+    engine = _llm_engine_with(handler)
+    mapping = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
+    assert mapping == {"Hello": "译Hello"}
+    assert calls["n"] == 2   # 1 批量 + 1 逐条降级
+    await engine._client.aclose()

@@ -17,7 +17,16 @@ import httpx
 from app.translate.common import should_translate
 from app.placeholder import protect, restore
 
-_TAG_RE = re.compile(r"^\[i(\d+)\]\s*", re.MULTILINE)
+# 行首条目前缀：兼容 [iN]、**iN**、*iN* 与「数字. / 数字、 / 数字)」编号。
+# 数字编号按 1-based（1. → 索引 0），[iN] 按 0-based。
+_PREFIX_RE = re.compile(
+    r"^(?:\[i(\d+)\]|\*\*i(\d+)\*\*|\*i(\d+)\*|(\d+)\s*[.、)）])\s*",
+    re.MULTILINE,
+)
+# 行内标签（合并行切分）：仅 [iN] 形式，避免误伤普通文本里的数字编号。
+_INLINE_TAG_RE = re.compile(r"\[i(\d+)\]")
+# 末尾说明行（无编号前缀的总结语）：解析时忽略。
+_NOTE_RE = re.compile(r"^(以上|以下|翻译完成|译文完|全部译文|完|仅此|共\s*\d+\s*条)")
 
 
 def build_tagged_texts(texts: list[str]) -> str:
@@ -25,21 +34,57 @@ def build_tagged_texts(texts: list[str]) -> str:
     return "\n".join(f"[i{i}] {t}" for i, t in enumerate(texts))
 
 
+def _index_from_match(m: re.Match) -> int:
+    """从行首前缀匹配提取条目索引：[iN]/**iN**/*iN* 按 N，数字. 按 N-1。"""
+    for g in (1, 2, 3):
+        if m.group(g) is not None:
+            return int(m.group(g))
+    return max(0, int(m.group(4)) - 1)
+
+
 def parse_tagged(translated: str) -> dict[int, str]:
-    """解析模型按 [iN] 标签输出的结果。"""
+    """解析模型按 [iN] 标签（或数字. / **iN** 变体）输出的结果。
+
+    容错（P0 止血）：
+      - 行首前缀接受 [iN]、**iN**、*iN*、数字. 等形态；
+      - 合并行切分：`[i0] 甲 [i1] 乙` 拆成两条；
+      - 忽略末尾「以上是全部译文」类无编号说明行。
+    """
     out: dict[int, str] = {}
     cur_idx: int | None = None
     parts: list[str] = []
+
+    def _flush() -> None:
+        nonlocal cur_idx, parts
+        if cur_idx is not None:
+            out[cur_idx] = "\n".join(parts).strip()
+        cur_idx, parts = None, []
+
     for line in translated.splitlines():
-        m = _TAG_RE.match(line)
+        m = _PREFIX_RE.match(line)
         if m:
-            if cur_idx is not None:
-                out[cur_idx] = "\n".join(parts).strip()
-            cur_idx, parts = int(m.group(1)), [line[m.end():].strip()]
-        elif cur_idx is not None:
+            _flush()
+            cur_idx = _index_from_match(m)
+            rest = line[m.end():]
+            # 合并行切分：行内若还有 [iN]，逐段拆出。
+            pos = 0
+            for im in _INLINE_TAG_RE.finditer(rest):
+                seg = rest[pos:im.start()]
+                if seg.strip():
+                    parts.append(seg.strip())
+                pos = im.end()
+                _flush()                      # 结算当前条目，开启新条目
+                cur_idx = int(im.group(1))
+            tail = rest[pos:]
+            if tail.strip():
+                parts.append(tail.strip())
+        else:
+            if cur_idx is None:
+                continue
+            if _NOTE_RE.match(line.strip()):
+                continue                      # 末尾说明行忽略
             parts.append(line)
-    if cur_idx is not None:
-        out[cur_idx] = "\n".join(parts).strip()
+    _flush()
     return out
 
 
@@ -132,11 +177,32 @@ class LLMClient:
         except Exception:
             out = None
         if out is not None:
-            # 模型漏标的条目保持原文，不触发子块降级（保守行为：宁可保留原文不重复调模型）
+            # 单条（len(todo)==1）：模型通常不带 [iN] 标签直接输出译文 → 直接采用全文。
+            # 若仍带 [i0] 前缀（旧行为）则剥标签后再采用（P0 根因 1）。
+            if len(todo) == 1:
+                i, _ = todo[0]
+                single_parsed = parse_tagged(out)
+                if 0 in single_parsed:
+                    results[i] = restore(clean_translation(single_parsed[0]), markers[0])
+                else:
+                    results[i] = restore(clean_translation(out), markers[0])
+                return
             parsed = parse_tagged(out)
+            if not parsed:
+                # 整批格式完全不符（一个条目都没解析出来）→ 对半切批重试（复用现有降级链）。
+                half = len(todo) // 2
+                await self._request_chunk(client, todo[:half], masked_list[:half], markers_list[:half],
+                                          target_lang, results)
+                await self._request_chunk(client, todo[half:], masked_list[half:], markers_list[half:],
+                                          target_lang, results)
+                return
             for n, (i, _) in enumerate(todo):
                 if n in parsed:
                     results[i] = restore(clean_translation(parsed[n]), markers[n])
+                else:
+                    # 该条漏标 → 逐条降级 _translate_single，不静默保留原文（P0 根因 2）。
+                    results[i] = await self._translate_single(
+                        client, todo[n][1], masked[n], markers[n], target_lang)
             return
         # 请求失败 → 降级：对半切批，直到逐条
         if len(todo) > 1:
@@ -170,6 +236,10 @@ class LLMClient:
             if self.on_usage:
                 u = data.get("usage") or {}
                 self.on_usage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+            # 兜底容错：即便模型带 [iN] 前缀输出也剥掉（单条无标签时直接取全文）。
+            single_parsed = parse_tagged(out)
+            if 0 in single_parsed:
+                out = single_parsed[0]
             return restore(clean_translation(out), markers)
         except Exception:
             return text
