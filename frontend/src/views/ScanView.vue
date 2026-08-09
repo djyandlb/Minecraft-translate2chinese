@@ -9,6 +9,9 @@ const props = defineProps({
   onBack: Function,
 })
 
+// 桌面版（pywebview）检测：存在 window.pywebview → 可用 js_api 直接拿本地路径，不走上传
+const isDesktop = typeof window !== 'undefined' && !!window.pywebview
+
 const path = ref('')
 const result = ref(null)          // /api/detect 返回 {kind, source_lang, pack_format, summary}
 const detecting = ref(false)
@@ -58,6 +61,19 @@ async function pickPath() {
   await autoDetect()
 }
 
+// —— 桌面版 js_api：系统对话框选文件/目录，直接拿本地路径（不走上传）——
+async function pickLocal(kind) {
+  try {
+    const paths = await window.pywebview.api.select_path(kind)
+    if (paths && paths.length) {
+      path.value = paths[0]
+      await autoDetect()
+    }
+  } catch (e) {
+    error.value = `选择${kind === 'folder' ? '目录' : '文件'}失败：${e.message}`
+  }
+}
+
 // —— 拖放 / 点选上传 ——
 const dragOver = ref(false)
 const fileInput = ref(null)
@@ -71,7 +87,14 @@ async function onDrop(e) {
   e.preventDefault(); dragOver.value = false
   const file = e.dataTransfer.files?.[0]
   if (!file) return
-  await handleFile(file)
+  // 桌面版：File 对象若暴露本地 path 属性（pywebview WebView2 实测），直接用本地地址不走上传
+  const localPath = isDesktop && (file.path || file.webkitRelativePath)
+  if (localPath) {
+    path.value = localPath
+    await autoDetect()
+    return
+  }
+  await handleFile(file)   // 浏览器 / 拿不到本地路径 → 走上传兜底
 }
 function onClickDrop() { fileInput.value?.click() }
 async function onFilePicked(e) {
@@ -141,12 +164,16 @@ const KIND_TEXT = { modpack: '整合包', modjar: '单个 mod', map: '地图存�
       <input ref="fileInput" type="file" style="display:none" @change="onFilePicked" />
     </div>
 
-    <!-- 路径输入 + 目录浏览（跨盘） -->
+    <!-- 路径输入 + 目录浏览（跨盘）；桌面版额外提供系统对话框直接选文件/目录 -->
     <div class="field">
       <label>资源路径</label>
       <div class="path-row">
         <input type="text" v-model="path" placeholder="选择整合包目录 / mod jar / 地图存档，或拖入文件" />
-        <button class="btn" @click="openBrowser">浏览</button>
+        <template v-if="isDesktop">
+          <button class="btn" @click="pickLocal('file')">选择文件</button>
+          <button class="btn" @click="pickLocal('folder')">选择目录</button>
+        </template>
+        <button class="btn" @click="openBrowser" v-else>浏览</button>
       </div>
     </div>
 

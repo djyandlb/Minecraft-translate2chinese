@@ -1,6 +1,6 @@
 <script setup>
 import { nextTick, onMounted, ref, watch } from 'vue'
-import { getConfig, saveConfig, saveKey, testConnection } from '../api'
+import { getConfig, getKeyStatus, saveConfig, saveKey, testConnection } from '../api'
 
 // props：onDone(配置对象) / onNext() 由 App 注入，走完一步 → next()
 const props = defineProps({ onDone: Function, onNext: Function })
@@ -23,6 +23,8 @@ const LANGUAGES = [
   { code: 'de_de', label: '德文' },
 ]
 const API_KEY_STORE = 'mc_translator_api_key'
+// keyring 已配置时的回显占位符：避免用户每次误以为要重输（保存时跳过该占位值）
+const API_KEY_PLACEHOLDER = '已配置（••••）'
 
 const engine = ref('llm')            // llm | machine，互斥
 const provider = ref('DeepSeek')
@@ -79,6 +81,13 @@ onMounted(async () => {
       baseUrl.value = cfg.llm.base_url || ''
       model.value = cfg.llm.model || ''
     }
+    // O2：本地未存 key 时，问后端 keyring 是否已配置过——已配置则回显占位符，不空白
+    if (!apiKey.value) {
+      try {
+        const st = await getKeyStatus()
+        if (st.configured) apiKey.value = API_KEY_PLACEHOLDER
+      } catch (e) { /* 后端不可用则保持空白，让用户手动填 */ }
+    }
   } catch (e) {
     tip.value = '读取后端配置失败（后端未启动？将使用默认值）'
   } finally {
@@ -89,13 +98,20 @@ onMounted(async () => {
   }
 })
 
+// 聚焦 key 输入框时清掉占位符，让用户可直接输入新 key 覆盖
+function onKeyFocus() {
+  if (apiKey.value === API_KEY_PLACEHOLDER) apiKey.value = ''
+}
+
 async function saveAndNext() {
   saving.value = true
   error.value = ''
   try {
-    // api_key 写进后端 keyring（AI 引擎真正读取的地方），localStorage 仅作 UI 回显
-    if (apiKey.value) await saveKey(apiKey.value)
-    localStorage.setItem(API_KEY_STORE, apiKey.value)
+    // api_key 写进后端 keyring（AI 引擎真正读取的地方），localStorage 仅作 UI 回显；
+    // 占位符「已配置（••••）」不是真实 key：跳过写 keyring / localStorage，避免覆盖已存 key
+    if (apiKey.value && apiKey.value !== API_KEY_PLACEHOLDER) await saveKey(apiKey.value)
+    if (apiKey.value !== API_KEY_PLACEHOLDER) localStorage.setItem(API_KEY_STORE, apiKey.value)
+    else localStorage.removeItem(API_KEY_STORE)
     const body = {
       engine: engine.value,
       provider: provider.value,
@@ -144,8 +160,10 @@ async function saveAndNext() {
       </div>
       <div class="field">
         <label>API Key</label>
-        <input type="password" v-model="apiKey" placeholder="sk-..." autocomplete="off" />
-        <small class="sub">经后端写入本机系统凭据库（keyring），不落配置文件</small>
+        <input type="password" v-model="apiKey" placeholder="sk-..." autocomplete="off" @focus="onKeyFocus" />
+        <small class="sub">{{ apiKey === API_KEY_PLACEHOLDER
+          ? '已配置（点击输入框可重新输入覆盖）'
+          : '经后端写入本机系统凭据库（keyring），不落配置文件' }}</small>
       </div>
       <div class="field test-row">
         <button class="btn" :disabled="testing" @click="runTest('llm')">

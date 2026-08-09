@@ -9,3 +9,4 @@ _upstream/
 .superpowers/
 config.json
 backend/work/
+backend/_trunc.jar

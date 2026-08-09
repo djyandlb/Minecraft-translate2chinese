@@ -29,6 +29,9 @@ export const saveConfig = (cfg) => req('/config', { method: 'POST', body: JSON.s
 // API Key：写入后端 keyring（前端 localStorage 仅作 UI 回显，真正生效靠后端 keyring）
 export const saveKey = (apiKey) => req('/key', { method: 'POST', body: JSON.stringify({ api_key: apiKey }) })
 
+// API Key 状态：查询 keyring 是否已配置，返回 { configured: bool }（后端绝不返回 key 本身）
+export const getKeyStatus = () => req('/key/status')
+
 // 自动识别：POST /api/detect，返回 {kind, source_lang, pack_format, summary}
 export const detect = (body) => req('/detect', { method: 'POST', body: JSON.stringify(body) })
 

@@ -2,6 +2,7 @@
 
 pywebview 延迟 import（放在 main() 内）：未安装时不影响其余代码与测试。
 """
+import os
 import socket
 import threading
 import time
@@ -61,16 +62,48 @@ def _wait_and_load(window, port: int, timeout: float = 120.0) -> None:
         pass
 
 
+class _JsApi:
+    """暴露给前端 window.pywebview.api 的 Python 方法（桌面版专用）。
+
+    让前端拿到真实本地路径（选文件/选目录），不再依赖浏览器上传妥协。
+    """
+
+    def select_path(self, kind: str) -> list:
+        """kind='file'|'folder'：打开系统对话框选文件/目录，返回路径列表（未选返回空列表）。
+
+        先做 kind 白名单校验，非法值不弹对话框、不触达 webview 调用。
+        """
+        if kind not in ("file", "folder"):
+            return []
+        import webview  # 方法内延迟 import：未装 pywebview 不影响模块导入/其余测试
+        win = webview.windows[0]   # pywebview 维护全局 windows 列表，取首个窗口
+        if kind == "folder":
+            res = win.create_file_dialog(webview.FOLDER_DIALOG)
+        else:
+            res = win.create_file_dialog(
+                webview.OPEN_DIALOG,
+                file_types=("JAR/ZIP/MCWORLD (*.jar;*.zip;*.mrpack;*.mcworld)",
+                            "*.jar;*.zip;*.mrpack;*.mcworld",
+                            "所有文件 (*.*)", "*.*"),
+            )
+        return res or []
+
+
 def main() -> None:
     """启动后台 API 服务 + 桌面窗口。"""
     port = _free_port()
     threading.Thread(target=_run_server, args=(port,), daemon=True).start()
     import webview  # 延迟导入：未装 pywebview 时不影响其余代码
-    # 先加载占位页（防服务器未就绪时前端「拒绝连接」），就绪后切真实 URL
+    # js_api 暴露 select_path 给前端，桌面版直接拿本地路径（不走上传）
     window = webview.create_window("MC 自动翻译器", html=PLACEHOLDER_HTML,
-                                   width=1150, height=780, min_size=(900, 640))
+                                   width=1150, height=780, min_size=(900, 640),
+                                   js_api=_JsApi())
+    # 先加载占位页（防服务器未就绪时前端「拒绝连接」），就绪后切真实 URL
     threading.Thread(target=_wait_and_load, args=(window, port), daemon=True).start()
     webview.start()
+    # 窗口全部关闭 → 强制退出进程：uvicorn 是 daemon 子线程，start() 返回后
+    # 本应随进程退出，os._exit 兜底确保「关闭前端窗口即关掉整个后端」（O2）
+    os._exit(0)
 
 
 if __name__ == "__main__":

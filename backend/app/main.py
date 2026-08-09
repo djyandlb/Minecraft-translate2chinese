@@ -88,6 +88,16 @@ def set_key(payload: dict):
     return {"ok": True}
 
 
+@app.get("/api/key/status")
+def key_status():
+    """查询 keyring 是否已配置 API Key（仅返回 configured 布尔，绝不返回 key 本身）。
+
+    供桌面版前端启动时判断是否已持久化过 key，避免「每次都要重输」的困惑。
+    """
+    cfg = AppConfig(CONFIG_PATH)
+    return {"configured": bool(_read_api_key(cfg))}
+
+
 def _read_api_key(cfg: AppConfig) -> str:
     """从系统 keyring 读 api_key（复用 create_engine 前的取 key 逻辑）；读不到返回空串。"""
     try:
