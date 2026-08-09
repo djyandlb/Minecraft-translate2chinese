@@ -127,13 +127,13 @@ def set_key(payload: dict):
     return {"ok": True}
 
 
-@app.get("/api/key/status")
 @app.get("/api/desktop")
 def desktop():
     """桌面版标记：desktop.py 起服务时设 MC_DESKTOP=1（下载等前端据此走桌面路径，不依赖 window.pywebview 检测）。"""
     return {"desktop": os.environ.get("MC_DESKTOP") == "1"}
 
 
+@app.get("/api/key/status")
 def key_status():
     """查询 keyring 是否已配置 API Key（仅返回 configured 布尔，绝不返回 key 本身）。
 
