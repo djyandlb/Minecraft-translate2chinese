@@ -115,12 +115,27 @@ def main() -> None:
     window = webview.create_window("MC 自动翻译器", html=PLACEHOLDER_HTML,
                                    width=1150, height=780, min_size=(900, 640),
                                    js_api=_JsApi())
+    # 响应式关闭：监听窗口 closed 事件（用户点叉），记录日志并让后端跟随退出。
+    # 注意：进程退出真正由下方 webview.start() 返回后 os._exit 执行；
+    # 事件只用于「区分正常关闭 vs 异常/WebView2 崩溃」的诊断（用户反馈窗口会自动关闭）。
+    closed_flag = threading.Event()
+
+    def _on_closed() -> None:
+        logger.info("窗口 closed 事件触发（用户点击关闭按钮）")
+        closed_flag.set()
+
+    try:
+        window.events.closed += _on_closed
+    except Exception as exc:
+        logger.warning("注册窗口关闭事件失败（不影响退出）：%s", exc)
     # 先加载占位页（防服务器未就绪时前端「拒绝连接」），就绪后切真实 URL
     threading.Thread(target=_wait_and_load, args=(window, port), daemon=True).start()
     webview.start()
-    # 走到这里说明窗口已全部关闭（start 返回）。记录日志便于诊断「窗口自动关闭」：
-    # 正常手动关闭 vs 异常提前返回的差异可从这里与 _run_server 的异常日志判断。
-    logger.info("webview.start() 返回（窗口已关闭），进程退出")
+    # 走到这里说明窗口已全部关闭（start 返回）。区分关闭原因便于诊断「窗口自动关闭」：
+    if closed_flag.is_set():
+        logger.info("正常退出：用户关闭窗口 → 后端跟随退出")
+    else:
+        logger.warning("进程退出但未收到窗口 closed 事件——窗口可能异常关闭/WebView2 崩溃")
     # 窗口全部关闭 → 强制退出进程：uvicorn 是 daemon 子线程，start() 返回后
     # 本应随进程退出，os._exit 兜底确保「关闭前端窗口即关掉整个后端」（O2）
     os._exit(0)
