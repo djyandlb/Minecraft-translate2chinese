@@ -30,11 +30,20 @@ from app.models import AutoRequest, MapTranslateRequest
 from app.resourcepack import build_resource_pack
 from app.scanner import scan_jar, scan_modpack
 from app.tasks import TaskStore
-from app.text_sources import TextSource, discover_text_sources, write_translated
+from app.text_sources import (TextSource, discover_text_sources,
+                              write_lang_into_jar, write_translated)
 from app.translate.engine import create_engine
 from app.translate.han import is_same_script, simplify, traditional
 from app.translate.llm import LLMClient
 from app.translate.machine import MachineClient
+
+# 汉化命名映射：target_lang → 显示名（zh_cn→简体中文、zh_tw→繁体中文，其他原样）
+_LANG_NAMES = {"zh_cn": "简体中文", "zh_tw": "繁体中文"}
+
+
+def lang_display_name(target_lang: str) -> str:
+    """汉化命名映射：zh_cn→简体中文、zh_tw→繁体中文，其他 target_lang 原样。"""
+    return _LANG_NAMES.get(target_lang, target_lang)
 
 
 async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
@@ -318,46 +327,72 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
         out_dir.mkdir(parents=True, exist_ok=True)
         pack_format = infer_pack_format(path)
         exported: list[str] = []
-        if by_mod:
-            # 资源包（语言文件）
-            pack_out = out_dir / f"{task_id}_{req.target_lang}.zip"
-            build_resource_pack(by_mod, req.target_lang, pack_format, pack_out)
-            exported.append(str(pack_out))
-        hard_dir = out_dir / "hardcoded"
-        hard_used: set[str] = set()
         hard_count = 0
-        seq = 0
-        for jar in jars:
-            json_updates = json_lines_translations.get(jar)
-            mapping = hard_mappings.get(jar)
-            if not json_updates and not mapping:
-                continue
-            # 原 jar 只读铁律：先 copy2 到 out_dir/hardcoded/<name> 副本再改
-            name = f"{task_id}_{jar.stem}.jar"
-            if name in hard_used:
-                # 同名 jar（不同子目录）防覆盖：独立 seq 递增 + while 循环，
-                # 彻底避免序号名与既有名（如 stem=2_mod 的 jar）相撞（A5-review）
-                while name in hard_used:
-                    seq += 1
-                    name = f"{task_id}_{seq}_{jar.stem}.jar"
-            hard_used.add(name)
-            jar_copy = hard_dir / name
-            jar_copy.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(jar, jar_copy)
-            # json/lines 文本覆盖写回 jar 副本
-            for src, trans in json_updates or []:
-                write_translated(jar_copy, src, trans)
-            # 硬编码替换（同一副本）
-            if mapping:
-                result = replace_hardcoded_strings(jar_copy, mapping)
-                if result["failed_classes"]:
-                    # failed_classes 累加进 state.failed + warn
-                    state.failed += len(result["failed_classes"])
-                    state.progress.append({"status": "warn",
-                                           "error": (f"{jar.name}: {len(result['failed_classes'])} 个 class 替换失败"
-                                                     f"（已跳过保留原字节）")})
-            exported.append(str(jar_copy))
-            hard_count += 1
+        if kind == "modjar":
+            # modjar → 单一汉化 jar：语言文件 + json/lines + 硬编码全写回一个 jar 副本。
+            # 命名 {原jar stem}-{语言}化.jar（zh_cn→简体中文化、zh_tw→繁体中文化）。
+            for jar in jars:
+                jar_copy = out_dir / f"{jar.stem}-{lang_display_name(req.target_lang)}化.jar"
+                # 原 jar 只读铁律：先 copy2 副本再改
+                shutil.copy2(jar, jar_copy)
+                # 语言文件写回：解压副本 → 写 assets/<modid>/lang/<target>.<ext>（合并已有 zh）→ 重打包
+                write_lang_into_jar(jar_copy, by_mod, req.target_lang, pack_format)
+                # json/lines 全文本覆盖写回 jar 副本
+                for src, trans in json_lines_translations.get(jar, []):
+                    write_translated(jar_copy, src, trans)
+                # 硬编码替换（同一副本）
+                mapping = hard_mappings.get(jar)
+                if mapping:
+                    result = replace_hardcoded_strings(jar_copy, mapping)
+                    if result["failed_classes"]:
+                        # failed_classes 累加进 state.failed + warn
+                        state.failed += len(result["failed_classes"])
+                        state.progress.append({"status": "warn",
+                                               "error": (f"{jar.name}: {len(result['failed_classes'])} 个 class 替换失败"
+                                                         f"（已跳过保留原字节）")})
+                exported.append(str(jar_copy))
+                hard_count += 1
+        else:
+            # modpack → 资源包（语言文件）+ hardcoded jar 目录（现状保留）
+            if by_mod:
+                # 资源包（语言文件）
+                pack_out = out_dir / f"{task_id}_{req.target_lang}.zip"
+                build_resource_pack(by_mod, req.target_lang, pack_format, pack_out)
+                exported.append(str(pack_out))
+            hard_dir = out_dir / "hardcoded"
+            hard_used: set[str] = set()
+            seq = 0
+            for jar in jars:
+                json_updates = json_lines_translations.get(jar)
+                mapping = hard_mappings.get(jar)
+                if not json_updates and not mapping:
+                    continue
+                # 原 jar 只读铁律：先 copy2 到 out_dir/hardcoded/<name> 副本再改
+                name = f"{task_id}_{jar.stem}.jar"
+                if name in hard_used:
+                    # 同名 jar（不同子目录）防覆盖：独立 seq 递增 + while 循环，
+                    # 彻底避免序号名与既有名（如 stem=2_mod 的 jar）相撞（A5-review）
+                    while name in hard_used:
+                        seq += 1
+                        name = f"{task_id}_{seq}_{jar.stem}.jar"
+                hard_used.add(name)
+                jar_copy = hard_dir / name
+                jar_copy.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(jar, jar_copy)
+                # json/lines 文本覆盖写回 jar 副本
+                for src, trans in json_updates or []:
+                    write_translated(jar_copy, src, trans)
+                # 硬编码替换（同一副本）
+                if mapping:
+                    result = replace_hardcoded_strings(jar_copy, mapping)
+                    if result["failed_classes"]:
+                        # failed_classes 累加进 state.failed + warn
+                        state.failed += len(result["failed_classes"])
+                        state.progress.append({"status": "warn",
+                                               "error": (f"{jar.name}: {len(result['failed_classes'])} 个 class 替换失败"
+                                                         f"（已跳过保留原字节）")})
+                exported.append(str(jar_copy))
+                hard_count += 1
 
         if not exported:
             # 全部词条已汉化 / 全部翻译失败：done + warn，不导出空包
@@ -368,8 +403,10 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
             return
 
         state.status = "done"
+        # modjar 无资源包 zip：pack 字段仅 modpack 且语言文件非空时指向资源包，否则 None
         state.progress.append({"status": "done", "file": str(out_dir),
-                               "pack": str(out_dir / f"{task_id}_{req.target_lang}.zip") if by_mod else None,
+                               "pack": (str(out_dir / f"{task_id}_{req.target_lang}.zip")
+                                        if kind == "modpack" and by_mod else None),
                                "hardcoded": hard_count})
         store.save(state)
     except asyncio.CancelledError:

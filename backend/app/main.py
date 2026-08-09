@@ -264,6 +264,11 @@ def download(task_id: str):
     # 任务 C：产物移 OUTPUTS_DIR（exe 旁 outputs/），与 temp 中间产物分离；任务后清理不影响下载
     out_dir = OUTPUTS_DIR / task_id
     if out_dir.is_dir():
+        # 产物形态分流（A6）：modjar 顶层单个汉化 jar（无资源包 zip）→ 直接返回该 jar 文件
+        # （Content-Disposition 用汉化文件名）；modpack 目录（资源包 zip + hardcoded/）→ 打包总 zip
+        top_jars = sorted(out_dir.glob("*.jar"))
+        if top_jars and not any(out_dir.glob("*_*.zip")):
+            return FileResponse(top_jars[0], filename=top_jars[0].name)
         import io
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:

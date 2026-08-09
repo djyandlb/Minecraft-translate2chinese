@@ -385,3 +385,75 @@ def write_translated(jar: Path, source: TextSource, translations: dict[str, str]
         _repack(work, jar)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+# ---------- 语言文件写回（modjar 单一汉化 jar 用） ----------
+
+# modid 不可信：白名单 [a-z0-9_-]，不含 "."，杜绝 ".."、"/" 等路径穿越（与资源包一致）
+_MODID_RE = re.compile(r"[a-z0-9_-]+")
+
+# 语言文件支持的格式
+_LANG_FMTS = ("json", "lang", "properties")
+
+
+def _lang_ext(work: Path, by_mod: dict[str, dict[str, str]], target_lang: str,
+              pack_format: int) -> str:
+    """推断目标语言文件格式：优先 jar 内已有目标语言文件，其次已有源语言文件，最后按 pack_format。"""
+    for modid in by_mod:
+        lang_dir = work / "assets" / modid / "lang"
+        if not lang_dir.is_dir():
+            continue
+        for f in sorted(lang_dir.iterdir()):
+            if f.stem == target_lang and f.suffix.lstrip(".") in _LANG_FMTS:
+                return f.suffix.lstrip(".")
+    for modid in by_mod:
+        lang_dir = work / "assets" / modid / "lang"
+        if not lang_dir.is_dir():
+            continue
+        for f in sorted(lang_dir.iterdir()):
+            if f.suffix.lstrip(".") in _LANG_FMTS:
+                return f.suffix.lstrip(".")
+    # 兜底：pack_format ≥ 4（1.13+）用 .json，1.12 及以下用 .lang
+    from app.version import pack_format_to_lang_ext
+    return pack_format_to_lang_ext(pack_format)
+
+
+def _serialize_lang(ext: str, data: dict[str, str]) -> str:
+    """按格式序列化语言文件内容（json/lang/properties）。"""
+    if ext == "lang":
+        return write_lang(data)
+    if ext == "properties":
+        return write_properties(data)
+    return write_json_lang(data)
+
+
+def write_lang_into_jar(jar: Path, by_mod: dict[str, dict[str, str]], target_lang: str,
+                        pack_format: int) -> None:
+    """把 {modid: {key: 译文}} 语言文件翻译写回 jar（modjar 单一汉化 jar 用）。
+
+    修改发生在 jar 副本上（调用方保证）。流程：安全解压 → 逐 modid 写
+    assets/<modid>/lang/<target>.<ext>（目标语言文件已存在则合并已有条目）→ 重打包。
+    格式沿用 jar 内已有目标/源语言文件，否则按 pack_format 推断（json/lang）。
+    modid 走白名单校验，拦截路径穿越；by_mod 为空则直接返回。
+    """
+    if not by_mod:
+        return
+    work = jar.parent / f".{jar.stem}_lang"
+    try:
+        _extract_jar(jar, work)
+        ext = _lang_ext(work, by_mod, target_lang, pack_format)
+        for modid, entries in by_mod.items():
+            if not entries or not _MODID_RE.fullmatch(modid):
+                continue
+            lang_dir = work / "assets" / modid / "lang"
+            lang_dir.mkdir(parents=True, exist_ok=True)
+            target = lang_dir / f"{target_lang}.{ext}"
+            data: dict[str, str] = {}
+            if target.exists():
+                data = _parse_lang_entry(ext, target.read_bytes().decode("utf-8"))
+            data.update(entries)
+            # 用字节写入：避开 Path.write_text 在 Windows 上默认把 \n 转 \r\n 的坑
+            target.write_bytes(_serialize_lang(ext, data).encode("utf-8"))
+        _repack(work, jar)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)

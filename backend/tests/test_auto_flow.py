@@ -555,3 +555,118 @@ async def test_auto_cleans_task_work_keeps_outputs(tmp_path, monkeypatch):
     # 产物保留在 OUTPUTS_DIR
     packs = list((outputs / state.id).glob("*_zh_cn.zip"))
     assert packs, "产物应保留在 outputs"
+
+
+# ---------- 产物形态改造：mod→汉化jar / 整合包→资源包 + 汉化命名 ----------
+
+def _add_hardcode_to_jar(jar: Path):
+    """给已有 jar 追加硬编码 class（javac 编译），无 javac 则 skip。"""
+    if shutil.which("javac") is None:
+        pytest.skip("无 javac")
+    src = jar.parent / "src_h"
+    src.mkdir()
+    (src / "HelloMod.java").write_text(
+        'public class HelloMod { public static void main(String[] a) { System.out.println("Hello World"); } }',
+        encoding="utf-8")
+    cls = jar.parent / "cls_h"
+    cls.mkdir()
+    subprocess.run(["javac", "-d", str(cls), str(src / "HelloMod.java")], check=True)
+    with zipfile.ZipFile(jar, "a") as zf:
+        for f in cls.rglob("*.class"):
+            zf.write(f, f.relative_to(cls).as_posix())
+
+
+@pytest.mark.asyncio
+async def test_auto_modjar_outputs_single_jar(tmp_path, monkeypatch):
+    """modjar 输入 → 产物为单个汉化 jar（语言文件+硬编码全写回），
+    命名 {原jar stem}-简体中文化.jar，无资源包 zip / hardcoded 子目录。"""
+    jar = _make_mod_jar(tmp_path, name="mod.jar")      # 语言文件 mod
+    _add_hardcode_to_jar(jar)                           # 注入硬编码 class
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _FakeEngine())
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    req = SimpleNamespace(path=str(jar), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
+    assert store.load(state.id).status == "done"
+    out_dir = outputs / state.id
+    # 产物：单个顶层汉化 jar，命名 xxx-简体中文化.jar
+    jars = list(out_dir.glob("*.jar"))
+    assert len(jars) == 1, f"期望单个汉化 jar，实际 {jars}"
+    assert jars[0].name == "mod-简体中文化.jar"
+    # 无资源包 zip、无 hardcoded 子目录
+    assert not list(out_dir.glob("*.zip"))
+    assert not (out_dir / "hardcoded").exists()
+    # jar 内含 zh_cn 语言文件（译文写回）+ 硬编码已替换（副本被改，原 jar 只读）
+    with zipfile.ZipFile(jars[0]) as zf:
+        data = json.loads(zf.read("assets/mymod/lang/zh_cn.json").decode("utf-8"))
+    assert data["key.hello"] == "你好世界"
+    assert "你好世界" in " ".join(scan_hardcoded_strings(jars[0]))
+    # 原 jar 只读：语言文件未被写回，硬编码未替换
+    with zipfile.ZipFile(jar) as zf:
+        assert "assets/mymod/lang/zh_cn.json" not in zf.namelist()
+    assert "你好世界" not in " ".join(scan_hardcoded_strings(jar))
+
+
+@pytest.mark.asyncio
+async def test_auto_modpack_outputs_resource_pack(tmp_path, monkeypatch):
+    """modpack 输入 → 资源包 zip + hardcoded jar（现状保留），顶层不落单 jar。"""
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    _make_mod_jar(mods)                                  # 语言文件 mod
+    _make_jar_with_hardcode(mods, name="h.jar")          # 硬编码 mod
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _FakeEngine())
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
+    assert store.load(state.id).status == "done"
+    out_dir = outputs / state.id
+    packs = list(out_dir.glob("*_zh_cn.zip"))
+    hards = list((out_dir / "hardcoded").glob("*.jar"))
+    assert packs and hards, f"modpack 应产出资源包 zip + hardcoded jar，实际 packs={packs} hards={hards}"
+    # 顶层无单 jar（汉化 jar 全在 hardcoded/ 子目录）
+    assert not list(out_dir.glob("*.jar"))
+    with zipfile.ZipFile(packs[0]) as zf:
+        data = json.loads(zf.read("assets/mymod/lang/zh_cn.json").decode("utf-8"))
+    assert data["key.hello"] == "你好世界"
+
+
+def test_lang_display_name_mapping():
+    """汉化命名映射：zh_cn→简体中文、zh_tw→繁体中文，其他 target_lang 原样。"""
+    from app.auto_flow import lang_display_name
+    assert lang_display_name("zh_cn") == "简体中文"
+    assert lang_display_name("zh_tw") == "繁体中文"
+    assert lang_display_name("ja_jp") == "ja_jp"
+    assert lang_display_name("fr_fr") == "fr_fr"
+
+
+def test_download_modjar_single_jar(tmp_path, monkeypatch):
+    """download：modjar 单 jar 产物（顶层一个 jar、无资源包 zip）→ 直接返回该 jar（汉化文件名）。"""
+    import urllib.parse
+    import app.main as main
+    from fastapi.testclient import TestClient
+
+    out_dir = tmp_path / "outputs" / "abc123def456"
+    out_dir.mkdir(parents=True)
+    (out_dir / "mod-简体中文化.jar").write_bytes(b"jardata")
+    monkeypatch.setattr(main, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(main, "OUTPUTS_DIR", tmp_path / "outputs")
+    client = TestClient(main.app)
+    r = client.get("/api/task/abc123def456/download")
+    assert r.status_code == 200
+    # Starlette 对非 ASCII 文件名走 RFC 5987 filename*=utf-8''... 编码，解码后应含汉化文件名
+    cd = r.headers.get("content-disposition", "")
+    assert "mod-简体中文化.jar" in urllib.parse.unquote(cd)
+    assert r.content == b"jardata"

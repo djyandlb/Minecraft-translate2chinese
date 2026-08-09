@@ -211,3 +211,39 @@ def test_discover_ignores_zip_slip_entry(tmp_path):
         zf.writestr("../../evil.txt", "pwned")
     srcs = discover_text_sources(jar)
     assert any(s.kind == "lang" for s in srcs)
+
+
+# ---------- modjar 单一汉化 jar：语言文件写回（write_lang_into_jar） ----------
+
+def test_write_lang_into_jar_new_lang_file(tmp_path):
+    """modjar 语言文件写回：pack_format 3（1.12-）→ zh_cn.lang 新建。"""
+    from app.text_sources import write_lang_into_jar
+    jar = _make_jar(tmp_path, {
+        "assets/mymod/lang/en_us.lang": "key.hello=Hello World\n",
+    })
+    write_lang_into_jar(jar, {"mymod": {"key.hello": "你好世界"}}, "zh_cn", 3)
+    assert _read_jar(jar, "assets/mymod/lang/zh_cn.lang") == "key.hello=你好世界\n"
+
+
+def test_write_lang_into_jar_merges_existing_zh(tmp_path):
+    """modjar 语言文件写回：已有 zh_cn.json → 合并保留已有条目 + 覆盖/新增译文。"""
+    from app.text_sources import write_lang_into_jar
+    jar = _make_jar(tmp_path, {
+        "assets/mymod/lang/en_us.json": '{"key.hello": "Hello World", "key.bye": "Bye"}',
+        "assets/mymod/lang/zh_cn.json": '{"key.bye": "再见"}',
+    })
+    write_lang_into_jar(jar, {"mymod": {"key.hello": "你好世界", "key.bye": "告别"}}, "zh_cn", 15)
+    data = json.loads(_read_jar(jar, "assets/mymod/lang/zh_cn.json"))
+    assert data == {"key.hello": "你好世界", "key.bye": "告别"}
+
+
+def test_write_lang_into_jar_skips_bad_modid(tmp_path):
+    """modjar 语言文件写回：恶意 modid（含 ../）跳过，不产生路径穿越文件。"""
+    from app.text_sources import write_lang_into_jar
+    jar = _make_jar(tmp_path, {
+        "assets/mymod/lang/en_us.json": '{"key.hello": "Hello World"}',
+    })
+    write_lang_into_jar(jar, {"../evil": {"k": "v"}}, "zh_cn", 15)
+    with zipfile.ZipFile(jar) as zf:
+        names = zf.namelist()
+    assert not any("../" in n or "evil" in n for n in names)
