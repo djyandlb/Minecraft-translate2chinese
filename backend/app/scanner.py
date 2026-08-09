@@ -1,6 +1,7 @@
 import json
 import sys
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from app.jar import lang_files_from_namelist
@@ -43,8 +44,10 @@ def _scan_one_jar(jar: Path, source_lang: str, target_lang: str) -> list[ModScan
                                        source_entries=src, target_entries=tgt,
                                        lang_format=info["format"]))
         return results
-    except (zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError) as e:
-        # 损坏的 jar / 语言文件：跳过该 mod，不让一个坏文件炸掉整包扫描
+    except (zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError,
+            zlib.error, EOFError) as e:
+        # 损坏的 jar / 语言文件 / 压缩流异常（zlib.error、EOFError）：跳过该 mod，
+        # 不让一个坏文件炸掉整包扫描
         print(f"[警告] 跳过损坏的 mod: {jar} - {e}", file=sys.stderr)
         return []
 

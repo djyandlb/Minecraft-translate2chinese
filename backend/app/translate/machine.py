@@ -7,10 +7,13 @@
 - 逐条 Google 翻译走 run_in_executor，不阻塞事件循环；失败回原文。
 """
 import asyncio
+import logging
 
 import deep_translator
 
 from app.translate.common import should_translate
+
+logger = logging.getLogger(__name__)
 
 # MC 语言代码 → Google 语言代码映射（V3：多源可配置，默认 Google）
 _LANG_MAP = {
@@ -21,6 +24,9 @@ _LANG_MAP = {
 
 def map_lang(mc_lang: str) -> str:
     """MC 语言代码 → Google 语言代码；未知原样返回。"""
+    if mc_lang not in _LANG_MAP:
+        # 目标语言不在映射表：打 warning 提示，但仍按原样透传，交给下游翻译兜底
+        logger.warning("目标语言 %s 不在机翻映射表，按原样透传", mc_lang)
     return _LANG_MAP.get(mc_lang, mc_lang)
 
 

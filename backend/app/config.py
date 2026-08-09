@@ -7,10 +7,10 @@ DEFAULT_CONFIG = {
     "provider": "DeepSeek",                # V3：厂商名（DeepSeek/通义千问/Kimi/Ollama/自定义）
     "source_lang": "en_us",
     "target_lang": "zh_cn",
-    "llm": {"base_url": "https://api.deepseek.com", "model": "deepseek-chat"},
+    "llm": {"base_url": "", "model": ""},   # 空 → 由 provider 模板主导，避免遮蔽厂商智能默认
     "machine": {"provider": "google"},
-    "concurrency": 8,                      # 可被厂商 smart_defaults 覆盖
-    "batch_size": 20,
+    "concurrency": None,                    # None = 未显式填，走厂商 smart_defaults
+    "batch_size": None,
     "pack_format": 15,
     "rpm_limit": 0,                        # 0 = 不限
     "api_key_ref": "mc-translator",        # keyring 服务名：key 走系统 keyring，绝不落盘

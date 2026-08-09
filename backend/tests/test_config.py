@@ -48,9 +48,9 @@ def test_nested_dict_isolation(tmp_path: Path):
     # 嵌套隔离：改实例嵌套 dict 不污染 DEFAULT_CONFIG，也不影响新实例
     cfg1 = AppConfig(tmp_path / "cfg1.json")
     cfg1.get("llm")["model"] = "HACKED"
-    assert DEFAULT_CONFIG["llm"]["model"] == "deepseek-chat"
+    assert DEFAULT_CONFIG["llm"]["model"] == ""   # 默认 llm 模板为空串（由 provider 主导）
     cfg2 = AppConfig(tmp_path / "cfg2.json")
-    assert cfg2.get("llm")["model"] == "deepseek-chat"
+    assert cfg2.get("llm")["model"] == ""
 
 def test_api_key_guard(tmp_path: Path):
     # api_key 守卫：set 抛 ValueError；save 前自动剥离，绝不落盘
