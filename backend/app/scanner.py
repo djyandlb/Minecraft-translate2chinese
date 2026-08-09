@@ -1,9 +1,8 @@
-import json
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from app.jar import list_jar_lang_files
-from app.langfile import parse_lang
+from app.langfile import parse_lang, parse_json_lang
 
 
 @dataclass
@@ -16,12 +15,11 @@ class ModScan:
 
 
 def _read_entries(zf: zipfile.ZipFile, path: str, fmt: str) -> dict[str, str]:
-    """从 zip 内读语言文件：json 去注释解析，lang 按 key=value。"""
+    """从 zip 内读语言文件：json 经 parse_json_lang 去注释，lang 按 key=value。"""
     raw = zf.read(path).decode("utf-8")
     if fmt == "lang":
         return parse_lang(raw)
-    data = json.loads(raw)
-    return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
+    return parse_json_lang(raw)
 
 
 def _scan_one_jar(jar: Path, source_lang: str, target_lang: str) -> list[ModScan]:

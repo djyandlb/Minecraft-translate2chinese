@@ -41,3 +41,13 @@ def test_scan_jar_lang_format(tmp_path: Path):
     scans = scan_jar(jar, "en_us", "zh_cn")
     assert scans[0].lang_format == "lang"
     assert scans[0].source_entries == {"a": "One", "b": "Two"}
+
+
+def test_scan_jar_json_with_comments(tmp_path: Path):
+    jar = tmp_path / "demo3.jar"
+    with zipfile.ZipFile(jar, "w") as zf:
+        zf.writestr("assets/demo3/lang/en_us.json",
+                    '{\n// 行注释\n"a": "One",\n/* 块注释 */\n"b": "Two"\n}')
+    scans = scan_jar(jar, "en_us", "zh_cn")
+    assert len(scans) == 1
+    assert scans[0].source_entries == {"a": "One", "b": "Two"}
