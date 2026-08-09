@@ -208,3 +208,50 @@ def test_parse_tagged_inline_split():
     """parse_tagged 容错：合并行 '[i0] 甲 [i1] 乙' 拆成两条。"""
     parsed = parse_tagged("[i0] 甲 [i1] 乙")
     assert parsed == {0: "甲", 1: "乙"}
+
+
+# ---------- LLM prompt 优化（更严格：逐行对应、不遗漏/合并/解释、保留占位符） ----------
+
+@pytest.mark.asyncio
+async def test_batch_system_prompt_strict_rules():
+    """批量 system prompt 更严格：逐行对应、不得遗漏/合并/解释、保留占位符、多行用 \\n。"""
+    captured = {}
+
+    def handler(request):
+        captured["system"] = json.loads(request.content)["messages"][0]["content"]
+        return Response(200, json={"choices": [{"message": {"content": "[i0] 你好\n[i1] 再见"}}]})
+
+    client = LLMClient("https://x", "k", "m")
+    client._client = AsyncClient(transport=MockTransport(handler))
+    await client.translate_batch(["hello", "world"], "zh_cn")
+    s = captured["system"]
+    assert "把 Minecraft" in s
+    assert "逐行" in s and "不得遗漏" in s and "不得合并" in s
+    assert "不得添加任何解释" in s
+    assert "占位符" in s
+    assert r"\n" in s          # 多行原文用字面 \n 表示，不真的换行拆条
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_single_system_prompt_strict_rules():
+    """单条兜底 system prompt 同样严格：保留占位符、多行用 \\n、只输出译文（降级链捕获）。"""
+    captured = {}
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return Response(500)   # 触发降级 → _translate_single
+        captured["system"] = json.loads(request.content)["messages"][0]["content"]
+        return Response(200, json={"choices": [{"message": {"content": "你好"}}]})
+
+    client = LLMClient("https://x", "k", "m")
+    client._client = AsyncClient(transport=MockTransport(handler))
+    out = await client.translate_batch(["hello world"], "zh_cn")
+    assert out == ["你好"]
+    s = captured["system"]
+    assert "把 Minecraft" in s
+    assert "占位符" in s and r"\n" in s
+    assert "只输出译文" in s
+    await client._client.aclose()

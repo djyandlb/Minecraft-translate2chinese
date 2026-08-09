@@ -178,72 +178,111 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
 
         same_script = is_same_script(source_lang, req.target_lang)
 
-        async def translate_one(text: str) -> tuple[str, bool]:
-            """统一翻译核心：记忆 → 简繁直转 → 引擎。返回 (译文, 是否走引擎)。"""
-            cached = memory.get(text, req.target_lang)
-            if cached:
-                return cached, False
-            if same_script:
-                # 简繁双向直转，免 AI：zh_tw 走繁化，zh_cn 走简化（F5）
-                return (traditional(text) if req.target_lang == "zh_tw" else simplify(text)), False
-            try:
-                return (await engine.translate_batch([text], req.target_lang))[0], True
-            except Exception:
-                # M6-recheck：单条引擎异常（网络/API 失败）→ 回原文 + 计 failed，不拖垮整体流程
-                return text, True
-
         async def _wait_if_paused() -> None:
             """Y4：暂停等待也必须响应取消，否则取消被暂停卡死。"""
             while state.paused and not state.cancelled:
                 await asyncio.sleep(0.5)
 
-        async def _translate_entry(text: str, key: str, sink: dict[str, str]) -> None:
-            """统一单条翻译：已汉化跳过 / 记忆 / 简繁 / 引擎 → 写 sink[key]=译文。"""
-            if not same_script and not needs_translation(text, req.target_lang):
-                # 已汉化（含 CJK）/ 技术串：跳过翻译，计 done，不入产物。
-                # 注意：same_script（简繁互转）时中文源文本必须保留翻译，跳过会漏转繁体。
-                state.done += 1
-                state.progress.append({"key": key, "source": text,
-                                       "translated": text, "status": "done"})
-                return
-            translated, from_engine = await translate_one(text)
-            if from_engine and translated == text:
-                # Y3：引擎失败回原文 → 计入 failed，前端醒目提示
-                state.failed += 1
-            memory.set(text, req.target_lang, translated)
-            sink[key] = translated
-            state.done += 1
-            state.progress.append({"key": key, "source": text,
-                                   "translated": translated, "status": "done"})
-            if state.done % 10 == 0:
-                memory.save()
-                store.save(state)
+        async def _translate_batch_pipeline(items, translate_fn, batch_size: int = 20) -> None:
+            """批量翻译流水线（语言文件 / json-lines / 兜底硬编码共用）。
+
+            逐条预处理（已汉化跳过 / 记忆命中 / 简繁直转）在批外完成，只有
+            真正需要走引擎的条目才收集成批；攒满 batch_size 一次 translate_batch，
+            结果逐条写回记忆/产物/进度。批之间响应取消与暂停。
+
+            items: 可迭代对象，元素为 {"key", "text", "sink"}（sink 为写回产物字典）；
+            translate_fn: async (texts: list[str]) -> list[str]，批量走引擎。
+            """
+            pending: list[dict] = []          # 待引擎条目 {key, text, sink}
+
+            async def _flush() -> None:
+                """攒满一批 → 一次批量翻译 → 逐条写回记忆/产物/进度。"""
+                if not pending:
+                    return
+                texts = [p["text"] for p in pending]
+                try:
+                    translated_list = await translate_fn(texts)
+                except Exception:
+                    # M6-recheck 批量版：整批引擎异常（网络/API 失败）→ 全部回原文 + 计 failed
+                    translated_list = texts
+                for p, translated in zip(pending, translated_list):
+                    key, text, sink = p["key"], p["text"], p["sink"]
+                    if translated == text:
+                        # Y3：引擎失败回原文 → 计入 failed，前端醒目提示
+                        state.failed += 1
+                    memory.set(text, req.target_lang, translated)
+                    sink[key] = translated
+                    state.done += 1
+                    state.progress.append({"key": key, "source": text,
+                                           "translated": translated, "status": "done"})
+                    if state.done % 10 == 0:
+                        memory.save()
+                        store.save(state)
+                pending.clear()
+
+            for item in items:
+                if state.cancelled:
+                    state.status = "cancelled"
+                    store.save(state)
+                    return
+                await _wait_if_paused()
+                key, text, sink = item["key"], item["text"], item["sink"]
+                if not same_script and not needs_translation(text, req.target_lang):
+                    # 已汉化（含 CJK）/ 技术串：跳过翻译，计 done，不入产物。
+                    # 注意：same_script（简繁互转）时中文源文本必须保留翻译，跳过会漏转繁体。
+                    state.done += 1
+                    state.progress.append({"key": key, "source": text,
+                                           "translated": text, "status": "done"})
+                    continue
+                cached = memory.get(text, req.target_lang)
+                if cached:
+                    # 记忆命中：直接写回，不走引擎
+                    sink[key] = cached
+                    state.done += 1
+                    state.progress.append({"key": key, "source": text,
+                                           "translated": cached, "status": "done"})
+                    if state.done % 10 == 0:
+                        memory.save()
+                        store.save(state)
+                    continue
+                if same_script:
+                    # 简繁双向直转，免 AI：zh_tw 走繁化，zh_cn 走简化（F5）
+                    translated = (traditional(text) if req.target_lang == "zh_tw" else simplify(text))
+                    memory.set(text, req.target_lang, translated)
+                    sink[key] = translated
+                    state.done += 1
+                    state.progress.append({"key": key, "source": text,
+                                           "translated": translated, "status": "done"})
+                    if state.done % 10 == 0:
+                        memory.save()
+                        store.save(state)
+                    continue
+                # 需走引擎：收集入批，攒满 batch_size 一次性批量翻译（LLM 并发/批次生效）
+                pending.append({"key": key, "text": text, "sink": sink})
+                if len(pending) >= batch_size:
+                    await _flush()
+            await _flush()
 
         by_mod: dict[str, dict[str, str]] = {}                          # 语言文件产物
         json_lines_translations: dict[Path, list[tuple[TextSource, dict[str, str]]]] = {}
         hard_mappings: dict[Path, dict[str, str]] = {}                  # 硬编码产物 {jar: {text: translated}}
 
-        # 阶段 1：语言文件 jobs（统一循环，共用引擎/记忆/状态机）
-        for job in jobs:
-            if state.cancelled:
-                state.status = "cancelled"
-                store.save(state)
-                return
-            await _wait_if_paused()
-            await _translate_entry(job.source_text, job.key, by_mod.setdefault(job.modid, {}))
+        # 阶段 1：语言文件 jobs（批量收集 → 一次 translate_batch → 逐条写回，共用引擎/记忆/状态机）
+        batch_size = getattr(engine, "batch_size", 20)
+        lang_items = ({"key": job.key, "text": job.source_text,
+                       "sink": by_mod.setdefault(job.modid, {})} for job in jobs)
+        await _translate_batch_pipeline(
+            lang_items, lambda texts: engine.translate_batch(texts, req.target_lang), batch_size)
 
-        # 阶段 2：json/lines 全文本覆盖（写回 jar 副本，产物阶段统一落盘）
+        # 阶段 2：json/lines 全文本覆盖（批量收集 → 一次 translate_batch → 逐条写回）
         for jar, srcs in text_sources_by_jar.items():
             updates: list[tuple[TextSource, dict[str, str]]] = []
             for src in srcs:
                 out: dict[str, str] = {}
-                for key, text in src.entries.items():
-                    if state.cancelled:
-                        state.status = "cancelled"
-                        store.save(state)
-                        return
-                    await _wait_if_paused()
-                    await _translate_entry(text, key, out)
+                json_items = ({"key": key, "text": text, "sink": out}
+                              for key, text in src.entries.items())
+                await _translate_batch_pipeline(
+                    json_items, lambda texts: engine.translate_batch(texts, req.target_lang), batch_size)
                 if out:
                     updates.append((src, out))
             if updates:
@@ -287,32 +326,13 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                     memory.save()
                     store.save(state)
         elif not engine_machine:
-            # 兜底引擎（测试假引擎等）：硬编码逐条全翻（无 AI 判断）
+            # 兜底引擎（测试假引擎等）：硬编码批量全翻（无 AI 判断，复用批量流水线）
             for jar, cands in hard_candidates_by_jar.items():
                 mapping: dict[str, str] = {}
-                for c in cands:
-                    if state.cancelled:
-                        state.status = "cancelled"
-                        store.save(state)
-                        return
-                    await _wait_if_paused()
-                    text = c["text"]
-                    if not same_script and not needs_translation(text, req.target_lang):
-                        state.done += 1
-                        state.progress.append({"key": text, "source": text,
-                                               "translated": text, "status": "done"})
-                        continue
-                    translated, from_engine = await translate_one(text)
-                    if from_engine and translated == text:
-                        state.failed += 1
-                    memory.set(text, req.target_lang, translated)
-                    mapping[text] = translated
-                    state.done += 1
-                    state.progress.append({"key": text, "source": text,
-                                           "translated": translated, "status": "done"})
-                    if state.done % 10 == 0:
-                        memory.save()
-                        store.save(state)
+                hard_items = ({"key": c["text"], "text": c["text"], "sink": mapping}
+                              for c in cands)
+                await _translate_batch_pipeline(
+                    hard_items, lambda texts: engine.translate_batch(texts, req.target_lang), batch_size)
                 if mapping:
                     hard_mappings[jar] = mapping
 

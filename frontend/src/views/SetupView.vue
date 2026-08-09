@@ -31,6 +31,7 @@ const provider = ref('DeepSeek')
 const baseUrl = ref('')
 const model = ref('')
 const apiKey = ref(localStorage.getItem(API_KEY_STORE) || '')
+const concurrency = ref(5)   // 并发数：同时进行的 AI 请求数（1-16，默认 5）
 const targetLang = ref('zh_cn')
 const saving = ref(false)
 const error = ref('')
@@ -110,6 +111,8 @@ onMounted(async () => {
       baseUrl.value = cfg.llm.base_url || ''
       model.value = cfg.llm.model || ''
     }
+    // 并发数回填：未配置（None）时保持默认 5
+    if (cfg.concurrency) concurrency.value = cfg.concurrency
     // O2：本地未存 key 时，问后端 keyring 是否已配置过——已配置则回显占位符，不空白
     if (!apiKey.value) {
       try {
@@ -146,6 +149,7 @@ async function saveAndClose() {
       engine: engine.value,
       provider: provider.value,
       target_lang: targetLang.value,
+      concurrency: concurrency.value,
       llm: { base_url: baseUrl.value.trim(), model: model.value.trim() },
     }
     await saveConfig(body)
@@ -194,6 +198,11 @@ async function saveAndClose() {
         <small class="sub">{{ apiKey === API_KEY_PLACEHOLDER
           ? '已配置（点击输入框可重新输入覆盖）'
           : '经后端写入本机系统凭据库（keyring），不落配置文件' }}</small>
+      </div>
+      <div class="field">
+        <label>并发数</label>
+        <input type="number" v-model.number="concurrency" min="1" max="16" />
+        <small class="sub">同时进行的 AI 请求数（1-16，默认 5），越大越快但更吃 API 额度</small>
       </div>
       <div class="field test-row">
         <button class="btn" :disabled="testing" @click="runTest('llm')">

@@ -670,3 +670,56 @@ def test_download_modjar_single_jar(tmp_path, monkeypatch):
     cd = r.headers.get("content-disposition", "")
     assert "mod-简体中文化.jar" in urllib.parse.unquote(cd)
     assert r.content == b"jardata"
+
+
+# ---------- 批量并发翻译（任务：一次 translate_batch 传多条，不再逐条） ----------
+
+@pytest.mark.asyncio
+async def test_auto_translation_batch_call_count(tmp_path, monkeypatch):
+    """批量翻译：mock 引擎断言 translate_batch 一次传入多条而非每次 1 条。
+
+    batch_size=2、5 条需翻译词条 → ceil(5/2)=3 次调用；至少一次调用传入 >1 条。
+    """
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    with zipfile.ZipFile(mods / "m.jar", "w") as zf:
+        zf.writestr("assets/mymod/lang/en_us.json", json.dumps({
+            "k0": "Hello Zero", "k1": "Hello One", "k2": "Hello Two",
+            "k3": "Hello Three", "k4": "Hello Four",
+        }))
+
+    class _BatchSpyEngine:
+        batch_size = 2   # 引擎声明的批量上限
+
+        def __init__(self):
+            self.calls = []   # 每次 translate_batch 收到的文本列表
+
+        async def translate_batch(self, texts, target_lang):
+            self.calls.append(list(texts))
+            return [t.replace("Hello", "你好") for t in texts]
+
+    spy = _BatchSpyEngine()
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: spy)
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
+    assert store.load(state.id).status == "done"
+    # 批量断言：ceil(5/2)=3 次调用；每次 1-2 条；至少一次 >1 条；总量 = 5
+    assert len(spy.calls) == 3, f"期望 3 次批量调用，实际 {len(spy.calls)} 次: {spy.calls}"
+    assert all(0 < len(c) <= 2 for c in spy.calls)
+    assert any(len(c) > 1 for c in spy.calls), "应至少有一次调用传入多条文本"
+    assert sum(len(c) for c in spy.calls) == 5
+    # 译文逐条写回产物（批量后产物/进度仍正确）
+    packs = list((outputs / state.id).glob("*_zh_cn.zip"))
+    assert packs
+    with zipfile.ZipFile(packs[0]) as zf:
+        data = json.loads(zf.read("assets/mymod/lang/zh_cn.json").decode("utf-8"))
+    assert data["k0"] == "你好 Zero"
+    assert data["k4"] == "你好 Four"

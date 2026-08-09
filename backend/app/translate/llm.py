@@ -160,8 +160,11 @@ class LLMClient:
                 {"role": "system", "content":
                     # 术语表注入：glossary_prompt 非空时拼到 system 提示词最前（任务 13）
                     (self.glossary_prompt + "\n" if self.glossary_prompt else "") +
-                    f"把 Minecraft 游戏文本翻译成 {target_lang}。每行以 [i数字] 开头，"
-                    f"输出保持 [i数字] 前缀和 %%MC_数字%% 占位符原样，只输出译文，不要解释。"},
+                    f"把 Minecraft 游戏文本翻译成 {target_lang}。输入每行以 [i数字] 开头，"
+                    f"你必须严格按输入行数逐行输出译文，一行对应一条，不得遗漏、不得合并、"
+                    f"不得添加任何解释/前缀/编号说明。译文须能作为游戏内显示文本，"
+                    f"保留 %s/%d/%n 等占位符原样；原文含换行时用 \\n 表示，不要真的换行拆条。"
+                    f"输出保持 [i数字] 前缀和 %%MC_数字%% 占位符原样，只输出译文。"},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
@@ -223,7 +226,8 @@ class LLMClient:
                 {"role": "system", "content":
                     # 术语表注入：glossary_prompt 非空时拼到 system 提示词最前（任务 13）
                     (self.glossary_prompt + "\n" if self.glossary_prompt else "") +
-                    f"把 Minecraft 游戏文本翻译成 {target_lang}。保留 %%MC_数字%% 占位符原样，只输出译文。"},
+                    f"把 Minecraft 游戏文本翻译成 {target_lang}。保留 %s/%d/%n 等占位符与 "
+                    f"%%MC_数字%% 占位符原样；原文含换行时用 \\n 表示，只输出译文，不要解释。"},
                 {"role": "user", "content": masked},
             ],
             "temperature": 0.2,
