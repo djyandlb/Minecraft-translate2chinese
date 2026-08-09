@@ -45,6 +45,7 @@ const testOk = ref(null)
 const cacheSize = ref(null)      // { work_bytes, outputs_bytes, total_mb, work_path, outputs_path }
 const cacheMsg = ref('')         // 清理结果提示
 const clearing = ref(false)      // 清除缓存进行中
+const showClearConfirm = ref(false)   // 自写清除缓存确认弹窗（不用浏览器 window.confirm）
 
 async function refreshCacheSize() {
   try {
@@ -54,9 +55,12 @@ async function refreshCacheSize() {
   }
 }
 
-async function onClearCache() {
-  // 确认弹窗：清缓存会删运行中任务的中间文件，明确警示再动手
-  if (!window.confirm('将删除临时文件与旧产物，正在翻译的任务会受影响。确定清除？')) return
+function onClearCache() {
+  // 弹自写确认弹窗：清缓存会删运行中任务的中间文件，明确警示再动手
+  showClearConfirm.value = true
+}
+async function doClearCache() {
+  showClearConfirm.value = false
   clearing.value = true
   cacheMsg.value = ''
   try {
@@ -140,11 +144,20 @@ async function saveAndClose() {
   saving.value = true
   error.value = ''
   try {
+    let keySaved = true
     // api_key 写进后端 keyring（AI 引擎真正读取的地方），localStorage 仅作 UI 回显；
     // 占位符「已配置（••••）」不是真实 key：跳过写 keyring / localStorage，避免覆盖已存 key
-    if (apiKey.value && apiKey.value !== API_KEY_PLACEHOLDER) await saveKey(apiKey.value)
-    if (apiKey.value !== API_KEY_PLACEHOLDER) localStorage.setItem(API_KEY_STORE, apiKey.value)
-    else localStorage.removeItem(API_KEY_STORE)
+    if (apiKey.value && apiKey.value !== API_KEY_PLACEHOLDER) {
+      try {
+        await saveKey(apiKey.value)
+      } catch (e) {
+        // keyring 写失败（如 Windows 凭据库异常）不阻塞其余配置保存——用户反馈「配置保存不完全」
+        keySaved = false
+        error.value = `API Key 保存失败（${e.message}），其余配置已保存`
+      }
+    }
+    if (keySaved && apiKey.value !== API_KEY_PLACEHOLDER) localStorage.setItem(API_KEY_STORE, apiKey.value)
+    else if (apiKey.value !== API_KEY_PLACEHOLDER) localStorage.removeItem(API_KEY_STORE)
     const body = {
       engine: engine.value,
       provider: provider.value,
@@ -156,7 +169,7 @@ async function saveAndClose() {
     props.onDone?.(body)
     props.onClose?.()
   } catch (e) {
-    error.value = `保存失败：${e.message}`
+    if (!error.value) error.value = `保存失败：${e.message}`
   } finally {
     saving.value = false
   }
@@ -256,6 +269,18 @@ async function saveAndClose() {
       <p v-if="cacheMsg" class="tip">{{ cacheMsg }}</p>
     </div>
 
+    <!-- 自写清除缓存确认弹窗（不用浏览器 window.confirm） -->
+    <div v-if="showClearConfirm" class="overlay" @click.self="showClearConfirm = false">
+      <div class="dialog confirm-dialog">
+        <h3>清除缓存</h3>
+        <p class="confirm-text">将删除临时文件与旧产物，正在翻译的任务会受影响。确定清除？</p>
+        <div class="actions">
+          <button class="btn" @click="showClearConfirm = false">取消</button>
+          <button class="btn danger" :disabled="clearing" @click="doClearCache">确定清除</button>
+        </div>
+      </div>
+    </div>
+
     <p v-if="tip" class="tip">{{ tip }}</p>
     <p v-if="error" class="err">{{ error }}</p>
 
@@ -280,4 +305,17 @@ async function saveAndClose() {
 .cache-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .cache-size { font-weight: 600; color: var(--text); }
 .btn.danger { background: var(--danger); color: #fff; border-color: transparent; }
+
+/* 自写清除缓存确认弹窗（替代浏览器 window.confirm） */
+.overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .55);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+.dialog {
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px;
+  padding: 22px 26px; width: 380px; max-width: 90vw; box-shadow: 0 8px 30px rgba(0,0,0,.35);
+}
+.confirm-dialog h3 { margin: 0 0 12px; color: var(--text); }
+.confirm-text { color: var(--text-dim); margin: 0 0 18px; line-height: 1.6; }
+.dialog .actions { display: flex; justify-content: flex-end; gap: 10px; }
 </style>

@@ -97,3 +97,11 @@ table { width: 100%; border-collapse: collapse; margin-top: 8px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 th { color: var(--text-dim); font-weight: 500; font-size: 12px; }
 tr:hover td { background: var(--bg-2); }
+
+/* 自定义滚动条（深色主题，替代浏览器默认难看的滚动条） */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
