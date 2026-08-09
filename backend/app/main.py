@@ -152,6 +152,9 @@ def test_connection(payload: dict = None):
         return {"ok": True, "message": "连接成功"}
     if resp.status_code in (401, 403):
         return {"ok": False, "message": "API Key 无效或无权限"}
+    if resp.status_code in (400, 404, 422):
+        # 用户反馈：填 /anthropic、platform.deepseek.com 等连不上——给明确地址诊断
+        return {"ok": False, "message": "地址或接口格式不对：OpenAI 兼容 base_url 应为 https://api.deepseek.com 这类（不要带 /anthropic、/v1 等后缀，也不要填网页平台地址）"}
     return {"ok": False, "message": f"HTTP {resp.status_code}"}
 
 

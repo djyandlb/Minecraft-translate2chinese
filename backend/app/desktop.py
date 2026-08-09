@@ -2,10 +2,23 @@
 
 pywebview 延迟 import（放在 main() 内）：未安装时不影响其余代码与测试。
 """
+import logging
 import os
 import socket
+import sys
 import threading
 import time
+from pathlib import Path
+
+# 运行日志：frozen 时写 exe 旁 mc-translator.log（诊断窗口自动关闭等问题），否则项目根
+_log_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
+logging.basicConfig(
+    filename=str(_log_dir / "mc-translator.log"),
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    encoding="utf-8",
+)
+logger = logging.getLogger("desktop")
 
 
 def _free_port() -> int:
@@ -18,7 +31,11 @@ def _free_port() -> int:
 def _run_server(port: int) -> None:
     import uvicorn
     from app.main import app   # 对象导入：PyInstaller 静态分析可收集整个 app 包
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    try:
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    except Exception:
+        # 诊断：uvicorn 崩溃（某个请求导致）会体现在这里；不影响窗口，但记录便于排查
+        logger.exception("uvicorn 服务异常退出")
 
 
 def _wait_port(port: int, timeout: float = 10.0) -> None:
@@ -91,7 +108,7 @@ class _JsApi:
 
 def main() -> None:
     """启动后台 API 服务 + 桌面窗口。"""
-    port = _free_port()
+    logger.info("桌面壳启动，端口 %s", (port := _free_port()))
     threading.Thread(target=_run_server, args=(port,), daemon=True).start()
     import webview  # 延迟导入：未装 pywebview 时不影响其余代码
     # js_api 暴露 select_path 给前端，桌面版直接拿本地路径（不走上传）
@@ -101,6 +118,9 @@ def main() -> None:
     # 先加载占位页（防服务器未就绪时前端「拒绝连接」），就绪后切真实 URL
     threading.Thread(target=_wait_and_load, args=(window, port), daemon=True).start()
     webview.start()
+    # 走到这里说明窗口已全部关闭（start 返回）。记录日志便于诊断「窗口自动关闭」：
+    # 正常手动关闭 vs 异常提前返回的差异可从这里与 _run_server 的异常日志判断。
+    logger.info("webview.start() 返回（窗口已关闭），进程退出")
     # 窗口全部关闭 → 强制退出进程：uvicorn 是 daemon 子线程，start() 返回后
     # 本应随进程退出，os._exit 兜底确保「关闭前端窗口即关掉整个后端」（O2）
     os._exit(0)
