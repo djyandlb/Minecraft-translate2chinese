@@ -32,3 +32,10 @@ class MapTranslateRequest(BaseModel):
     path: str
     source_lang: str = "en_us"
     target_lang: str = "zh_cn"
+
+
+class HardcodeRequest(BaseModel):
+    """硬编码汉化：对 mod jar 内 JVM 字节码硬编码字符串发起后台翻译。原 jar 只读。"""
+    path: str
+    source_lang: str = "en_us"
+    target_lang: str = "zh_cn"
