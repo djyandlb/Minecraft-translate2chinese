@@ -39,7 +39,13 @@ export const autoTranslate = (body) => req('/auto-translate', { method: 'POST', 
 export async function uploadFile(file) {
   const fd = new FormData()
   fd.append('file', file)
-  const res = await fetch(BASE + '/upload', { method: 'POST', body: fd })
+  let res
+  try {
+    res = await fetch(BASE + '/upload', { method: 'POST', body: fd })
+  } catch (e) {
+    // F13-review：网络层错误统一为中文提示（对齐 req 的「无法连接后端」）
+    throw new Error('无法连接后端，请确认 uvicorn 已启动')
+  }
   if (!res.ok) {
     let msg = `上传失败（HTTP ${res.status}）`
     try { const d = await res.json(); if (d.detail) msg = String(d.detail) } catch (e) {}

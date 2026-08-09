@@ -62,7 +62,11 @@ async function pickPath() {
 const dragOver = ref(false)
 const fileInput = ref(null)
 function onDragOver(e) { e.preventDefault(); dragOver.value = true }
-function onDragLeave() { dragOver.value = false }
+function onDragLeave(e) {
+  // F13-review：子元素间移动会误触发 dragleave 导致高亮闪断；仅离开整个 dropzone 才熄灭
+  if (e.currentTarget.contains(e.relatedTarget)) return
+  dragOver.value = false
+}
 async function onDrop(e) {
   e.preventDefault(); dragOver.value = false
   const file = e.dataTransfer.files?.[0]
@@ -93,6 +97,7 @@ async function handleFile(file) {
 async function autoDetect() {
   if (!path.value) { error.value = '请选择路径或拖入文件'; return }
   detecting.value = true; error.value = ''
+  result.value = null   // F13-review：识别前清空旧摘要，防失败残留导致「摘要与翻译对象不一致」
   try {
     result.value = await detect({ path: path.value, target_lang: props.targetLang })
     if (result.value.kind === 'unknown') {
@@ -178,7 +183,7 @@ const KIND_TEXT = { modpack: '整合包', modjar: '单个 mod', map: '地图存�
         </div>
         <div class="kv" v-if="result.kind !== 'map'">
           <span>资源包格式</span>
-          <strong>{{ result.pack_format ?? '自动' }}</strong>
+          <strong>{{ result.pack_format > 0 ? result.pack_format : '自动' }}</strong>
         </div>
       </div>
       <template v-if="result.summary">
