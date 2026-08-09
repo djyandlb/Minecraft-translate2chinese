@@ -387,11 +387,10 @@ def map_scan(req: MapScanRequest):
     if not maps_world.validate_world(world):
         raise HTTPException(400, "不是有效的世界存档目录（缺少可加载的 level.dat）")
     entries = maps_scan.scan_world(world)
-    # M4-recheck：按后缀区分可写回词条与 .mca 区块词条，前端数字才诚实
-    write_supported = {".dat", ".json", ".mcfunction"}
-    mca_skipped = sum(1 for e in entries if Path(e["file"]).suffix.lower() == ".mca")
+    # M4-mca：.mca 已支持写回（整 region 重写），全部扫描词条可写，mca_skipped 恒 0
+    write_supported = {".dat", ".mca", ".json", ".mcfunction"}
     writable = [e for e in entries if Path(e["file"]).suffix.lower() in write_supported]
-    return {"entries": len(writable), "mca_skipped": mca_skipped, "preview": writable[:50]}
+    return {"entries": len(writable), "mca_skipped": 0, "preview": writable[:50]}
 
 
 @app.post("/api/map-translate")

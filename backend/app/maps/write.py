@@ -1,27 +1,36 @@
 """M4-4 地图副本写回模块。
 
 消费 scan.py 产出的 {text, nbt_path, key, file} 结构，把译文写回世界副本的
-NBT / JSON / mcfunction 文件。写前把原文件备份为 <name>.bak（若不存在）。
+NBT / JSON / mcfunction / mca 文件。写前把原文件备份为 <name>.bak（若不存在）。
 全程 pathlib 路径，只写副本，不碰原档。
 """
+import gzip
+import io
 import json
 import re
 import shutil
+import struct
+import zlib
 from pathlib import Path
 
 from nbtlib import Compound, File, List, String
 
 
 def _split_path(nbt_path: str) -> list:
-    """'a.b[0].c' → ['a', 0, 'c']；[i] 转 int 下标。"""
+    """'a.b[0].c' → ['a', 0, 'c']；'[0].c' → [0, 'c']；[i] 转 int 下标。
+
+    支持 [i] 开头的列表路径（.mca 的 block_entities/TileEntities 元素下标）。
+    """
     parts: list = []
     for seg in nbt_path.split("."):
-        m = re.fullmatch(r"(\w+)(?:\[(\d+)\])?", seg)
+        m = re.fullmatch(r"(?:(\w+)(?:\[(\d+)\])?|\[(\d+)\])", seg)
         if not m:
             continue
-        parts.append(m.group(1))
-        if m.group(2) is not None:
-            parts.append(int(m.group(2)))
+        if m.group(1) is not None:
+            parts.append(m.group(1))
+        idx = m.group(2) if m.group(2) is not None else m.group(3)
+        if idx is not None:
+            parts.append(int(idx))
     return parts
 
 
@@ -56,8 +65,151 @@ def _write_backup(path: Path) -> None:
         shutil.copy2(path, bak)
 
 
+def _parse_chunk_prefix(nbt_path: str) -> tuple[tuple[int, int] | None, str]:
+    """解析 scan 输出的 chunk(x,z) 前缀：'chunk(0,0)[0].Command' → ((0,0), '[0].Command')。
+
+    x/z 为 region 内区块索引（0..31，与 scan_mca 的循环一致）；无前缀返回 (None, 原路径)。
+    """
+    m = re.match(r"chunk\((-?\d+),(-?\d+)\)(.*)$", nbt_path)
+    if not m:
+        return None, nbt_path
+    return (int(m.group(1)), int(m.group(2))), m.group(3)
+
+
+def _decompress(payload: bytes, compression: int) -> bytes:
+    """按压缩类型解压区块数据：1=gzip、2=zlib、3=无压缩。"""
+    if compression == 1:
+        return gzip.decompress(payload)
+    if compression == 2:
+        return zlib.decompress(payload)
+    if compression == 3:
+        return payload
+    raise ValueError(f"未知区块压缩类型: {compression}")
+
+
+def _parse_region(data: bytes) -> list:
+    """解析 region 文件：按偏移表读回全部区块条目（list[1024]）。
+
+    条目为 dict{raw, timestamp} 或 None（偏移表 0 表示区块缺失）。
+    raw 为区块原始数据单元（4B 长度 + 1B 压缩类型 + 压缩数据），重建时原样保留。
+    """
+    if len(data) < 8192:
+        raise ValueError("region 文件过短（缺少 8KB 头部）")
+    chunks: list = []
+    for i in range(1024):
+        off = i * 4
+        sector_off = int.from_bytes(data[off:off + 3], "big")
+        sector_count = data[off + 3]
+        ts = int.from_bytes(data[4096 + off:4096 + off + 4], "big")
+        if sector_off == 0 and sector_count == 0:
+            chunks.append(None)
+            continue
+        start = sector_off * 4096
+        unit = data[start:start + sector_count * 4096]
+        length = int.from_bytes(unit[:4], "big")
+        chunks.append({"raw": unit[:4 + length], "timestamp": ts})
+    return chunks
+
+
+def _find_entity_list(level, index: int):
+    """定位实体列表（新 block_entities / 旧 TileEntities）的第 index 个元素所在列表。
+
+    scan_mca 对两种列表都扫，路径只含 [i] 下标不含列表名；正常区块二者不同时存在，
+    优先新格式 block_entities，旧格式 TileEntities 兜底。
+    """
+    for key in ("block_entities", "TileEntities"):
+        lst = level.get(key)
+        if isinstance(lst, List) and index < len(lst):
+            return lst
+    return None
+
+
+def _apply_mca_path(root, rest: str, translated: str) -> None:
+    """在区块根 Compound 上按剩余路径替换文本。
+
+    rest 以 [i] 开头表示 block_entities/TileEntities 的元素下标；
+    兼容 Level 包裹（≤1.14）与平铺（1.15+）布局。
+    """
+    parts = _split_path(rest)
+    if not parts:
+        return
+    level = root["Level"] if "Level" in root else root
+    if isinstance(parts[0], int):
+        lst = _find_entity_list(level, parts[0])
+        if lst is None:
+            return
+        _set_value(lst, parts, translated)
+    else:
+        _set_value(level, parts, translated)
+
+
+def _rebuild_region(chunks: list) -> bytes:
+    """重建 region：区块按新大小紧凑重排（4KB 对齐），重建偏移表 + 时间戳表。
+
+    区块压缩后大小变化会破坏后续 sector 偏移，整 region 重排（保持区块顺序）
+    100% 可靠；未修改区块保留原始数据单元字节，压缩类型不变。
+    """
+    offsets = bytearray(4096)
+    sector = 2                      # 前两个 sector 是头部（偏移表 + 时间戳表）
+    data_parts: list[bytes] = []
+    new_timestamps = bytearray(4096)
+    for i in range(1024):
+        entry = chunks[i]
+        if entry is None:
+            continue
+        unit = entry["raw"]
+        sectors = (len(unit) + 4095) // 4096
+        offsets[i * 4:i * 4 + 4] = struct.pack(">I", (sector << 8) | sectors)
+        new_timestamps[i * 4:i * 4 + 4] = struct.pack(">I", entry["timestamp"])
+        data_parts.append(unit + b"\x00" * (sectors * 4096 - len(unit)))
+        sector += sectors
+    header = bytearray(8192)
+    header[:4096] = offsets
+    header[4096:] = new_timestamps
+    return bytes(header) + b"".join(data_parts)
+
+
+def write_mca(file: Path, translations: list[dict]) -> None:
+    """把译文写回 .mca region：整 region 重写（读全部区块 → 目标替换 → 重建）。
+
+    translations 元素含 nbt_path（形如 chunk(x,z)[i].Command，x/z 为 region 内 0..31 索引）。
+    目标区块解压后用 nbtlib 替换（复用 _split_path/_set_value），未目标区块原字节保留；
+    全部区块紧凑重排 + 4KB 对齐，重建偏移表/时间戳表。写前备份 <name>.bak。
+    """
+    chunks = _parse_region(file.read_bytes())
+    by_index: dict[int, list] = {}
+    for t in translations:
+        coords, rest = _parse_chunk_prefix(t["nbt_path"])
+        if coords is None:
+            continue
+        cx, cz = coords
+        if not (0 <= cx < 32 and 0 <= cz < 32):
+            continue
+        by_index.setdefault(cx + cz * 32, []).append((t, rest))
+    for idx, items in by_index.items():
+        entry = chunks[idx]
+        if entry is None:
+            continue    # 目标区块缺失：与 scan_mca 跳过缺失区块一致，忽略该区块词条
+        raw = entry["raw"]
+        length = int.from_bytes(raw[:4], "big")
+        compression = raw[4]
+        payload = raw[5:5 + length - 1]
+        try:
+            root = File.parse(io.BytesIO(_decompress(payload, compression)))
+        except Exception:
+            continue    # 区块 NBT 损坏：保留原字节，跳过该区块替换
+        for t, rest in items:
+            _apply_mca_path(root, rest, t["translated"])
+        buf = io.BytesIO()
+        File.write(root, buf)
+        new_payload = zlib.compress(buf.getvalue(), 6)
+        entry["raw"] = struct.pack(">I", len(new_payload) + 1) + b"\x02" + new_payload
+    _write_backup(file)
+    file.write_bytes(_rebuild_region(chunks))
+
+
 def write_translations(file: Path, translations: list[dict]) -> None:
-    """把译文写回 .dat/.json/.mcfunction。写前备份。"""
+    """把译文写回 .dat/.json/.mcfunction/.mca。写前备份。"""
     if not translations:
         return
     _write_backup(file)
@@ -67,6 +219,8 @@ def write_translations(file: Path, translations: list[dict]) -> None:
         for t in translations:
             apply_translation(nbt, t["nbt_path"], t["translated"])
         nbt.save(file, gzipped=True)
+    elif suffix == ".mca":
+        write_mca(file, translations)
     elif suffix == ".json":
         data = json.loads(file.read_text(encoding="utf-8"))
         for t in translations:

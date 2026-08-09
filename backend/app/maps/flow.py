@@ -24,7 +24,7 @@ from app.translate.llm import LLMClient
 async def run_map_translation(task_id: str, req: MapTranslateRequest, cfg: AppConfig,
                               store: TaskStore, work_dir: Path, outputs_dir: Path) -> None:
     """地图翻译：整档复制→副本扫描→引擎翻译（记忆+简繁+术语）→写回→导出 mcworld。原档不动。
-    局限：.mca 区块（命令方块文本）写回暂不支持，翻译前按后缀过滤，避免白烧 token。
+    .dat/.json/.mcfunction/.mca 均支持写回（.mca 为整 region 重写）。
 
     work_dir 为中间产物区（temp，副本落 maps/<task_id>，任务终态后清理）；
     outputs_dir 为产物区（exe 旁 outputs/，mcworld 落这里）。
@@ -36,22 +36,12 @@ async def run_map_translation(task_id: str, req: MapTranslateRequest, cfg: AppCo
         copy = work_dir / "maps" / task_id
         copy_world(Path(req.path), copy)
         entries = scan_world(copy)
-        # M4-6：scan_world 会扫出 .mca 区块里的命令方块文本，但 write_translations 只支持
-        # .dat/.json/.mcfunction 写回。若把 .mca 词条喂给引擎会白烧 token，此处翻译前按后缀过滤，
-        # 只保留写回模块能落盘的后缀（.mca 写回暂不支持，扫描会漏命令方块）。
-        total_scanned = len(entries)
-        write_supported = {".dat", ".json", ".mcfunction"}
-        entries = [e for e in entries if Path(e["file"]).suffix.lower() in write_supported]
-        skipped = total_scanned - len(entries)
         state.total = len(entries)
-        if skipped:
-            state.progress.append({"status": "warn",
-                                   "error": f"跳过 {skipped} 条 .mca 区块词条（写回暂不支持，命令方块文本暂无法汉化）"})
-        # M4-recheck：过滤后无可写回词条（如纯命令方块世界）→ 直接失败，不导出空包
+        # M4-recheck：无任何可翻译词条 → 直接失败，不导出空包
         if not entries:
             state.status = "failed"
             state.progress.append({"status": "error",
-                                   "error": "世界无可写回的可翻译文本（命令方块等 .mca 区块文本暂不支持写回）"})
+                                   "error": "世界无可写回的可翻译文本"})
             store.save(state)
             return
         store.save(state)

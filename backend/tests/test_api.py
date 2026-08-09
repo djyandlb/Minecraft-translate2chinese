@@ -111,6 +111,39 @@ def test_map_scan_valid_world(tmp_path):
     assert r.status_code == 200 and r.json()["entries"] >= 1
 
 
+def test_map_scan_counts_mca_not_skipped(tmp_path):
+    """M4-mca：.mca 命令方块词条计入 entries，mca_skipped 恒 0（不再跳过）。"""
+    import io
+    import struct
+    import zlib
+    from nbtlib import Compound, File, Int, List, String
+    w = tmp_path / "world"
+    (w / "region").mkdir(parents=True)
+    File({"Data": Compound({"LevelName": String("t")})}).save(w / "level.dat", gzipped=True)
+    root = Compound({
+        "DataVersion": Int(3465),
+        "block_entities": List[Compound]([Compound({
+            "id": String("minecraft:command_block"),
+            "Command": String("say mca block"),
+            "x": Int(0), "y": Int(60), "z": Int(0),
+        })]),
+    })
+    f = File(root)
+    buf = io.BytesIO()
+    File.write(f, buf)
+    payload = zlib.compress(buf.getvalue())
+    unit = struct.pack(">I", len(payload) + 1) + b"\x02" + payload
+    offsets = bytearray(4096)
+    offsets[0:4] = struct.pack(">I", (2 << 8) | 1)
+    (w / "region" / "r.0.0.mca").write_bytes(
+        bytes(offsets) + bytes(4096) + unit + b"\x00" * (4096 - len(unit)) + bytes(4096))
+    r = client.post("/api/map-scan", json={"path": str(w)})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mca_skipped"] == 0
+    assert any(e["nbt_path"].startswith("chunk(0,0)") for e in body["preview"])
+
+
 def test_hardcode_scan_invalid(tmp_path):
     # 非 .jar 文件 → 400（原 jar 只读，接口拒绝非 jar 输入）
     r = client.post("/api/hardcode-scan", json={"path": str(tmp_path / "notajar.txt")})
