@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { autoTranslate, browse, detect, uploadFile } from '../api'
 
 // props：targetLang（来自 App 配置）+ onTranslate(taskId) / onBack()
@@ -15,6 +15,41 @@ const detecting = ref(false)
 const uploading = ref(false)
 const translating = ref(false)
 const error = ref('')
+
+// —— 硬编码候选选择（业界 MIT 模式：全选/反选/搜索过滤/每项勾选）——
+const hardCandidates = ref([])         // [{text, occurrences}]，来自 summary.hardcoded_candidates
+const selectedHard = ref(new Set())    // 选中集合，默认全选
+const hardSearch = ref('')
+// 搜索过滤只影响显示，不影响选择
+const filteredHard = computed(() => {
+  const q = hardSearch.value.trim().toLowerCase()
+  if (!q) return hardCandidates.value
+  return hardCandidates.value.filter(c => c.text.toLowerCase().includes(q))
+})
+const allHardChecked = computed(() =>
+  hardCandidates.value.length > 0 && filteredHard.value.every(c => selectedHard.value.has(c.text))
+)
+function toggleHard(text) {
+  const next = new Set(selectedHard.value)
+  if (next.has(text)) next.delete(text); else next.add(text)
+  selectedHard.value = next
+}
+function toggleAllHard() {
+  // 全选/取消 作用于当前搜索过滤后的可见项
+  const texts = filteredHard.value.map(c => c.text)
+  const next = new Set(selectedHard.value)
+  if (allHardChecked.value) texts.forEach(t => next.delete(t))
+  else texts.forEach(t => next.add(t))
+  selectedHard.value = next
+}
+function invertHard() {
+  // 反选 当前过滤后的可见项
+  const next = new Set(selectedHard.value)
+  for (const c of filteredHard.value) {
+    if (next.has(c.text)) next.delete(c.text); else next.add(c.text)
+  }
+  selectedHard.value = next
+}
 
 // —— 目录浏览器（跨盘浏览复用现有 browser，盘根可列盘符）——
 const showBrowser = ref(false)
@@ -98,8 +133,15 @@ async function autoDetect() {
   if (!path.value) { error.value = '请选择路径或拖入文件'; return }
   detecting.value = true; error.value = ''
   result.value = null   // F13-review：识别前清空旧摘要，防失败残留导致「摘要与翻译对象不一致」
+  hardCandidates.value = []
+  selectedHard.value = new Set()
+  hardSearch.value = ''
   try {
     result.value = await detect({ path: path.value, target_lang: props.targetLang })
+    // 初始化硬编码候选：存在候选列表时默认全选
+    const cands = result.value.summary?.hardcoded_candidates || []
+    hardCandidates.value = cands
+    selectedHard.value = new Set(cands.map(c => c.text))
     if (result.value.kind === 'unknown') {
       error.value = '无法识别输入类型，请确认是整合包目录 / mod jar / 地图存档'
     }
@@ -115,7 +157,12 @@ async function startTranslate() {
   if (!result.value || result.value.kind === 'unknown') { error.value = '请先完成识别'; return }
   translating.value = true; error.value = ''
   try {
-    const r = await autoTranslate({ path: path.value, target_lang: props.targetLang })
+    const body = { path: path.value, target_lang: props.targetLang }
+    // 有硬编码候选时把用户勾选集合传给后端（只翻选中项；全取消则一个硬编码都不翻）
+    if (hardCandidates.value.length > 0) {
+      body.selected_hardcoded = [...selectedHard.value]
+    }
+    const r = await autoTranslate(body)
     props.onTranslate?.(r.task_id)
   } catch (e) {
     error.value = `启动翻译失败：${e.message}`
@@ -197,6 +244,31 @@ const KIND_TEXT = { modpack: '整合包', modjar: '单个 mod', map: '地图存�
         </p>
       </template>
       <p v-else-if="result.kind === 'map'" class="total">地图存档：翻译时自动扫描并写入，产物为 .mcworld</p>
+
+      <!-- 硬编码候选选择区（业界 MIT 模式）：全选/反选/搜索过滤/每项勾选，翻译只翻选中的 -->
+      <div v-if="hardCandidates.length" class="hard-select">
+        <div class="hard-head">
+          <span class="hard-title">硬编码候选（{{ hardCandidates.length }} 条，按出现频率排序）</span>
+          <span class="spacer"></span>
+          <label class="mini-check">
+            <input type="checkbox" :checked="allHardChecked" @change="toggleAllHard" />
+            全选
+          </label>
+          <button class="btn small" @click="toggleAllHard">全选/取消</button>
+          <button class="btn small" @click="invertHard">反选</button>
+          <input type="text" v-model="hardSearch" placeholder="搜索过滤…" class="hard-search" />
+        </div>
+        <ul class="hard-list">
+          <li v-for="c in filteredHard" :key="c.text">
+            <label class="hard-item">
+              <input type="checkbox" :checked="selectedHard.has(c.text)" @change="toggleHard(c.text)" />
+              <span class="hard-text">{{ c.text }}</span>
+              <span class="hard-occ">×{{ c.occurrences }}</span>
+            </label>
+          </li>
+        </ul>
+        <p v-if="!filteredHard.length" class="tip">没有匹配的候选</p>
+      </div>
     </div>
 
     <p v-if="error" class="err">{{ error }}</p>
@@ -261,4 +333,28 @@ const KIND_TEXT = { modpack: '整合包', modjar: '单个 mod', map: '地图存�
 .kv strong { color: var(--accent); font-size: 14px; }
 .total { color: var(--text-dim); margin: 6px 0 0; }
 .total strong { color: var(--accent); }
+
+/* 硬编码候选选择区 */
+.hard-select {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-2);
+  padding: 10px;
+}
+.hard-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.hard-title { font-size: 13px; color: var(--text-dim); }
+.btn.small { padding: 2px 8px; font-size: 12px; }
+.mini-check { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-dim); }
+.hard-search { flex: 1; min-width: 140px; }
+.hard-list {
+  list-style: none; margin: 0; padding: 0;
+  max-height: 220px; overflow: auto;   /* 候选多时滚动展示 */
+  border-top: 1px solid var(--line);
+}
+.hard-item { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 4px; cursor: pointer; }
+.hard-item:hover { background: var(--bg-3); }
+.hard-text { flex: 1; word-break: break-all; font-size: 13px; }
+.hard-occ { color: var(--text-dim); font-size: 12px; }
+.hard-select .tip { color: var(--text-dim); font-size: 12px; margin: 6px 0 0; }
 </style>

@@ -103,6 +103,13 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                 state.progress.append({"status": "warn",
                                        "error": f"扫描 {jar.name} 硬编码字符串失败：{e}"})
 
+        # 用户勾选的硬编码候选过滤：selected_hardcoded 为 None 时全翻；
+        # 空列表表示一个都不翻（候选选择环节用户全取消）。
+        selected_hardcoded = getattr(req, "selected_hardcoded", None)
+        if selected_hardcoded is not None:
+            chosen = set(selected_hardcoded)
+            hard_items = [(jar, t) for jar, t in hard_items if t in chosen]
+
         state.total = len(jobs) + len(hard_items)
         if not jobs and not hard_items:
             # 空词条：直接 done + warn，不导出空包
@@ -138,7 +145,11 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
             if same_script:
                 # 简繁双向直转，免 AI：zh_tw 走繁化，zh_cn 走简化（F5）
                 return (traditional(text) if req.target_lang == "zh_tw" else simplify(text)), False
-            return (await engine.translate_batch([text], req.target_lang))[0], True
+            try:
+                return (await engine.translate_batch([text], req.target_lang))[0], True
+            except Exception:
+                # M6-recheck：单条引擎异常（网络/API 失败）→ 回原文 + 计 failed，不拖垮整体流程
+                return text, True
 
         by_mod: dict[str, dict[str, str]] = {}          # 语言文件产物
         by_jar_map: dict[Path, dict[str, str]] = {}     # 硬编码产物 {jar: {text: translated}}

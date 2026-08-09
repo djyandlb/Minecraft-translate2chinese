@@ -30,28 +30,57 @@ _SIGNATURE_SUFFIXES = (".SF", ".RSA", ".DSA", ".EC")
 # 类路径片段（com.example.Mod 的每个 "." 分隔段）
 _CLASS_PATH_PART_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 
+# JVM 方法描述符（参考 MIT 工具的 technicalPatterns）：
+#   (Ljava/lang/String;)V 这类含类引用的签名旧正则 ^\([BCDFIJSZ\[L;]*\)...$ 会漏网
+#   （类名里有 / 与小写字母），这里按 JVM 规范完整描述：
+#   基础类型 [BCDFIJSZ]、类引用 Lcom/foo;、数组前缀 \[*；返回类型可为 V 或同类型。
+_JVM_BASE_TYPE = r"(?:[BCDFIJSZ]|L[A-Za-z0-9/$_]+;)"
+_JVM_TYPE_RE = r"(?:\[*" + _JVM_BASE_TYPE + r")"
+_JVM_METHOD_DESC_RE = re.compile(r"^\((?:%s)*\)(?:%s|V)?$" % (_JVM_TYPE_RE, _JVM_TYPE_RE))
+
 
 def is_hardcode_translatable(text: str) -> bool:
-    """判断一段字节码字符串字面量是否值得硬编码汉化。
+    """判断一段字节码字符串字面量是否值得硬编码汉化（候选）。
 
-    先复用 should_translate 过滤技术串，再追加字节码场景规则：
-      - 长度裁剪到 [2, 100]
-      - 纯大写缩写（OK/FPS）跳过
-      - modid:item 命名空间串跳过
-      - 类路径（com.example.Mod）跳过
+    参考 Minecraft-mod-translator（MIT License，版权归 饩雨 xiyu 2025）的
+    isUserVisibleString/isTranslatableString 过滤思路：只排除明确的技术性
+    标识符（包名/方法签名/描述符/常量名/纯数字/十六进制/分隔符/字面量等），
+    **单词保留为候选**——"stone"/"parent" 这类是否翻译交给用户选择环节把关，
+    不在此一刀切，避免漏翻大量单次词 UI 文本（Settings/Inventory 等）。
     """
     t = text.strip()
-    if not should_translate(t):
+    if not (2 <= len(t) <= 100):
         return False
-    if len(t) < 2 or len(t) > 100:
+    # 含字母（拉丁/CJK/假名）才有意义，纯符号/数字串跳过
+    if not re.search(r"[a-zA-Z一-鿿぀-ヿ]", t):
         return False
-    # 纯大写缩写（OK/FPS）：全大写且至少含一个 ASCII 字母
-    if t.isupper() and any(ch.isascii() and ch.isalpha() for ch in t):
+    # 技术性标识符排除（参考 MIT 工具的 technicalPatterns）
+    if re.match(r"^[a-z]+(\.[a-z]+)+$", t):        # 包名 com.example
+        return False
+    if _JVM_METHOD_DESC_RE.match(t):      # 方法签名 (Ljava/lang/String;)V
+        return False
+    if re.match(r"^L[a-zA-Z0-9/$_]+;$", t):        # 类描述符 Lcom/Foo;
+        return False
+    if re.match(r"^\[[BCDFIJSZ\[L]", t):           # 数组描述符 [Ljava/lang/String;
+        return False
+    if re.match(r"^[A-Z_][A-Z0-9_]*$", t):         # 常量名 HELLO_WORLD
+        return False
+    if re.match(r"^(get|set|is)[A-Z]", t):         # getter/setter 方法名
+        return False
+    if re.match(r"^<(init|clinit)>$", t):          # 构造函数
+        return False
+    if re.match(r"^\d+(\.\d+)*$", t):              # 纯数字
+        return False
+    if re.match(r"^[a-f0-9]{8,}$", t, re.I):       # 十六进制
+        return False
+    if re.match(r"^[\\/.\\-_]+$", t):              # 分隔符
+        return False
+    if re.match(r"^(true|false|null)$", t, re.I):  # 字面量
         return False
     # modid:item（冒号且无空格）
     if ":" in t and " " not in t:
         return False
-    # 类路径（每段都是合法 Java 标识符）
+    # 类路径（每段都是合法 Java 标识符）com.example.Mod
     if "." in t and all(_CLASS_PATH_PART_RE.fullmatch(s) for s in t.split(".")):
         return False
     return True
@@ -115,14 +144,15 @@ def _repack(work: Path, jar: Path) -> None:
             zf.write(p, rel)
 
 
-def scan_hardcoded_strings(jar: Path) -> list[str]:
-    """扫描 jar 内硬编码的可翻译字符串。
+def scan_hardcoded_candidates(jar: Path) -> list[dict]:
+    """扫描硬编码候选：返回 [{"text": str, "occurrences": int}]，按出现频率降序。
 
-    解压 jar → 遍历 *.class → jawa 提取 String 字面量 → 去重 →
-    is_hardcode_translatable 过滤 → 排序返回。
+    与 scan_hardcoded_strings 同一提取逻辑（解压 → 遍历 *.class → jawa 提取
+    String 字面量 → is_hardcode_translatable 过滤），但用 Counter 保留频率，
+    供前端候选选择列表按频率排序展示。
     """
     work = jar.parent / f".{jar.stem}_hw"
-    result: set[str] = set()
+    counts: Counter[str] = Counter()
     try:
         _extract_jar(jar, work)
         loader = _class_loader(work)
@@ -136,10 +166,18 @@ def scan_hardcoded_strings(jar: Path) -> list[str]:
                 if isinstance(c, String):
                     t = c.string.value
                     if is_hardcode_translatable(t):
-                        result.add(t)
+                        counts[t] += 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    return sorted(result)
+    return [{"text": t, "occurrences": n} for t, n in counts.most_common()]
+
+
+def scan_hardcoded_strings(jar: Path) -> list[str]:
+    """扫描 jar 内硬编码的可翻译字符串（去重排序，兼容旧调用方）。
+
+    复用 scan_hardcoded_candidates 的频率扫描结果，只取 text 排序返回。
+    """
+    return sorted(c["text"] for c in scan_hardcoded_candidates(jar))
 
 
 def replace_hardcoded_strings(jar: Path, mapping: dict[str, str]) -> dict:

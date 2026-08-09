@@ -7,7 +7,7 @@ import zipfile
 from collections import Counter
 from pathlib import Path
 
-from app.hardcode import scan_hardcoded_strings
+from app.hardcode import scan_hardcoded_candidates
 from app.jar import list_jar_lang_files
 from app.langfile import parse_json_lang, parse_lang
 from app.maps.world import validate_world
@@ -175,26 +175,28 @@ def _estimate_entries(jar: Path, infos: list[dict], source_lang: str | None) -> 
     return total
 
 
-def _scan_hardcoded(jar: Path) -> int | None:
-    """扫描单个 jar 的硬编码可翻译字符串数；异常或超过大小上限返回 None（未统计）。"""
+def _scan_hardcoded_candidates(jar: Path) -> list[dict] | None:
+    """扫描单个 jar 的硬编码候选（含频率）；异常或超过大小上限返回 None（未统计）。"""
     try:
         if jar.stat().st_size > _HARDCODE_MAX_BYTES:
             return None
-        return len(scan_hardcoded_strings(jar))
+        return scan_hardcoded_candidates(jar)
     except Exception:
         return None
 
 
 def build_detect_summary(jars: list[Path], source_lang: str | None) -> dict:
-    """统计识别结果摘要：各 jar 语言文件数 + 词条数估算 + 硬编码字符串数。
+    """统计识别结果摘要：各 jar 语言文件数 + 词条数估算 + 硬编码候选列表。
 
-    硬编码策略：对每个 jar 调 scan_hardcoded_strings；异常兜底记 None；
-    超过 50MB 的 jar 跳过深扫记 None（detect 阶段保持轻量，深扫留给 A5 流式处理）。
+    硬编码策略：对每个 jar 调 scan_hardcoded_candidates 拿候选频率，聚合去重后
+    按总频率降序返回 hardcoded_candidates；任一 jar 超过 50MB 或异常跳过深扫时，
+    total_hardcoded 与 hardcoded_candidates 均为 None（候选列表不完整，前端隐藏选择区，
+    深扫留给 A5 流式处理）。
     """
     total_lang = 0
     total_entries = 0
-    total_hard = 0
     hard_unknown = 0
+    cand_counter: Counter[str] = Counter()
     per: list[dict] = []
     for jar in jars:
         try:
@@ -204,21 +206,28 @@ def build_detect_summary(jars: list[Path], source_lang: str | None) -> dict:
         total_lang += len(infos)
         entries = _estimate_entries(jar, infos, source_lang)
         total_entries += entries
-        hard = _scan_hardcoded(jar)
-        if hard is None:
+        cands = _scan_hardcoded_candidates(jar)
+        if cands is None:
             hard_unknown += 1
+            hard = None
         else:
-            total_hard += hard
+            # 聚合各 jar 候选频率（同一 text 在不同 jar 出现次数累加）
+            for c in cands:
+                cand_counter[c["text"]] += c["occurrences"]
+            hard = len(cands)
         per.append({
             "jar": jar.name,
             "lang_files": len(infos),
             "entries": entries,
             "hardcoded": hard,
         })
+    candidates = [{"text": t, "occurrences": n} for t, n in cand_counter.most_common()]
+    complete = hard_unknown == 0
     return {
         "jar_count": len(per),
         "total_lang_files": total_lang,
         "total_entries": total_entries,
-        "total_hardcoded": total_hard if hard_unknown == 0 else None,
+        "total_hardcoded": len(candidates) if complete else None,
+        "hardcoded_candidates": candidates if complete else None,
         "jars": per,
     }

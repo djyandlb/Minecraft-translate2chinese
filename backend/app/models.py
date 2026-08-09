@@ -51,7 +51,9 @@ class AutoRequest(BaseModel):
     """统一全自动翻译：拖入整合包/mod jar/地图 → 自动识别 → 语言文件+硬编码并入 → 资源包+汉化 jar。
 
     source_lang 可选：留空走自动检测；用户手动指定时用它（识别失败兜底）。
+    selected_hardcoded：用户勾选的硬编码字符串；None=全部候选，空列表=一个都不翻。
     """
     path: str
     target_lang: str = "zh_cn"
     source_lang: str | None = None
+    selected_hardcoded: list[str] | None = None   # 用户勾选的硬编码字符串；None=全部候选

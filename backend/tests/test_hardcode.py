@@ -12,6 +12,7 @@ import app.hardcode as hardcode
 from app.hardcode import (
     is_hardcode_translatable,
     replace_hardcoded_strings,
+    scan_hardcoded_candidates,
     scan_hardcoded_strings,
 )
 
@@ -51,11 +52,20 @@ def _make_test_jar(tmp_path: Path) -> Path:
 def test_is_hardcode_translatable():
     assert is_hardcode_translatable("Hello World")
     assert is_hardcode_translatable("欢迎来到服务器")
-    assert not is_hardcode_translatable("iron_ingot")      # 技术串（下划线）
+    assert is_hardcode_translatable("iron_ingot")           # snake_case 单词保留为候选（用户把关）
     assert not is_hardcode_translatable("OK")               # 纯大写缩写
     assert not is_hardcode_translatable("mymod:item")       # modid 前缀
-    assert not is_hardcode_translatable("com.example.Mod")  # 类路径
+    assert not is_hardcode_translatable("com.example.Mod")  # 类路径/包名
     assert not is_hardcode_translatable("12345")            # 纯数字
+    # 业界过滤（参考 MIT 工具）：单词保留为候选，由用户选择环节把关，不在此一刀切
+    assert is_hardcode_translatable("stone")                # 单次词是候选（用户决定翻不翻）
+    assert is_hardcode_translatable("parent")
+    assert is_hardcode_translatable("model")
+    # 纯技术串仍排除
+    assert not is_hardcode_translatable("(Ljava/lang/String;)V")   # 方法签名
+    assert not is_hardcode_translatable("HELLO_WORLD")             # 常量名
+    assert not is_hardcode_translatable("1234567890abcdef")        # 十六进制
+    assert not is_hardcode_translatable("true")                    # 字面量
 
 
 def test_scan_hardcoded_strings(tmp_path):
@@ -63,10 +73,21 @@ def test_scan_hardcoded_strings(tmp_path):
     found = scan_hardcoded_strings(jar)
     assert "Hello World" in found
     assert "Welcome to the server" in found
-    assert "iron_ingot" not in found
+    assert "iron_ingot" in found            # MIT 规则：snake_case 单词保留为候选
     assert "OK" not in found
     assert "mymod:item" not in found
     assert "com.example.Mod" not in found
+
+
+def test_scan_hardcoded_candidates_frequency(tmp_path):
+    """候选扫描返回带出现频率的结构，且按频率降序。"""
+    jar = _make_test_jar(tmp_path)
+    cands = scan_hardcoded_candidates(jar)
+    assert cands and all("occurrences" in c and "text" in c for c in cands)
+    assert any(c["text"] == "Hello World" and c["occurrences"] >= 1 for c in cands)
+    # 按出现频率降序排列（供前端候选列表按频率排序）
+    freqs = [c["occurrences"] for c in cands]
+    assert freqs == sorted(freqs, reverse=True)
 
 
 def test_replace_hardcoded_strings(tmp_path):

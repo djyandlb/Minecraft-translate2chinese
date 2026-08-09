@@ -136,6 +136,34 @@ def test_summary_hardcoded_javac(tmp_path):
     assert s["jars"][0]["hardcoded"] is not None and s["jars"][0]["hardcoded"] >= 1
 
 
+def test_api_detect_modpack_candidates(tmp_path, client):
+    """modpack 目录（含硬编码 class jar）→ detect 返回 summary.hardcoded_candidates 非空候选列表。"""
+    import shutil
+    import subprocess
+    if not shutil.which("javac"):
+        pytest.skip("无 javac")
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    srcdir = tmp_path / "s"
+    srcdir.mkdir()
+    (srcdir / "HelloMod.java").write_text(
+        'public class HelloMod { public static void main(String[] a) { System.out.println("Hello World"); } }',
+        encoding="utf-8")
+    classes = tmp_path / "c"
+    classes.mkdir()
+    subprocess.run(["javac", "-d", str(classes), str(srcdir / "HelloMod.java")], check=True)
+    with zipfile.ZipFile(mods / "mod.jar", "w") as zf:
+        for f in classes.rglob("*.class"):
+            zf.write(f, f.relative_to(classes).as_posix())
+    r = client.post("/api/detect", json={"path": str(tmp_path), "target_lang": "zh_cn"})
+    assert r.status_code == 200
+    body = r.json()
+    cands = body["summary"]["hardcoded_candidates"]
+    assert cands, "hardcoded_candidates 不应为空"
+    assert any(c["text"] == "Hello World" and c["occurrences"] >= 1 for c in cands)
+    assert body["summary"]["total_hardcoded"] == len(cands)
+
+
 def test_api_detect_zip_archive(tmp_path, client, monkeypatch):
     # 整合包打成 .zip → 端点先 _resolve 解压再识别为 modpack（隔离 work 目录防污染）
     import shutil

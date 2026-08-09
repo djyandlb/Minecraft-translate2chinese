@@ -210,6 +210,29 @@ async def test_auto_all_hanzified_no_pack(tmp_path, monkeypatch):
     assert not hard_dir.exists() or not list(hard_dir.glob("*.jar"))
 
 
+@pytest.mark.asyncio
+async def test_auto_engine_exception_does_not_kill_flow(tmp_path, monkeypatch):
+    """M6-recheck：单条引擎异常（网络/API 失败）→ 记 failed 继续，流程不整体失败。"""
+    class _ExplodingEngine:
+        async def translate_batch(self, texts, target_lang):
+            raise RuntimeError("API 失败")
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    _make_mod_jar(mods)  # 语言文件 mod（含 "Hello World"）
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _ExplodingEngine())
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work)
+    st = store.load(state.id)
+    assert st.status == "done"   # 单条失败不拖垮整体流程
+    assert st.failed >= 1        # 失败已计数
+
+
 def test_download_fallback_single_file(tmp_path, monkeypatch):
     """download：无产物目录时回退旧单文件匹配（地图等产物平铺 outputs/）。"""
     import app.main as main
@@ -222,3 +245,49 @@ def test_download_fallback_single_file(tmp_path, monkeypatch):
     r = client.get("/api/task/fedcba987654/download")
     assert r.status_code == 200
     assert "fedcba987654_zh_cn.mcworld" in r.headers.get("content-disposition", "")
+
+
+def _make_jar_with_two_hardcode(tmp_path, name="two.jar"):
+    """javac 编译含两个硬编码字符串（"Hello World" 与 "Welcome"）的类打包（无 javac 则 skip）。"""
+    if shutil.which("javac") is None:
+        pytest.skip("无 javac")
+    src = tmp_path / "src2"
+    src.mkdir()
+    (src / "TwoMod.java").write_text(
+        'public class TwoMod { public static void main(String[] a) { '
+        'System.out.println("Hello World"); System.out.println("Welcome"); } }',
+        encoding="utf-8")
+    cls = tmp_path / "cls2"
+    cls.mkdir()
+    subprocess.run(["javac", "-d", str(cls), str(src / "TwoMod.java")], check=True)
+    jar = tmp_path / name
+    with zipfile.ZipFile(jar, "w") as zf:
+        for f in cls.rglob("*.class"):
+            zf.write(f, f.relative_to(cls).as_posix())
+    return jar
+
+
+@pytest.mark.asyncio
+async def test_auto_selected_hardcoded_only(tmp_path, monkeypatch):
+    """selected_hardcoded 只选 "Hello World" → 硬编码阶段只翻选中项，"Welcome" 保持原文。"""
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    _make_jar_with_two_hardcode(mods, name="two.jar")
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _FakeEngine())
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None,
+                          selected_hardcoded=["Hello World"])
+    await run_auto_translation(state.id, req, None, store, work)
+    assert store.load(state.id).status == "done"
+    hards = list((work / "outputs" / state.id / "hardcoded").glob("*.jar"))
+    assert hards, "应产出汉化 jar"
+    found = scan_hardcoded_strings(hards[0])
+    assert "你好世界" in found            # 选中的 "Hello World" 已翻译替换
+    assert "Hello World" not in found
+    assert "Welcome" in found             # 未选中的 "Welcome" 保持原文
+    assert "欢迎" not in found            # 未选中的不应出现译文
