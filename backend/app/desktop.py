@@ -105,6 +105,69 @@ class _JsApi:
             )
         return res or []
 
+    def save_output(self, task_id: str) -> dict:
+        """桌面版下载：弹「保存」对话框，把任务产物写到用户选择的位置。
+
+        产物解析与 /api/task/{id}/download 完全一致：
+          - modjar  → OUTPUTS_DIR/<task_id>/ 下单个汉化 jar → 直接保存该 jar；
+          - modpack → 资源包+补丁包多文件 → 打包总 zip（与下载端点相同产物）；
+          - map     → OUTPUTS_DIR/<task_id>_*.mcworld → 直接保存。
+        返回 {"ok": True, "path": ...} 或 {"ok": False, "error": ...}。
+        """
+        import io
+        import re
+        import shutil
+        import zipfile
+        from pathlib import Path
+        from app.main import OUTPUTS_DIR   # 惰性取当前值：测试可 monkeypatch
+
+        # task_id 为 12 位十六进制 uuid 前缀，先校验再拼路径，防路径注入（F6 对齐 download 端点）
+        if not re.fullmatch(r"[0-9a-f]{12}", str(task_id)):
+            return {"ok": False, "error": "任务不存在"}
+        out_dir = OUTPUTS_DIR / task_id
+        src: Path | None = None            # 直接复制的单文件（modjar / map）
+        buf: io.BytesIO | None = None      # modpack 打包总 zip 的内存缓冲
+        save_filename: str | None = None
+        if out_dir.is_dir():
+            # 与 download 端点同规则：顶层单个汉化 jar → 直接存；否则打包总 zip
+            top_jars = sorted(out_dir.glob("*.jar"))
+            if top_jars and not any(out_dir.glob("*_*.zip")):
+                src = top_jars[0]
+                save_filename = src.name
+            else:
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for f in sorted(out_dir.rglob("*")):
+                        if f.is_file():
+                            zf.write(f, f.relative_to(out_dir).as_posix())
+                buf.seek(0)
+                save_filename = f"{task_id}.zip"
+        else:
+            # map 任务：mcworld 直接落 OUTPUTS_DIR/<task_id>_*.mcworld
+            for f in sorted(OUTPUTS_DIR.glob(f"{task_id}_*.*")):
+                src = f
+                save_filename = f.name
+                break
+        if src is None and buf is None:
+            return {"ok": False, "error": "尚未生成产物"}
+
+        import webview  # 方法内延迟 import：未装 pywebview 不影响模块导入/其余测试
+        win = webview.windows[0]   # pywebview 维护全局 windows 列表，取首个窗口
+        dest = win.create_file_dialog(webview.SAVE_DIALOG, save_filename=save_filename)
+        if not dest:
+            return {"ok": False, "error": "已取消保存"}
+        # SAVE_DIALOG 各平台返回值可能是 str 或 tuple，统一取首项
+        dest_path = Path(dest if isinstance(dest, str) else dest[0])
+        try:
+            dest_path.parent.mkdir(parents=True, exist_ok=True)   # 防御：目标父目录缺失时先创建
+            if src is not None:
+                shutil.copy2(src, dest_path)
+            else:
+                dest_path.write_bytes(buf.getvalue())
+        except OSError as exc:
+            return {"ok": False, "error": f"写入失败：{exc}"}
+        return {"ok": True, "path": str(dest_path)}
+
 
 def _app_icon() -> str | None:
     """定位应用图标 app-icon.ico（frozen → _MEIPASS/assets；否则项目根 assets/）。"""

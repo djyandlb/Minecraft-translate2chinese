@@ -72,12 +72,28 @@ async function doCancel() {
     refresh()
   } catch (e) { error.value = e.message }
 }
-function doDownload() {
-  window.open(downloadUrl(props.taskId), '_blank')
+// 桌面版（pywebview）检测：存在 window.pywebview → 下载走 js_api.save_output 弹系统保存框直接写盘
+const isDesktop = typeof window !== 'undefined' && !!window.pywebview
+
+// 桌面版保存：后端解析产物文件名 → 弹「保存」对话框 → 从 OUTPUTS_DIR 复制到用户选的位置
+async function saveToDisk(taskId) {
+  try {
+    const r = await window.pywebview.api.save_output(taskId)
+    if (!r.ok) error.value = r.error || '保存失败'
+  } catch (e) {
+    error.value = `保存失败：${e.message}`
+  }
 }
-// 汇总项下载：与当前任务一致用 window.open（pywebview 下 a[target=_blank] 可能新开窗口）
+function doDownload() {
+  // 分流：桌面版弹保存框直接存（不再跳浏览器）；浏览器版保持 window.open 走 /api/download
+  if (isDesktop) saveToDisk(props.taskId)
+  else window.open(downloadUrl(props.taskId), '_blank')
+}
+// 汇总项下载：与当前任务同规则分流（桌面版 save_output / 浏览器 window.open）
 function downloadJob(taskId) {
-  if (taskId) window.open(downloadUrl(taskId), '_blank')
+  if (!taskId) return
+  if (isDesktop) saveToDisk(taskId)
+  else window.open(downloadUrl(taskId), '_blank')
 }
 
 // 队列逐个切换任务：taskId 变化时重置旧数据并重启轮询，否则停留在旧任务状态
@@ -105,6 +121,9 @@ onUnmounted(stopPolling)
     <div v-if="empty" class="empty">还没有任务，请在左侧添加文件并点「开始翻译」</div>
 
     <template v-else>
+      <!-- 全局错误（含汇总项下载失败）：放在任务区外，无当前任务时也可见 -->
+      <p v-if="error" class="err">{{ error }}</p>
+
       <!-- 当前任务 -->
       <template v-if="taskId">
         <h3 class="sub-title">当前任务</h3>
@@ -130,7 +149,6 @@ onUnmounted(stopPolling)
           </div>
           <div v-if="failInfo" class="fail-box">失败原因：{{ failInfo }}</div>
           <div v-if="warnInfo && task.status !== 'failed'" class="warn-box">{{ warnInfo }}</div>
-          <p v-if="error" class="err">{{ error }}</p>
 
           <div class="actions">
             <button class="btn" :disabled="!isActive" @click="togglePause">

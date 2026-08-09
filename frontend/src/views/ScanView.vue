@@ -85,12 +85,35 @@ function onDragLeave(e) {
   if (e.currentTarget.contains(e.relatedTarget)) return
   dragOver.value = false
 }
+// 拖入的目录处理：不再当文件上传（否则报「无法连接后端」）
+// 桌面版能拿本地路径 → 直接本地识别；拿不到 → 引导用「选择目录」按钮
+async function handleFolderDrop(file) {
+  const localPath = isDesktop && file && file.path
+  if (localPath) await props.addPath(localPath)   // 目录路径 → 后端 detect 识别为整合包
+  else if (isDesktop) {
+    // pywebview 对拖入文件夹的 File.path 可能不可用 → 顺手弹系统目录选择框（与「选择目录」同路径）
+    error.value = '拖入的文件夹无法取得本地路径，请用「选择目录」按钮'
+    await pickLocal('folder')
+  } else {
+    // 浏览器拖入文件夹只得到一个空 File（无 webkitdirectory）→ 提示走目录浏览
+    error.value = '浏览器不支持拖入文件夹，请用「选择目录」按钮选择整合包目录'
+  }
+}
 async function onDrop(e) {
   e.preventDefault(); dragOver.value = false
   const files = Array.from(e.dataTransfer.files || [])
-  if (!files.length) return
+  if (!files.length) {
+    // 某些环境拖入文件夹时 files 为空（items 里才是目录条目）→ 直接引导走「选择目录」
+    if (Array.from(e.dataTransfer.items || []).some(it => it.kind === 'file')) {
+      await handleFolderDrop(null)
+    }
+    return
+  }
   for (const file of files) {
-    // 桌面版：File 对象若暴露本地 path 属性（pywebview WebView2 实测），直接用本地地址不走上传
+    // 目录判定：Chromium 中拖入的文件夹表现为 File（type='' 且 size=0）
+    const isFolder = file.type === '' && file.size === 0
+    if (isFolder) { await handleFolderDrop(file); continue }
+    // 常规文件：桌面版 File 若暴露本地 path 属性（pywebview WebView2 实测），直接用本地地址不走上传
     const localPath = isDesktop && (file.path || file.webkitRelativePath)
     if (localPath) await props.addPath(localPath)
     else await props.addUpload(file)     // 浏览器 / 拿不到本地路径 → 走上传兜底
@@ -122,7 +145,7 @@ async function onFilePicked(e) {
     <div class="dropzone" :class="{ drag: dragOver }"
          @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop" @click="onZoneClick">
       <p class="big">{{ dragOver ? '松手，放这里！' : '拖入 jar / 压缩包 / 地图文件' }}</p>
-      <p class="small">支持多个文件，或点击选择（整合包目录请用下方目录/浏览）</p>
+      <p class="small">支持多个文件；桌面版可直接拖入整合包目录（浏览器请用「浏览目录」）</p>
       <input ref="fileInput" type="file" multiple style="display:none" @change="onFilePicked" />
     </div>
 
