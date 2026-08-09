@@ -130,7 +130,8 @@ def download(task_id: str):
     # task_id 为 12 位十六进制 uuid 前缀，先校验再拼路径，防路径注入（F6）
     if not re.fullmatch(r"[0-9a-f]{12}", task_id):
         raise HTTPException(404, "任务不存在")
-    for f in (WORK_DIR / "outputs").glob(f"{task_id}_*.zip"):
+    # M4-6：资源包任务导出 .zip，地图任务导出 .mcworld，两者都匹配，避免地图产物 404
+    for f in (WORK_DIR / "outputs").glob(f"{task_id}_*.*"):
         return FileResponse(f, filename=f.name)
     raise HTTPException(404, "尚未生成资源包")
 
