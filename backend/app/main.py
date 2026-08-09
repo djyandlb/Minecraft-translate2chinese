@@ -43,8 +43,8 @@ def _base() -> Path:
 app = FastAPI(title="MC 自动翻译器")
 BASE = _base()                                        # backend/（frozen 后为 exe 同目录）
 CONFIG_PATH = BASE / "config.json"                    # config 保持 exe 旁（用户可见可改）
-OUTPUTS_DIR = BASE / "outputs"                        # 产物：exe 旁 outputs/（download 从这里读）
 WORK_DIR = Path(tempfile.gettempdir()) / "mc-translator"   # 中间产物：系统 temp，任务终态后清理
+OUTPUTS_DIR = WORK_DIR / "outputs"                    # 产物也进 temp（应用目录不再有 outputs/，只用下载导出）
 STORE = TaskStore(WORK_DIR / "tasks")
 _TASKS: dict[str, asyncio.Task] = {}    # 保存后台任务引用，防止被 GC 回收（F2）
 
