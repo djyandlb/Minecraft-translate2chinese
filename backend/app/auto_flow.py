@@ -216,14 +216,18 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
         hard_dir = out_dir / "hardcoded"
         hard_used: set[str] = set()
         hard_count = 0
+        seq = 0
         for jar, mapping in by_jar_map.items():
             if not mapping:
                 continue
             # 原 jar 只读铁律：先 copy2 到 out_dir/hardcoded/<name> 副本再改
             name = f"{task_id}_{jar.stem}.jar"
             if name in hard_used:
-                # 同名 jar（不同子目录）防覆盖：加序号
-                name = f"{task_id}_{len(hard_used)}_{jar.stem}.jar"
+                # 同名 jar（不同子目录）防覆盖：独立 seq 递增 + while 循环，
+                # 彻底避免序号名与既有名（如 stem=2_mod 的 jar）相撞（A5-review）
+                while name in hard_used:
+                    seq += 1
+                    name = f"{task_id}_{seq}_{jar.stem}.jar"
             hard_used.add(name)
             jar_copy = hard_dir / name
             jar_copy.parent.mkdir(parents=True, exist_ok=True)

@@ -163,6 +163,53 @@ def test_download_packs_output_dir(tmp_path, monkeypatch):
     assert "hardcoded/abc123def456_h.jar" in names
 
 
+@pytest.mark.asyncio
+async def test_auto_same_stem_jars_dedup(tmp_path, monkeypatch):
+    """不同子目录同名 jar（stem 相同）→ 两个汉化 jar 都产出（文件名去重不覆盖）。"""
+    mods = tmp_path / "mods"
+    (mods / "a").mkdir(parents=True)
+    (mods / "b").mkdir(parents=True)
+    _make_jar_with_hardcode(mods / "a", name="mod.jar")
+    _make_jar_with_hardcode(mods / "b", name="mod.jar")
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _FakeEngine())
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work)
+    assert store.load(state.id).status == "done"
+    hards = list((work / "outputs" / state.id / "hardcoded").glob("*.jar"))
+    assert len(hards) == 2, f"期望 2 个汉化 jar，实际 {hards}"
+    assert len({h.name for h in hards}) == 2  # 文件名互不相同，未互相覆盖
+
+
+@pytest.mark.asyncio
+async def test_auto_all_hanzified_no_pack(tmp_path, monkeypatch):
+    """全部已汉化（源语言检测为 None → 无空缺）→ done + warn，不导出空产物。"""
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    with zipfile.ZipFile(mods / "m.jar", "w") as zf:
+        zf.writestr("assets/mymod/lang/zh_cn.json", json.dumps({"k": "已汉化"}))
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _FakeEngine())
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work)
+    assert store.load(state.id).status == "done"
+    out_dir = work / "outputs" / state.id
+    # 无可导出产物：无资源包 zip，hardcoded 目录不存在或为空
+    assert not list(out_dir.glob("*.zip"))
+    hard_dir = out_dir / "hardcoded"
+    assert not hard_dir.exists() or not list(hard_dir.glob("*.jar"))
+
+
 def test_download_fallback_single_file(tmp_path, monkeypatch):
     """download：无产物目录时回退旧单文件匹配（地图等产物平铺 outputs/）。"""
     import app.main as main
