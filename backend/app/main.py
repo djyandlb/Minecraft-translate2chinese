@@ -1,6 +1,8 @@
 # FastAPI 入口（任务 13）：扫描/翻译/任务/浏览/术语表路由，串起 M0-M2 全部模块
 import asyncio
 import re
+import uuid
+import zipfile
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -194,16 +196,27 @@ def hardcode_scan(req: HardcodeRequest):
     src = Path(req.path)
     if not src.is_file() or src.suffix.lower() != ".jar":
         raise HTTPException(400, "请选择 .jar 文件")
-    dest = WORK_DIR / "hardcode" / "scan" / src.name
+    # M5-recheck：副本用 uuid 子目录隔离，避免同名 jar 并发互踩 + 扫描后清理防 work 目录膨胀
+    dest = WORK_DIR / "hardcode" / "scan" / uuid.uuid4().hex / src.name
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
-    strings = scan_hardcoded_strings(dest)
+    try:
+        strings = scan_hardcoded_strings(dest)
+    except zipfile.BadZipFile:
+        # M5-recheck：假 jar（非有效 zip）报 400 而不是 500
+        raise HTTPException(400, "不是有效的 jar/zip 文件")
+    finally:
+        shutil.rmtree(dest.parent, ignore_errors=True)
     return {"strings": strings, "count": len(strings)}
 
 
 @app.post("/api/hardcode-translate")
 async def hardcode_translate(req: HardcodeRequest):
     """硬编码汉化：调度后台翻译任务（复制→扫描→翻译→替换校验→输出新 jar），复用 _TASKS 持有引用防 GC。"""
+    # M5-recheck：与 scan 端点对称校验，避免误选目录白白启动必失败任务
+    src = Path(req.path)
+    if not src.is_file() or src.suffix.lower() != ".jar":
+        raise HTTPException(400, "请选择 .jar 文件")
     cfg = AppConfig(CONFIG_PATH)
     state = STORE.new()
     state.status = "running"

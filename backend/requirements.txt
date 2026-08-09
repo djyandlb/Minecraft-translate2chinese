@@ -4,6 +4,7 @@ httpx==0.28.*
 python-multipart==0.0.20
 deep-translator==1.11.4
 nbtlib==2.0.4
+jawa==2.2.0
 pytest==8.3.*
 pytest-asyncio==0.24.*
 keyring==25.*

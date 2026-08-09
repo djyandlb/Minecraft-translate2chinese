@@ -16,6 +16,7 @@ import io
 import re
 import shutil
 import zipfile
+from collections import Counter
 from pathlib import Path, PurePosixPath
 
 from jawa.classloader import ClassLoader
@@ -172,8 +173,12 @@ def replace_hardcoded_strings(jar: Path, mapping: dict[str, str]) -> dict:
                     if isinstance(c, String)
                 ]
                 changed = 0
+                # M5-recheck：先记录每个被替换 String 的期望内容，供保存后内容级校验。
+                # 必须在修改前收集——修改后值已变成译文，无法再反查 mapping。
+                expected_counts: Counter[str] = Counter()
                 for c in klass.constants:
                     if isinstance(c, String) and c.string.value in mapping:
+                        expected_counts[mapping[c.string.value]] += 1
                         c.string.value = mapping[c.string.value]
                         changed += 1
                 if changed:
@@ -185,7 +190,10 @@ def replace_hardcoded_strings(jar: Path, mapping: dict[str, str]) -> dict:
                         buf = io.BytesIO()
                         klass.save(buf)
                         p.write_bytes(buf.getvalue())
-                        # 重读校验：能解析且 String 数不变才认成功
+                        # 重读校验：能解析、String 数不变、且每个期望内容都真实写入才算成功。
+                        # jawa 的 Modified-UTF8 编码对 emoji（U+10000+）与边界码位
+                        # （0x7FF/0x800/0xFFFF）会静默丢弃，String 数不变但内容已损坏，
+                        # 因此必须逐值断言，不能只比数量。
                         verify = _class_loader(work)[name]
                         after = [
                             c.string.value
@@ -196,6 +204,13 @@ def replace_hardcoded_strings(jar: Path, mapping: dict[str, str]) -> dict:
                             raise ValueError(
                                 f"{name}: 替换后 String 数 {len(after)} != 替换前 {len(before)}"
                             )
+                        after_counts = Counter(after)
+                        for expect, cnt in expected_counts.items():
+                            if after_counts[expect] < cnt:
+                                raise ValueError(
+                                    f"{name}: 替换内容 {expect!r} 写入后丢失"
+                                    f"（Modified-UTF8 编码不支持 emoji 等码位？）"
+                                )
                         replaced += changed
                     except Exception:
                         p.write_bytes(original_bytes)  # 还原为原始字节

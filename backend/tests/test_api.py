@@ -141,3 +141,18 @@ def test_hardcode_translate_returns_task(tmp_path):
     jar.write_bytes(b"PK\x05\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")  # 空 zip
     r = client.post("/api/hardcode-translate", json={"path": str(jar)})
     assert r.status_code == 200 and "task_id" in r.json()
+
+
+def test_hardcode_scan_bad_zip(tmp_path):
+    # 假 jar（不是有效 zip）→ 400 "不是有效的 jar/zip 文件"，而不是 500
+    fake = tmp_path / "fake.jar"
+    fake.write_bytes(b"this is definitely not a zip archive")
+    r = client.post("/api/hardcode-scan", json={"path": str(fake)})
+    assert r.status_code == 400
+    assert "不是有效的" in r.json()["detail"]
+
+
+def test_hardcode_translate_invalid(tmp_path):
+    # 非 .jar 文件 → 400（与 scan 端点对称校验，避免误选目录白白启动必失败任务）
+    r = client.post("/api/hardcode-translate", json={"path": str(tmp_path / "notajar.txt")})
+    assert r.status_code == 400

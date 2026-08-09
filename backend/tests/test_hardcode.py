@@ -199,3 +199,77 @@ def test_replace_restores_bytes_on_verify_failure(tmp_path, monkeypatch):
     found = scan_hardcoded_strings(jar)
     assert "Hello World" in found
     assert "你好世界" not in found
+
+
+# ---------- 内容级校验（M5-recheck：String 数量一致但内容被破坏时必须拦下） ----------
+
+class _FakePool:
+    """monkeypatch 用：伪常量池，pool.get() 返回自身，伪装成 String 引用的 UTF8 常量。"""
+
+    def __init__(self, value: str):
+        self.value = value
+
+    def get(self, index):
+        return self
+
+
+def test_replace_content_mismatch_restores_bytes(tmp_path, monkeypatch):
+    """内容级校验：重读后 String 数不变但内容与期望不符时，class 必须还原 + failed_classes + replaced 不虚高。
+
+    模拟 jawa 的 Modified-UTF8 编码静默丢字符：期望写 "🎉 你好世界"，
+    重读却得到丢 emoji 后的 " 你好世界"（String 数仍为 1，旧校验会漏报）。
+    """
+    from jawa.constants import String
+
+    jar = _make_test_jar(tmp_path)
+    real_loader = hardcode._class_loader
+    calls = {"n": 0}
+
+    def corrupting_loader(work):
+        calls["n"] += 1
+        if calls["n"] >= 2:  # 第二次调用即校验阶段：返回内容被"改坏"的伪 loader
+            # 与 _make_test_jar 的 6 个 String 数量一致（数量校验拦不住），
+            # 仅把映射命中的 "Hello World" 位置写成丢 emoji 后的 " 你好世界"
+            corrupted = [
+                " 你好世界", "Welcome to the server", "iron_ingot",
+                "OK", "mymod:item", "com.example.Mod",
+            ]
+
+            class _FakeKlass:
+                def __init__(self):
+                    self.constants = [String(_FakePool(v), i, i)
+                                      for i, v in enumerate(corrupted)]
+
+            class _FakeLoader:
+                def __getitem__(self, name):
+                    return _FakeKlass()
+
+            return _FakeLoader()
+        return real_loader(work)
+
+    monkeypatch.setattr(hardcode, "_class_loader", corrupting_loader)
+    result = replace_hardcoded_strings(jar, {"Hello World": "🎉 你好世界"})
+    monkeypatch.undo()
+    # 内容不符必须被判定为失败：failed_classes 记录 + replaced 不虚高
+    assert result["failed_classes"], "内容与期望不符应记入 failed_classes"
+    assert result["replaced"] == 0
+    # 输出 jar 重读：原字符串保留，损坏的译文不得出现
+    found = scan_hardcoded_strings(jar)
+    assert "Hello World" in found
+    assert "🎉 你好世界" not in found
+
+
+def test_replace_emoji_content_damage_restores(tmp_path):
+    """内容级校验（真实场景）：含 emoji 的译文被 jawa Modified-UTF8 编码静默丢字符。
+
+    jawa 的 encode_modified_utf8 对 U+10000+（emoji）无编码分支，静默丢弃；
+    替换后 String 数不变但内容已损坏。旧校验只比数量会误判成功，
+    内容级校验必须拦下：还原原字节 + failed_classes + replaced 不虚高。
+    """
+    jar = _make_test_jar(tmp_path)
+    result = replace_hardcoded_strings(jar, {"Hello World": "🎉 你好世界"})
+    assert result["failed_classes"], "emoji 内容损坏应被内容级校验拦下并记入 failed_classes"
+    assert result["replaced"] == 0
+    found = scan_hardcoded_strings(jar)
+    assert "Hello World" in found          # 原字节已还原
+    assert "🎉 你好世界" not in found       # 损坏内容不得进输出 jar
