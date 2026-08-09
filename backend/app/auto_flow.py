@@ -266,6 +266,10 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                     if state.done % 10 == 0:
                         memory.save()
                         store.save(state)
+                # 批末无条件落盘（关键）：done/progress 若停在不满足 %10 的值，
+                # 前端轮询 getTask 读盘旧值 → 进度条/明细「卡住不涨」（用户反馈）
+                memory.save()
+                store.save(state)
                 pending.clear()
 
             for item in items:
