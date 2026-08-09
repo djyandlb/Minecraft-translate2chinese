@@ -47,6 +47,9 @@ class TextSource:
     # kind=="lines"：entries 为 line{i}→原文，行快照见 line_snapshot
     entries: dict[str, str] = field(default_factory=dict)
     line_snapshot: dict | None = None   # lines 专用：{bom, eol, trailing_newline, line_count}
+    # 目录文本源（config/toml/properties/kubejs js）行内替换专用：
+    # key → (line_idx, start, end[, quote])，渲染时只替换行内子串，保留结构
+    spans: dict | None = None
 
 
 # ---------- 路径工具 ----------
@@ -127,23 +130,25 @@ def _parse_lang_entry(fmt: str, raw: str) -> dict[str, str]:
 
 # ---------- 结构化 JSON 遍历 ----------
 
-def _walk_json(node, prefix: str, entries: dict[str, str]) -> None:
+def _walk_json(node, prefix: str, entries: dict[str, str],
+               translate=should_translate) -> None:
     """递归遍历 JSON，收集应翻译的字符串值；key_path 形如 title.text / pages[0].text。
 
     技术串跳过复用 app.translate.common.should_translate（现有行为：
     单字母词放行、snake_case 标识符如 iron_ingot 跳过；结构化 JSON 里
-    单字母键属技术串，由 B 阶段 AI 判断兜底）。
+    单字母键属技术串，由 B 阶段 AI 判断兜底）。translate 可注入目录文本源
+    的扩展过滤（_pack_should_translate：额外跳过开关配置字面量）。
     """
     if isinstance(node, dict):
         for k, v in node.items():
             child = f"{prefix}.{k}" if prefix else str(k)
-            _walk_json(v, child, entries)
+            _walk_json(v, child, entries, translate)
     elif isinstance(node, list):
         for i, v in enumerate(node):
             child = f"{prefix}[{i}]" if prefix else f"[{i}]"
-            _walk_json(v, child, entries)
+            _walk_json(v, child, entries, translate)
     elif isinstance(node, str):
-        if should_translate(node):
+        if translate(node):
             entries[prefix] = node
 
 
@@ -457,3 +462,206 @@ def write_lang_into_jar(jar: Path, by_mod: dict[str, dict[str, str]], target_lan
         _repack(work, jar)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+# ---------- 整合包目录文本源（任务线 / config / data / kubejs） ----------
+
+# config 可见文本：json/toml/properties；data 数据包：json；kubejs/scripts：js 字符串字面量
+_PACK_JSON_PREFIXES = ("config/", "data/")
+_PACK_JS_PREFIXES = ("kubejs/", "scripts/")
+
+# 配置开关/布尔字面量：不翻译（true/false/on/off 等），避免把布尔配置翻译坏
+_SWITCH_LITERALS = {
+    "true", "false", "yes", "no", "on", "off", "null", "none",
+    "enabled", "disabled", "enable", "disable",
+}
+
+
+def _pack_should_translate(text: str) -> bool:
+    """目录文本源过滤：should_translate + 配置开关字面量跳过（布尔/开关配置不翻译）。"""
+    if not should_translate(text):
+        return False
+    return text.strip().lower() not in _SWITCH_LITERALS
+
+
+def _pack_modid(rel: str) -> str:
+    """目录文本源的 modid 元数据：data/ 下取 namespace，其他取路径第一段。"""
+    parts = rel.split("/")
+    if parts[0] == "data" and len(parts) > 2:
+        return parts[1]
+    return parts[0]
+
+
+def _pack_json_source(root: Path, p: Path, rel: str) -> TextSource | None:
+    """config/data 下 json：递归字符串值，key_path 定位；技术串/开关值过滤。"""
+    data = json.loads(p.read_bytes().decode("utf-8"))
+    entries: dict[str, str] = {}
+    _walk_json(data, "", entries, _pack_should_translate)
+    if not entries:
+        return None
+    return TextSource(kind="json", modid=_pack_modid(rel),
+                      source_path=rel, target_path=rel, entries=entries)
+
+
+# 单行 `key = "value"` 字符串值（忽略数组/多行字符串/数字/布尔）
+_TOML_STR_RE = re.compile(r'^\s*[A-Za-z0-9_.-]+\s*=\s*"((?:\\.|[^"\\])*)"\s*(?:#.*)?$')
+
+
+def _pack_toml_source(root: Path, p: Path, rel: str) -> TextSource | None:
+    """config 下 toml：单行字符串值提取，行内偏移替换（保留 key 与格式）。"""
+    raw = p.read_bytes().decode("utf-8")
+    lines, snapshot = _split_lines(raw)
+    entries: dict[str, str] = {}
+    spans: dict[str, tuple[int, int, int]] = {}
+    for i, line in enumerate(lines):
+        m = _TOML_STR_RE.match(line)
+        if not m:
+            continue
+        val = m.group(1)
+        if _pack_should_translate(val):
+            key = f"line{i}"
+            entries[key] = val
+            spans[key] = (i, m.start(1), m.end(1))
+    if not entries:
+        return None
+    return TextSource(kind="lines", modid=_pack_modid(rel), source_path=rel, target_path=rel,
+                      entries=entries, line_snapshot=snapshot, spans=spans)
+
+
+def _pack_properties_source(root: Path, p: Path, rel: str) -> TextSource | None:
+    """config 下 properties：key=value 值提取，行内偏移替换（保留 key= 前缀）。"""
+    raw = p.read_bytes().decode("utf-8")
+    lines, snapshot = _split_lines(raw)
+    entries: dict[str, str] = {}
+    spans: dict[str, tuple[int, int, int]] = {}
+    for i, line in enumerate(lines):
+        eq = line.find("=")
+        if eq < 0:
+            continue
+        key = line[:eq].strip()
+        val = line[eq + 1:].strip()
+        if not key or not val:
+            continue
+        start = eq + 1
+        while start < len(line) and line[start].isspace():
+            start += 1
+        if _pack_should_translate(val):
+            k = f"line{i}"
+            entries[k] = val
+            spans[k] = (i, start, len(line))
+    if not entries:
+        return None
+    return TextSource(kind="lines", modid=_pack_modid(rel), source_path=rel, target_path=rel,
+                      entries=entries, line_snapshot=snapshot, spans=spans)
+
+
+# js 字符串字面量：双引号/单引号，允许转义序列
+_JS_STR_LITERAL_RE = re.compile(r'(?P<quote>["\'])(?P<body>(?:\\.|[^\\])*?)(?P=quote)')
+
+_JS_UNESCAPE_MAP = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"', "'": "'"}
+
+
+def _js_unescape(body: str) -> str:
+    """js 字符串字面量反转义（常见转义序列），未知转义保留原样。"""
+    def _rep(m):
+        return _JS_UNESCAPE_MAP.get(m.group(1), m.group(1))
+    return re.sub(r"\\(.)", _rep, body)
+
+
+def _js_escape(text: str, quote: str) -> str:
+    """按引号类型转义译文，保证写入 js 字符串字面量语法正确。"""
+    return (text.replace("\\", "\\\\").replace(quote, "\\" + quote)
+            .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+
+
+def _pack_js_source(root: Path, p: Path, rel: str) -> TextSource | None:
+    """kubejs/scripts 下 js：字符串字面量内容提取，行内偏移替换（保留结构）。"""
+    raw = p.read_bytes().decode("utf-8")
+    lines, snapshot = _split_lines(raw)
+    entries: dict[str, str] = {}
+    spans: dict[str, tuple[int, int, int, str]] = {}
+    idx = 0
+    for li, line in enumerate(lines):
+        for m in _JS_STR_LITERAL_RE.finditer(line):
+            quote = m.group("quote")
+            content = _js_unescape(m.group("body"))
+            if _pack_should_translate(content):
+                key = f"l{idx}"
+                entries[key] = content
+                spans[key] = (li, m.start("body"), m.end("body"), quote)
+            idx += 1
+    if not entries:
+        return None
+    return TextSource(kind="lines", modid=_pack_modid(rel), source_path=rel, target_path=rel,
+                      entries=entries, line_snapshot=snapshot, spans=spans)
+
+
+def discover_pack_text_sources(pack_dir: Path) -> list[TextSource]:
+    """发现整合包目录（非 jar）文本源，复用 TextSource，source_path=整合包相对路径。
+
+    覆盖：任务线 config/ftbquests/quests/*.json、config/**/*.{json,toml,properties}、
+    data/**/*.json、kubejs/ 与 scripts/ 下 *.js 字符串字面量。
+    技术串/开关配置值过滤（_pack_should_translate）。只读不写，原整合包不被改动；
+    单个文件坏编码/坏格式只跳过该文件，不中断整包。
+    """
+    root = Path(pack_dir)
+    result: list[TextSource] = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        suffix = p.suffix.lower()
+        try:
+            if suffix == ".json" and rel.startswith(_PACK_JSON_PREFIXES):
+                src = _pack_json_source(root, p, rel)
+            elif suffix == ".toml" and rel.startswith("config/"):
+                src = _pack_toml_source(root, p, rel)
+            elif suffix == ".properties" and rel.startswith("config/"):
+                src = _pack_properties_source(root, p, rel)
+            elif suffix == ".js" and rel.startswith(_PACK_JS_PREFIXES):
+                src = _pack_js_source(root, p, rel)
+            else:
+                src = None
+            if src:
+                result.append(src)
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError, OSError):
+            continue   # 单个文件坏编码/坏 json：跳过该文件
+    result.sort(key=lambda s: (s.kind, s.source_path))
+    return result
+
+
+def render_pack_source(source: TextSource, translations: dict[str, str], pack_dir: Path) -> str:
+    """渲染目录文本源译文内容（读原文件，不改原包），供汉化补丁包写入。
+
+    json：key_path 覆写，保留结构与技术串；lines：优先行内子串替换（spans），
+    否则整行替换。返回渲染后的文件内容字符串。
+    """
+    src_file = Path(pack_dir).joinpath(*PurePosixPath(source.source_path).parts)
+    raw = src_file.read_bytes().decode("utf-8")
+    if source.kind == "json":
+        data = json.loads(raw)
+        for key, value in translations.items():
+            try:
+                _set_path(data, key, value)
+            except (KeyError, IndexError, TypeError):
+                continue
+        return json.dumps(data, ensure_ascii=False, indent=2)
+    lines, snapshot = _split_lines(raw)
+    for key, value in translations.items():
+        span = (source.spans or {}).get(key)
+        if span:
+            li, start, end = span[0], span[1], span[2]
+            if len(span) >= 4 and span[3]:
+                value = _js_escape(value, span[3])   # js 字符串字面量：译文转义
+            if 0 <= li < len(lines) and 0 <= start <= end <= len(lines[li]):
+                line = lines[li]
+                lines[li] = line[:start] + value + line[end:]
+        else:
+            idx = _line_index(key)
+            if idx is not None and 0 <= idx < len(lines):
+                lines[idx] = value
+    body = snapshot["eol"].join(lines)
+    return ("\ufeff" if snapshot["bom"] else "") + body + (snapshot["eol"] if snapshot["trailing_newline"] else "")

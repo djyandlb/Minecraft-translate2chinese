@@ -84,7 +84,7 @@ async def test_auto_modjar_lang_and_hardcode(tmp_path, monkeypatch):
     assert store.load(state.id).status == "done"
     # 产物：资源包 + hardcoded jar
     out_dir = outputs / state.id
-    packs = list(out_dir.glob("*_zh_cn.zip"))
+    packs = list(out_dir.glob("模组汉化资源包.zip"))
     hards = list((out_dir / "hardcoded").glob("*.jar"))
     assert packs and hards, f"产物缺失 packs={packs} hards={hards}"
     # 汉化 jar 内字符串已被替换（副本被改，原 jar 只读）
@@ -114,7 +114,7 @@ async def test_auto_same_script_zh_cn_to_zh_tw(tmp_path, monkeypatch):
     req = SimpleNamespace(path=str(tmp_path), target_lang="zh_tw", source_lang="zh_cn")
     await run_auto_translation(state.id, req, None, store, work, outputs)
     assert store.load(state.id).status == "done"
-    packs = list((outputs / state.id).glob("*_zh_tw.zip"))
+    packs = list((outputs / state.id).glob("模组汉化资源包.zip"))
     assert packs
     with zipfile.ZipFile(packs[0]) as zf:
         data = json.loads(zf.read("assets/mymod/lang/zh_tw.json").decode("utf-8"))
@@ -157,7 +157,7 @@ def test_download_packs_output_dir(tmp_path, monkeypatch):
 
     out_dir = tmp_path / "outputs" / "abc123def456"
     out_dir.mkdir(parents=True)
-    (out_dir / "abc123def456_zh_cn.zip").write_bytes(b"packdata")
+    (out_dir / "模组汉化资源包.zip").write_bytes(b"packdata")
     hard = out_dir / "hardcoded"
     hard.mkdir()
     (hard / "abc123def456_h.jar").write_bytes(b"jardata")
@@ -169,7 +169,7 @@ def test_download_packs_output_dir(tmp_path, monkeypatch):
     assert r.headers["content-type"].startswith("application/zip")
     with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
         names = zf.namelist()
-    assert "abc123def456_zh_cn.zip" in names
+    assert "模组汉化资源包.zip" in names
     assert "hardcoded/abc123def456_h.jar" in names
 
 
@@ -341,7 +341,7 @@ async def test_auto_machine_skips_hardcode(tmp_path, monkeypatch):
     st = store.load(state.id)
     assert st.status == "done"
     # 语言文件正常翻 → 资源包产出
-    packs = list((outputs / state.id).glob("*_zh_cn.zip"))
+    packs = list((outputs / state.id).glob("模组汉化资源包.zip"))
     assert packs, "语言文件应正常翻译成资源包"
     with zipfile.ZipFile(packs[0]) as zf:
         data = json.loads(zf.read("assets/mymod/lang/zh_cn.json").decode("utf-8"))
@@ -553,7 +553,7 @@ async def test_auto_cleans_task_work_keeps_outputs(tmp_path, monkeypatch):
     for sub in ("jars", "extracted", "maps", "uploads"):
         assert not (work / sub / state.id).exists(), f"{sub} 任务后未清理"
     # 产物保留在 OUTPUTS_DIR
-    packs = list((outputs / state.id).glob("*_zh_cn.zip"))
+    packs = list((outputs / state.id).glob("模组汉化资源包.zip"))
     assert packs, "产物应保留在 outputs"
 
 
@@ -633,7 +633,7 @@ async def test_auto_modpack_outputs_resource_pack(tmp_path, monkeypatch):
     await run_auto_translation(state.id, req, None, store, work, outputs)
     assert store.load(state.id).status == "done"
     out_dir = outputs / state.id
-    packs = list(out_dir.glob("*_zh_cn.zip"))
+    packs = list(out_dir.glob("模组汉化资源包.zip"))
     hards = list((out_dir / "hardcoded").glob("*.jar"))
     assert packs and hards, f"modpack 应产出资源包 zip + hardcoded jar，实际 packs={packs} hards={hards}"
     # 顶层无单 jar（汉化 jar 全在 hardcoded/ 子目录）
@@ -717,9 +717,144 @@ async def test_auto_translation_batch_call_count(tmp_path, monkeypatch):
     assert any(len(c) > 1 for c in spy.calls), "应至少有一次调用传入多条文本"
     assert sum(len(c) for c in spy.calls) == 5
     # 译文逐条写回产物（批量后产物/进度仍正确）
-    packs = list((outputs / state.id).glob("*_zh_cn.zip"))
+    packs = list((outputs / state.id).glob("模组汉化资源包.zip"))
     assert packs
     with zipfile.ZipFile(packs[0]) as zf:
         data = json.loads(zf.read("assets/mymod/lang/zh_cn.json").decode("utf-8"))
     assert data["k0"] == "你好 Zero"
     assert data["k4"] == "你好 Four"
+
+
+# ---------- 整合包全包覆盖：目录文本源（任务线/config/data/kubejs）→ 汉化补丁包 ----------
+
+@pytest.mark.asyncio
+async def test_auto_modpack_pack_sources_patch_pack(tmp_path, monkeypatch):
+    """整合包目录文本源（config/ftbquests + data + kubejs）→ 汉化补丁包.zip（相对路径 + 使用说明）；
+    语言文件 → 模组汉化资源包.zip。"""
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    _make_mod_jar(mods)                                  # 语言文件 mod → 模组汉化资源包
+    (tmp_path / "config/ftbquests/quests").mkdir(parents=True)
+    (tmp_path / "config/ftbquests/quests/1.json").write_text(
+        json.dumps({"title": "Welcome", "item": "minecraft:stone"}), encoding="utf-8")
+    (tmp_path / "data/demo/advancement").mkdir(parents=True)
+    (tmp_path / "data/demo/advancement/t.json").write_text(
+        json.dumps({"title": {"text": "New World"}}), encoding="utf-8")
+    (tmp_path / "kubejs/server_scripts").mkdir(parents=True)
+    (tmp_path / "kubejs/server_scripts/main.js").write_text(
+        'console.log("Hello World")\n', encoding="utf-8")
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _FakeEngine())
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
+    assert store.load(state.id).status == "done"
+    out_dir = outputs / state.id
+    # 两类产物：模组汉化资源包 + 汉化补丁包
+    assert (out_dir / "模组汉化资源包.zip").exists()
+    assert (out_dir / "汉化补丁包.zip").exists()
+    with zipfile.ZipFile(out_dir / "模组汉化资源包.zip") as zf:
+        data = json.loads(zf.read("assets/mymod/lang/zh_cn.json").decode("utf-8"))
+    assert data["key.hello"] == "你好世界"
+    # 补丁包：使用说明 + 相对路径条目 + 译文/技术串正确
+    with zipfile.ZipFile(out_dir / "汉化补丁包.zip") as zf:
+        names = zf.namelist()
+        assert "使用说明.txt" in names
+        assert "config/ftbquests/quests/1.json" in names
+        assert "data/demo/advancement/t.json" in names
+        assert "kubejs/server_scripts/main.js" in names
+        quest = json.loads(zf.read("config/ftbquests/quests/1.json").decode("utf-8"))
+        js = zf.read("kubejs/server_scripts/main.js").decode("utf-8")
+    assert quest["title"] == "欢迎"               # 任务线译文
+    assert quest["item"] == "minecraft:stone"      # 技术串原样保留
+    assert "你好世界" in js                         # kubejs 字符串字面量译文
+    # 解压到临时整合包根目录 → 文件精确落在整合包对应位置（路径对齐，无需手动移动）
+    extract_root = tmp_path / "extract_root"
+    extract_root.mkdir()
+    with zipfile.ZipFile(out_dir / "汉化补丁包.zip") as zf:
+        zf.extractall(extract_root)
+    assert (extract_root / "使用说明.txt").exists()
+    assert json.loads((extract_root / "config/ftbquests/quests/1.json").read_text("utf-8"))["title"] == "欢迎"
+    assert (extract_root / "data/demo/advancement/t.json").exists()
+    assert (extract_root / "kubejs/server_scripts/main.js").exists()
+    # 原整合包只读：目录文本源未被改写
+    assert json.loads((tmp_path / "config/ftbquests/quests/1.json").read_text("utf-8"))["title"] == "Welcome"
+
+
+@pytest.mark.asyncio
+async def test_auto_vp_download_success(tmp_path, monkeypatch):
+    """硬编码 + fabric 元数据：mock Modrinth 下载成功 → 补丁包含 VP jar + 映射模块，无 hardcoded jar。"""
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    with zipfile.ZipFile(mods / "meta.jar", "w") as zf:   # fabric 元数据 jar（提供 loader + MC 版本）
+        zf.writestr("fabric.mod.json", json.dumps({"id": "meta", "depends": {"minecraft": ">=1.20.1"}}))
+    _make_jar_with_hardcode(mods, name="h.jar")            # 硬编码 "Hello World"
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _FakeEngine())
+
+    async def fake_vp(loader, mc_version, client=None):
+        return b"vpjarbytes"
+    monkeypatch.setattr("app.auto_flow.download_vault_patcher", fake_vp)
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
+    assert store.load(state.id).status == "done"
+    out_dir = outputs / state.id
+    patch = out_dir / "汉化补丁包.zip"
+    assert patch.exists(), "VP 下载成功应产补丁包"
+    with zipfile.ZipFile(patch) as zf:
+        names = zf.namelist()
+        assert "vault-patcher.jar" in names
+        assert "vaultpatcher/modules/mc-auto-translator.json" in names
+        assert zf.read("vault-patcher.jar") == b"vpjarbytes"
+        module = json.loads(zf.read("vaultpatcher/modules/mc-auto-translator.json").decode("utf-8"))
+    assert module[1]["pairs"]["Hello World"] == "你好世界"
+    hard_dir = out_dir / "hardcoded"
+    assert not hard_dir.exists() or not list(hard_dir.glob("*.jar")), "VP 方案启用不产 hardcoded 汉化 jar"
+
+
+@pytest.mark.asyncio
+async def test_auto_vp_download_fallback_hardcoded_jar(tmp_path, monkeypatch):
+    """硬编码 + 元数据但 mock 下载失败 → 回退 hardcoded 汉化 jar，补丁包不含 VP jar。"""
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    with zipfile.ZipFile(mods / "meta.jar", "w") as zf:
+        zf.writestr("fabric.mod.json", json.dumps({"id": "meta", "depends": {"minecraft": ">=1.20.1"}}))
+    _make_jar_with_hardcode(mods, name="h.jar")
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _FakeEngine())
+
+    async def fail_vp(loader, mc_version, client=None):
+        return None
+    monkeypatch.setattr("app.auto_flow.download_vault_patcher", fail_vp)
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
+    assert store.load(state.id).status == "done"
+    out_dir = outputs / state.id
+    hards = list((out_dir / "hardcoded").glob("*.jar"))
+    assert hards, "下载失败应回退 hardcoded 汉化 jar"
+    assert "你好世界" in " ".join(scan_hardcoded_strings(hards[0]))
+    patch = out_dir / "汉化补丁包.zip"
+    if patch.exists():
+        with zipfile.ZipFile(patch) as zf:
+            assert "vault-patcher.jar" not in zf.namelist()
+

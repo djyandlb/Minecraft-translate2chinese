@@ -12,8 +12,10 @@ map 委托 maps_flow。原 jar/存档只读，一切写操作只在 work 副本�
   - 其他兜底引擎（测试假引擎等）：硬编码逐条全翻（无 AI 判断）
 """
 import asyncio
+import json
 import shutil
-from pathlib import Path
+import zipfile
+from pathlib import Path, PurePosixPath
 
 from app.archive import extract_modpack, is_archive
 from app.cleanup import cleanup_task_work
@@ -30,9 +32,11 @@ from app.models import AutoRequest, MapTranslateRequest
 from app.resourcepack import build_resource_pack
 from app.scanner import scan_jar, scan_modpack
 from app.tasks import TaskStore
-from app.text_sources import (TextSource, discover_text_sources,
+from app.text_sources import (TextSource, discover_pack_text_sources,
+                              discover_text_sources, render_pack_source,
                               write_lang_into_jar, write_translated)
 from app.translate.engine import create_engine
+from app.vp import build_vp_module, download_vault_patcher, infer_modpack_runtime
 from app.translate.han import is_same_script, simplify, traditional
 from app.translate.llm import LLMClient
 from app.translate.machine import MachineClient
@@ -44,6 +48,36 @@ _LANG_NAMES = {"zh_cn": "简体中文", "zh_tw": "繁体中文"}
 def lang_display_name(target_lang: str) -> str:
     """汉化命名映射：zh_cn→简体中文、zh_tw→繁体中文，其他 target_lang 原样。"""
     return _LANG_NAMES.get(target_lang, target_lang)
+
+
+_PATCH_README = """【汉化补丁包使用说明】
+把整个汉化补丁包解压到整合包根目录，即可覆盖生效（内部路径与整合包根目录精确对齐）：
+  config/            → 整合包根目录的 config/
+  data/              → 整合包根目录的 data/
+  kubejs/            → 整合包根目录的 kubejs/
+  scripts/           → 整合包根目录的 scripts/
+  vault-patcher.jar  → 请移动到整合包 mods/ 目录（Vault Patcher 模组，已按版本自动下载）
+  vaultpatcher/      → 游戏根目录（整合包根目录，VP 加载硬编码映射用）
+模组语言文件汉化见「模组汉化资源包.zip」（放入游戏资源包目录）。
+若补丁包内没有 vault-patcher.jar（自动下载失败/联网不可用），硬编码汉化会
+以 hardcoded/ 目录的汉化 mod jar 形式提供（替换对应 mod）。
+覆盖前建议先备份原文件。
+"""
+
+
+def _build_patch_pack(entries: list[tuple[str, str | bytes]], out_path: Path) -> None:
+    """生成汉化补丁包 zip：相对路径条目（译文文本或字节，如 VP jar）+ 使用说明.txt。
+
+    条目相对路径由整合包 rglob 相对路径天然生成；双保险白名单校验防穿越
+    （不含 .. 与绝对路径）。原整合包只读，翻译内容在调用方渲染完成。
+    """
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("使用说明.txt", _PATCH_README)
+        for rel, content in entries:
+            clean = PurePosixPath(rel)
+            if clean.is_absolute() or ".." in clean.parts:
+                continue
+            zf.writestr(rel, content)
 
 
 async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
@@ -95,6 +129,15 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                                              if kind == "modpack" else "未找到可翻译的 jar")})
             store.save(state)
             return
+
+        # 整合包目录文本源（任务线/config/data/kubejs）：只读扫描，译文进汉化补丁包
+        pack_sources: list[TextSource] = []
+        if kind == "modpack":
+            try:
+                pack_sources = discover_pack_text_sources(path)
+            except Exception as e:
+                state.progress.append({"status": "warn",
+                                       "error": f"扫描整合包目录文本源失败：{e}"})
 
         # 源语言自动检测（req.source_lang 为空时）；全汉化返回 None → 兜底 en_us + warn
         auto_lang = detect_source_lang(jars, req.target_lang) if not req.source_lang else None
@@ -162,9 +205,10 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                     state.progress.append({"status": "warn",
                                            "error": f"扫描 {jar.name} 硬编码字符串失败：{e}"})
 
-        # 进度总量：语言文件 jobs + json/lines 词条 + 硬编码候选（machine 不数硬编码）
+        # 进度总量：语言文件 jobs + jar 内 json/lines + 整合包目录文本源 + 硬编码候选（machine 不数硬编码）
         state.total = len(jobs) + sum(
             len(s.entries) for srcs in text_sources_by_jar.values() for s in srcs)
+        state.total += sum(len(s.entries) for s in pack_sources)
         if not engine_machine:
             state.total += sum(len(c) for c in hard_candidates_by_jar.values())
         if state.total == 0:
@@ -288,6 +332,18 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
             if updates:
                 json_lines_translations[jar] = updates
 
+        # 阶段 2.5：整合包目录文本源（任务线/config/data/kubejs）→ 补丁包译文
+        pack_translations: list[tuple[TextSource, dict[str, str]]] = []
+        if kind == "modpack" and pack_sources:
+            for src in pack_sources:
+                out: dict[str, str] = {}
+                pack_items = ({"key": key, "text": text, "sink": out}
+                              for key, text in src.entries.items())
+                await _translate_batch_pipeline(
+                    pack_items, lambda texts: engine.translate_batch(texts, req.target_lang), batch_size)
+                if out:
+                    pack_translations.append((src, out))
+
         # 阶段 3：硬编码（引擎分流）
         if isinstance(engine, LLMClient):
             # LLM 引擎：AI 判断「是否用户可见」并翻译（批量）
@@ -373,18 +429,50 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                 exported.append(str(jar_copy))
                 hard_count += 1
         else:
-            # modpack → 资源包（语言文件）+ hardcoded jar 目录（现状保留）
+            # modpack → 模组汉化资源包（语言文件）+ 汉化补丁包（任务线/config/data/kubejs + VP 硬编码方案）
             if by_mod:
-                # 资源包（语言文件）
-                pack_out = out_dir / f"{task_id}_{req.target_lang}.zip"
+                # 资源包（语言文件）：固定名「模组汉化资源包」，所有整合包共用
+                pack_out = out_dir / "模组汉化资源包.zip"
                 build_resource_pack(by_mod, req.target_lang, pack_format, pack_out)
                 exported.append(str(pack_out))
+            # 补丁包条目：目录文本源译文（按整合包相对路径组织）
+            patch_entries: list[tuple[str, str | bytes]] = [
+                (src.source_path, render_pack_source(src, trans, path))
+                for src, trans in pack_translations
+            ]
+            # 硬编码：VP 方案优先（自动下载对应版本 VP jar + 映射进补丁包），
+            # 下载失败/联网不可用 → 回退 hardcoded 汉化 jar（替换 mod，兜底保底）
+            vp_used = False
+            if hard_mappings:
+                vp_pairs: dict[str, str] = {}
+                for mapping in hard_mappings.values():
+                    vp_pairs.update(mapping)
+                loader, mc_version = infer_modpack_runtime(path / "mods")
+                vp_bytes = await download_vault_patcher(loader, mc_version)
+                if vp_bytes:
+                    vp_used = True
+                    patch_entries.append(("vault-patcher.jar", vp_bytes))
+                    patch_entries.append(("vaultpatcher/modules/mc-auto-translator.json",
+                                          json.dumps(build_vp_module(vp_pairs),
+                                                     ensure_ascii=False, indent=2)))
+                    state.progress.append({"status": "done", "key": "vault-patcher.jar",
+                                           "source": "Vault Patcher",
+                                           "translated": f"已自动下载（{loader} {mc_version}），装入 mods/ 生效"})
+                else:
+                    state.progress.append({"status": "warn",
+                                           "error": "Vault Patcher 自动下载失败（联网/版本匹配不可用），回退 hardcoded 汉化 jar"})
+            if patch_entries:
+                patch_out = out_dir / "汉化补丁包.zip"
+                _build_patch_pack(patch_entries, patch_out)
+                exported.append(str(patch_out))
+            # 硬编码兜底：VP 未启用时产 hardcoded 汉化 jar（json/lines 写回 + 硬编码替换）
+            do_hardcode = bool(hard_mappings) and not vp_used
             hard_dir = out_dir / "hardcoded"
             hard_used: set[str] = set()
             seq = 0
             for jar in jars:
                 json_updates = json_lines_translations.get(jar)
-                mapping = hard_mappings.get(jar)
+                mapping = hard_mappings.get(jar) if do_hardcode else None
                 if not json_updates and not mapping:
                     continue
                 # 原 jar 只读铁律：先 copy2 到 out_dir/hardcoded/<name> 副本再改
@@ -425,7 +513,7 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
         state.status = "done"
         # modjar 无资源包 zip：pack 字段仅 modpack 且语言文件非空时指向资源包，否则 None
         state.progress.append({"status": "done", "file": str(out_dir),
-                               "pack": (str(out_dir / f"{task_id}_{req.target_lang}.zip")
+                               "pack": (str(out_dir / "模组汉化资源包.zip")
                                         if kind == "modpack" and by_mod else None),
                                "hardcoded": hard_count})
         store.save(state)
