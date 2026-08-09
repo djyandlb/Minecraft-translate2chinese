@@ -162,13 +162,19 @@ onUnmounted(stopPolling)
             <h3>翻译明细（最新在前）</h3>
             <div class="detail-list">
               <div v-for="(r, i) in rows" :key="r.key + '-' + i" class="detail-row"
-                   :class="{ errrow: r.status === 'error' }">
-                <div class="row-key">{{ r.key }}</div>
-                <div class="row-langs">
-                  <span class="src">{{ r.source }}</span>
-                  <span class="arrow">→</span>
-                  <span class="trans">{{ r.translated }}</span>
-                </div>
+                   :class="{ errrow: r.status === 'error', transrow: r.status === 'translating' }">
+                <template v-if="r.status === 'translating'">
+                  <!-- 批量翻译请求进行中：给用户「在干活」反馈，避免进度条/明细像卡死 -->
+                  <div class="row-key">⏳ 正在翻译 {{ r.count }} 条…</div>
+                </template>
+                <template v-else>
+                  <div class="row-key">{{ r.key }}</div>
+                  <div class="row-langs">
+                    <span class="src">{{ r.source }}</span>
+                    <span class="arrow">→</span>
+                    <span class="trans">{{ r.translated }}</span>
+                  </div>
+                </template>
                 <span v-if="r.status === 'error'" class="badge bad">失败</span>
                 <span v-else-if="r.status === 'warn'" class="badge warn">警告</span>
               </div>

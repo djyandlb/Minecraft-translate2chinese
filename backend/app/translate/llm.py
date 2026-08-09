@@ -119,7 +119,7 @@ class LLMClient:
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-            self._client = httpx.AsyncClient(timeout=60, headers=headers)
+            self._client = httpx.AsyncClient(timeout=30, headers=headers)   # 30s 超时：API 慢/卡时快速失败回原文，避免进度条长时间冻结
         return self._client
 
     async def translate_batch(self, texts: list[str], target_lang: str) -> list[str]:

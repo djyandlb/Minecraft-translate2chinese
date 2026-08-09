@@ -244,6 +244,10 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                 if not pending:
                     return
                 texts = [p["text"] for p in pending]
+                # 批开始：先给前端「正在翻译 N 条」反馈（批量请求期间 done 不更新，
+                # 不加这行会让进度条/明细看起来像卡死——用户反馈）
+                state.progress.append({"status": "translating", "count": len(pending)})
+                store.save(state)
                 try:
                     translated_list = await translate_fn(texts)
                 except Exception:
