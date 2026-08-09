@@ -6,3 +6,4 @@ dist/
 _upstream/
 *.log
 .superpowers/
+config.json
