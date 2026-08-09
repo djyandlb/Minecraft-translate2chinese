@@ -26,6 +26,11 @@ const failInfo = computed(() => {
   const last = (task.value?.progress || []).filter(p => p.status === 'error').pop()
   return last?.error || ''
 })
+// M4-recheck：取 progress 里最后一条 warn 信息（任务非失败时显示黄色提示）
+const warnInfo = computed(() => {
+  const last = (task.value?.progress || []).filter(p => p.status === 'warn').pop()
+  return last?.error || ''
+})
 // 最新在前展示明细
 const rows = computed(() => (task.value?.progress || []).slice().reverse())
 
@@ -109,6 +114,7 @@ onUnmounted(stopPolling)
         有 {{ task.failed }} 条翻译失败，可能因 API Key 无效或网络问题
       </div>
       <div v-if="failInfo" class="fail-box">失败原因：{{ failInfo }}</div>
+      <div v-if="warnInfo && task.status !== 'failed'" class="warn-box">{{ warnInfo }}</div>
       <p v-if="error" class="err">{{ error }}</p>
 
       <div class="actions">
@@ -132,6 +138,7 @@ onUnmounted(stopPolling)
               <span class="trans">{{ r.translated }}</span>
             </div>
             <span v-if="r.status === 'error'" class="badge bad">失败</span>
+            <span v-else-if="r.status === 'warn'" class="badge warn">警告</span>
           </div>
         </div>
       </div>
@@ -188,4 +195,5 @@ onUnmounted(stopPolling)
 .arrow { color: var(--text-dim); }
 .badge { font-size: 12px; }
 .badge.bad { color: var(--danger); }
+.badge.warn { color: var(--warn); }
 </style>

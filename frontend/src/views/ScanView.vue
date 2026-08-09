@@ -182,6 +182,9 @@ async function startTranslate() {
     <div v-else-if="result" class="result-box">
       <h3>扫描结果</h3>
       <p class="total">可翻译词条数：<strong>{{ result.entries }}</strong></p>
+      <p v-if="result.mca_skipped > 0" class="tip warn-tip">
+        含 {{ result.mca_skipped }} 条暂不支持写回的 .mca 区块文本
+      </p>
       <table v-if="result.preview && result.preview.length">
         <thead>
           <tr><th>文件</th><th>原文</th></tr>
@@ -237,4 +240,5 @@ async function startTranslate() {
 .total { color: var(--text-dim); margin: 10px 0 0; }
 .total strong { color: var(--accent); }
 .fname { word-break: break-all; font-size: 12px; color: var(--text-dim); max-width: 300px; }
+.warn-tip { color: var(--warn); }
 </style>

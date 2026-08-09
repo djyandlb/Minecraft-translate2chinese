@@ -43,6 +43,13 @@ async def run_map_translation(task_id: str, req: MapTranslateRequest, cfg: AppCo
         if skipped:
             state.progress.append({"status": "warn",
                                    "error": f"跳过 {skipped} 条 .mca 区块词条（写回暂不支持，命令方块文本暂无法汉化）"})
+        # M4-recheck：过滤后无可写回词条（如纯命令方块世界）→ 直接失败，不导出空包
+        if not entries:
+            state.status = "failed"
+            state.progress.append({"status": "error",
+                                   "error": "世界无可写回的可翻译文本（命令方块等 .mca 区块文本暂不支持写回）"})
+            store.save(state)
+            return
         store.save(state)
 
         def on_usage(t_in: int, t_out: int) -> None:
@@ -77,6 +84,9 @@ async def run_map_translation(task_id: str, req: MapTranslateRequest, cfg: AppCo
                 translated = traditional(e["text"]) if req.target_lang == "zh_tw" else simplify(e["text"])
             else:
                 translated = (await engine.translate_batch([e["text"]], req.target_lang))[0]
+                # M4-recheck：引擎返回原文视为翻译失败（API Key 无效/网络问题），静默写回原文会误导用户
+                if translated == e["text"]:
+                    state.failed += 1
             memory.set(e["text"], req.target_lang, translated)
             by_file.setdefault(e["file"], []).append({**e, "translated": translated})
             state.done += 1
@@ -84,6 +94,10 @@ async def run_map_translation(task_id: str, req: MapTranslateRequest, cfg: AppCo
                 memory.save()
                 store.save(state)
 
+        # M4-recheck：部分翻译失败仍算完成（status=done），但进度里给用户可见警告
+        if state.failed > 0:
+            state.progress.append({"status": "warn",
+                                   "error": f"{state.failed} 条翻译失败（可能因 API Key 无效或网络问题），已保留原文"})
         memory.save()
         for f, trs in by_file.items():
             write_translations(Path(f), trs)
