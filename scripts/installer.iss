@@ -26,7 +26,7 @@ AllowNoIcons=yes
 OutputDir=..\dist\安装版
 OutputBaseFilename=MC自动翻译器-Setup
 ; 安装包图标取自 exe 自身（PyInstaller 内嵌图标）；日后有专用 .ico 可替换该行
-SetupIconFile=..\dist\安装版\MC自动翻译器\MC自动翻译器.exe
+SetupIconFile=..\assets\app-icon.ico
 ; 卸载器也显示应用图标
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2

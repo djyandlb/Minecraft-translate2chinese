@@ -33,6 +33,7 @@ a = Analysis(
     pathex=[str(BACKEND)],                   # 让 "app.main" 等可被解析（app 包根）
     datas=[
         (str(ROOT / "frontend" / "dist"), "frontend/dist"),                    # 前端静态资源 → _MEIPASS/frontend/dist
+        (str(ROOT / "assets"), "assets"),                                     # 应用/资源包图标 → _MEIPASS/assets
         (str(APP / "maps" / "scan_keys.json"), "app/maps/scan_keys.json"),    # 地图扫描关键词表
         *collect_data_files("jawa"),        # jawa/util/bytecode.{json,yaml}：反编译常量/指令表
         *collect_data_files("opencc"),      # 简繁转换 config/*.json + dictionary/*.txt
@@ -70,6 +71,7 @@ exe = EXE(
     pyz, a.scripts,
     exclude_binaries=True,                    # onedir：dll/资源交给 COLLECT
     name="MC自动翻译器",
+    icon=str(ROOT / "assets" / "app-icon.ico"),   # 应用图标（圆形化处理）
     debug=False,
     strip=False,
     upx=False,
@@ -87,6 +89,7 @@ coll = COLLECT(
 exe_one = EXE(
     pyz, a.scripts, a.binaries, a.datas,
     name="MC自动翻译器-portable",
+    icon=str(ROOT / "assets" / "app-icon.ico"),   # 应用图标（圆形化处理）
     debug=False,
     strip=False,
     upx=False,

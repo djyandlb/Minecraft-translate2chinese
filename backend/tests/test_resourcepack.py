@@ -30,16 +30,16 @@ def test_build_resource_pack_allows_valid_modid_chars(tmp_path: Path):
         assert "assets/my_mod-2/lang/zh_cn.json" in zf.namelist()
 
 def test_build_resource_pack_rejects_path_traversal_modid(tmp_path: Path):
-    # 恶意 modid：".."、"a/b"、"../evil" 一律不写入，zip 内只留 pack.mcmeta
+    # 恶意 modid：".."、"a/b"、"../evil" 一律不写入，zip 内只留 pack.mcmeta + pack.png 图标
     out = tmp_path / "evil.zip"
     evil = {"..": {"item.x": "铁"}, "a/b": {"item.x": "铁"}, "../evil": {"item.x": "铁"}}
     build_resource_pack(evil, "zh_cn", 15, out)
     with zipfile.ZipFile(out) as zf:
-        assert zf.namelist() == ["pack.mcmeta"]
+        assert set(zf.namelist()) == {"pack.mcmeta", "pack.png"}   # pack.png 为资源包图标（图标接入）
 
 def test_build_resource_pack_rejects_bad_target_lang(tmp_path: Path):
     # target_lang 同为不可信外部输入：含 "/"、".." 时跳过全部语言文件写入
     out = tmp_path / "bad_lang.zip"
     build_resource_pack({"demo": {"item.x": "铁"}}, "../zh_cn", 15, out)
     with zipfile.ZipFile(out) as zf:
-        assert zf.namelist() == ["pack.mcmeta"]
+        assert set(zf.namelist()) == {"pack.mcmeta", "pack.png"}
