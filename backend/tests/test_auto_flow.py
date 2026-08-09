@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.auto_flow import run_auto_translation
+from app.cleanup import cleanup_task_work
 from app.detect import detect_input_type
 from app.hardcode import scan_hardcoded_strings
 from app.tasks import TaskStore
@@ -76,11 +77,13 @@ async def test_auto_modjar_lang_and_hardcode(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
-    await run_auto_translation(state.id, req, None, store, work)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
     assert store.load(state.id).status == "done"
     # 产物：资源包 + hardcoded jar
-    out_dir = work / "outputs" / state.id
+    out_dir = outputs / state.id
     packs = list(out_dir.glob("*_zh_cn.zip"))
     hards = list((out_dir / "hardcoded").glob("*.jar"))
     assert packs and hards, f"产物缺失 packs={packs} hards={hards}"
@@ -106,10 +109,12 @@ async def test_auto_same_script_zh_cn_to_zh_tw(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(tmp_path), target_lang="zh_tw", source_lang="zh_cn")
-    await run_auto_translation(state.id, req, None, store, work)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
     assert store.load(state.id).status == "done"
-    packs = list((work / "outputs" / state.id).glob("*_zh_tw.zip"))
+    packs = list((outputs / state.id).glob("*_zh_tw.zip"))
     assert packs
     with zipfile.ZipFile(packs[0]) as zf:
         data = json.loads(zf.read("assets/mymod/lang/zh_tw.json").decode("utf-8"))
@@ -126,8 +131,9 @@ async def test_auto_map_delegates(tmp_path, monkeypatch):
     assert detect_input_type(w) == "map"
     called = {}
 
-    async def fake_map(task_id, req, cfg, store, work_dir):
+    async def fake_map(task_id, req, cfg, store, work_dir, outputs_dir):
         called["req"] = req
+        called["outputs_dir"] = outputs_dir
 
     monkeypatch.setattr("app.auto_flow.run_map_translation", fake_map)
     store = TaskStore(tmp_path / "tasks")
@@ -136,9 +142,12 @@ async def test_auto_map_delegates(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(w), target_lang="zh_cn", source_lang=None)
-    await run_auto_translation(state.id, req, None, store, work)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
     assert called and called["req"].path == str(w)
+    assert called["outputs_dir"] == outputs   # map 委托也透传产物目录
 
 
 def test_download_packs_output_dir(tmp_path, monkeypatch):
@@ -146,13 +155,14 @@ def test_download_packs_output_dir(tmp_path, monkeypatch):
     import app.main as main
     from fastapi.testclient import TestClient
 
-    out_dir = tmp_path / "work" / "outputs" / "abc123def456"
+    out_dir = tmp_path / "outputs" / "abc123def456"
     out_dir.mkdir(parents=True)
     (out_dir / "abc123def456_zh_cn.zip").write_bytes(b"packdata")
     hard = out_dir / "hardcoded"
     hard.mkdir()
     (hard / "abc123def456_h.jar").write_bytes(b"jardata")
     monkeypatch.setattr(main, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(main, "OUTPUTS_DIR", tmp_path / "outputs")
     client = TestClient(main.app)
     r = client.get("/api/task/abc123def456/download")
     assert r.status_code == 200
@@ -178,10 +188,12 @@ async def test_auto_same_stem_jars_dedup(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
-    await run_auto_translation(state.id, req, None, store, work)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
     assert store.load(state.id).status == "done"
-    hards = list((work / "outputs" / state.id / "hardcoded").glob("*.jar"))
+    hards = list((outputs / state.id / "hardcoded").glob("*.jar"))
     assert len(hards) == 2, f"期望 2 个汉化 jar，实际 {hards}"
     assert len({h.name for h in hards}) == 2  # 文件名互不相同，未互相覆盖
 
@@ -200,10 +212,12 @@ async def test_auto_all_hanzified_no_pack(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
-    await run_auto_translation(state.id, req, None, store, work)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
     assert store.load(state.id).status == "done"
-    out_dir = work / "outputs" / state.id
+    out_dir = outputs / state.id
     # 无可导出产物：无资源包 zip，hardcoded 目录不存在或为空
     assert not list(out_dir.glob("*.zip"))
     hard_dir = out_dir / "hardcoded"
@@ -226,8 +240,10 @@ async def test_auto_engine_exception_does_not_kill_flow(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
-    await run_auto_translation(state.id, req, None, store, work)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
     st = store.load(state.id)
     assert st.status == "done"   # 单条失败不拖垮整体流程
     assert st.failed >= 1        # 失败已计数
@@ -238,9 +254,10 @@ def test_download_fallback_single_file(tmp_path, monkeypatch):
     import app.main as main
     from fastapi.testclient import TestClient
 
-    (tmp_path / "work" / "outputs").mkdir(parents=True)
-    (tmp_path / "work" / "outputs" / "fedcba987654_zh_cn.mcworld").write_bytes(b"world")
+    (tmp_path / "outputs").mkdir(parents=True)
+    (tmp_path / "outputs" / "fedcba987654_zh_cn.mcworld").write_bytes(b"world")
     monkeypatch.setattr(main, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(main, "OUTPUTS_DIR", tmp_path / "outputs")
     client = TestClient(main.app)
     r = client.get("/api/task/fedcba987654/download")
     assert r.status_code == 200
@@ -280,11 +297,13 @@ async def test_auto_selected_hardcoded_ignored(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None,
                           selected_hardcoded=["Hello World"])
-    await run_auto_translation(state.id, req, None, store, work)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
     assert store.load(state.id).status == "done"
-    hards = list((work / "outputs" / state.id / "hardcoded").glob("*.jar"))
+    hards = list((outputs / state.id / "hardcoded").glob("*.jar"))
     assert hards, "应产出汉化 jar"
     found = scan_hardcoded_strings(hards[0])
     assert "你好世界" in found            # "Hello World" 已翻译替换
@@ -315,18 +334,20 @@ async def test_auto_machine_skips_hardcode(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
-    await run_auto_translation(state.id, req, None, store, work)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
     st = store.load(state.id)
     assert st.status == "done"
     # 语言文件正常翻 → 资源包产出
-    packs = list((work / "outputs" / state.id).glob("*_zh_cn.zip"))
+    packs = list((outputs / state.id).glob("*_zh_cn.zip"))
     assert packs, "语言文件应正常翻译成资源包"
     with zipfile.ZipFile(packs[0]) as zf:
         data = json.loads(zf.read("assets/mymod/lang/zh_cn.json").decode("utf-8"))
     assert data["key.hello"] == "你好世界"
     # 硬编码跳过：无 hardcoded jar 产物 + warn 明确提示
-    hard_dir = work / "outputs" / state.id / "hardcoded"
+    hard_dir = outputs / state.id / "hardcoded"
     assert not hard_dir.exists() or not list(hard_dir.glob("*.jar"))
     warns = [p for p in st.progress if p.get("status") == "warn"]
     assert any("硬编码" in str(p.get("error", "")) for p in warns), "machine 跳过硬编码应有 warn 提示"
@@ -357,11 +378,13 @@ async def test_auto_json_lines_written_back(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
-    await run_auto_translation(state.id, req, None, store, work)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
     assert store.load(state.id).status == "done"
     # 汉化 jar 产物（json/lines 写回 jar 副本）
-    hards = list((work / "outputs" / state.id / "hardcoded").glob("*.jar"))
+    hards = list((outputs / state.id / "hardcoded").glob("*.jar"))
     assert hards, "json/lines 写回应产出汉化 jar"
     with zipfile.ZipFile(hards[0]) as zf:
         data = json.loads(zf.read("assets/mymod/advancement.json").decode("utf-8"))
@@ -392,11 +415,13 @@ async def test_auto_llm_ai_judge_only_visible(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
-    await run_auto_translation(state.id, req, None, store, work)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
     st = store.load(state.id)
     assert st.status == "done"
-    hards = list((work / "outputs" / state.id / "hardcoded").glob("*.jar"))
+    hards = list((outputs / state.id / "hardcoded").glob("*.jar"))
     assert hards, "LLM AI 判断应产出汉化 jar"
     found = scan_hardcoded_strings(hards[0])
     assert "你好世界" in found                # AI 判定可见 → 替换
@@ -433,13 +458,15 @@ async def test_auto_llm_ai_judge_failure_no_double_count(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
-    await run_auto_translation(state.id, req, None, store, work)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
     st = store.load(state.id)
     assert st.status == "done"
     assert st.failed >= 1                       # 异常整批计入 failed
     assert st.done + st.failed <= st.total      # 不双计：done+failed 不超 total
-    hard_dir = work / "outputs" / state.id / "hardcoded"
+    hard_dir = outputs / state.id / "hardcoded"
     assert not hard_dir.exists() or not list(hard_dir.glob("*.jar"))
 
 
@@ -473,8 +500,58 @@ async def test_auto_llm_ai_judge_cancel_between_jars(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
-    await run_auto_translation(state.id, req, None, store, work)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
     st = store.load(state.id)
     assert st.status == "cancelled"
     assert calls["n"] == 1        # 第二个 jar 前被取消拦截，不再调用 ai_judge
+
+
+def test_cleanup_task_work_keeps_global(tmp_path):
+    """cleanup_task_work：删任务级临时子目录（jars/extracted/maps/uploads 的 <task_id>），
+    保留全局 memory.json/glossary.json/tasks 与产物 OUTPUTS_DIR。"""
+    work = tmp_path / "work"
+    tid = "abc123def456"
+    for sub in ("jars", "extracted", "maps", "uploads"):
+        (work / sub / tid).mkdir(parents=True)
+    # 全局文件/目录（任务状态轮询依赖）必须保留
+    (work / "memory.json").write_text("{}", encoding="utf-8")
+    (work / "glossary.json").write_text("[]", encoding="utf-8")
+    (work / "tasks").mkdir(parents=True)
+    cleanup_task_work(work, tid)
+    for sub in ("jars", "extracted", "maps", "uploads"):
+        assert not (work / sub / tid).exists(), f"{sub} 任务级目录未清理"
+    assert (work / "memory.json").exists()
+    assert (work / "glossary.json").exists()
+    assert (work / "tasks").exists()
+
+
+@pytest.mark.asyncio
+async def test_auto_cleans_task_work_keeps_outputs(tmp_path, monkeypatch):
+    """任务 done 后：WORK_DIR 任务级中间目录被清理，OUTPUTS_DIR 产物保留（download 依赖）。"""
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    _make_mod_jar(mods)                                  # 语言文件 mod
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _FakeEngine())
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    # 预置任务级临时目录，验证 flow 收尾会清掉
+    for sub in ("jars", "extracted", "maps", "uploads"):
+        (work / sub / state.id).mkdir(parents=True)
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang=None)
+    await run_auto_translation(state.id, req, None, store, work, outputs)
+    assert store.load(state.id).status == "done"
+    # 中间产物已清理
+    for sub in ("jars", "extracted", "maps", "uploads"):
+        assert not (work / sub / state.id).exists(), f"{sub} 任务后未清理"
+    # 产物保留在 OUTPUTS_DIR
+    packs = list((outputs / state.id).glob("*_zh_cn.zip"))
+    assert packs, "产物应保留在 outputs"

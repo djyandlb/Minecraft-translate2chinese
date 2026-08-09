@@ -10,6 +10,7 @@ import asyncio
 import shutil
 from pathlib import Path
 
+from app.cleanup import cleanup_task_work
 from app.config import AppConfig
 from app.glossary import load_glossary, term_inject_prompt
 from app.hardcode import replace_hardcoded_strings, scan_hardcoded_strings
@@ -22,8 +23,12 @@ from app.translate.llm import LLMClient
 
 
 async def run_hardcode_translation(task_id: str, req: HardcodeRequest, cfg: AppConfig,
-                                   store: TaskStore, work_dir: Path) -> None:
-    """硬编码汉化后台流程：复制原 jar 到副本 → 扫描 → 引擎翻译 → 替换校验 → 输出新 jar。原 jar 只读。"""
+                                   store: TaskStore, work_dir: Path, outputs_dir: Path) -> None:
+    """硬编码汉化后台流程：复制原 jar 到副本 → 扫描 → 引擎翻译 → 替换校验 → 输出新 jar。原 jar 只读。
+
+    work_dir 为中间产物区（temp，副本落 jars/<task_id>，任务终态后清理）；
+    outputs_dir 为产物区（exe 旁 outputs/，汉化 jar 落这里）。
+    """
     state = store.load(task_id)
     memory = MemoryStore(work_dir / "memory.json")
     glossary_prompt = term_inject_prompt(load_glossary(work_dir / "glossary.json"))
@@ -95,8 +100,8 @@ async def run_hardcode_translation(task_id: str, req: HardcodeRequest, cfg: AppC
         if result["failed_classes"]:
             state.progress.append({"status": "warn",
                                    "error": f"{len(result['failed_classes'])} 个 class 替换失败（已跳过保留原字节）"})
-        # 输出：改完的副本移到 outputs
-        out = work_dir / "outputs" / f"{task_id}_hardcoded.jar"
+        # 输出：改完的副本移到 outputs（exe 旁产物区）
+        out = outputs_dir / f"{task_id}_hardcoded.jar"
         out.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(jar_copy), str(out))
         state.progress.append({"status": "done", "file": str(out), "replaced": result["replaced"]})
@@ -111,3 +116,7 @@ async def run_hardcode_translation(task_id: str, req: HardcodeRequest, cfg: AppC
         state.status = "failed"
         state.progress.append({"status": "error", "error": str(e)})
         store.save(state)
+    finally:
+        # 任务终态（done/failed/cancelled）后清理任务级中间产物（temp），产物保留（C）
+        if state.status in ("done", "failed", "cancelled"):
+            cleanup_task_work(work_dir, task_id)

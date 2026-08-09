@@ -6,6 +6,7 @@
 import asyncio
 from pathlib import Path
 
+from app.cleanup import cleanup_task_work
 from app.config import AppConfig
 from app.glossary import load_glossary, term_inject_prompt
 from app.maps.copy import copy_world
@@ -21,9 +22,12 @@ from app.translate.llm import LLMClient
 
 
 async def run_map_translation(task_id: str, req: MapTranslateRequest, cfg: AppConfig,
-                              store: TaskStore, work_dir: Path) -> None:
+                              store: TaskStore, work_dir: Path, outputs_dir: Path) -> None:
     """地图翻译：整档复制→副本扫描→引擎翻译（记忆+简繁+术语）→写回→导出 mcworld。原档不动。
     局限：.mca 区块（命令方块文本）写回暂不支持，翻译前按后缀过滤，避免白烧 token。
+
+    work_dir 为中间产物区（temp，副本落 maps/<task_id>，任务终态后清理）；
+    outputs_dir 为产物区（exe 旁 outputs/，mcworld 落这里）。
     """
     state = store.load(task_id)
     memory = MemoryStore(work_dir / "memory.json")
@@ -101,7 +105,7 @@ async def run_map_translation(task_id: str, req: MapTranslateRequest, cfg: AppCo
         memory.save()
         for f, trs in by_file.items():
             write_translations(Path(f), trs)
-        out = work_dir / "outputs" / f"{task_id}_{req.target_lang}.mcworld"
+        out = outputs_dir / f"{task_id}_{req.target_lang}.mcworld"
         export_world(copy, out)
         state.status = "done"
         state.progress.append({"status": "done", "file": str(out)})
@@ -115,3 +119,7 @@ async def run_map_translation(task_id: str, req: MapTranslateRequest, cfg: AppCo
         state.status = "failed"
         state.progress.append({"status": "error", "error": str(e)})
         store.save(state)
+    finally:
+        # 任务终态（done/failed/cancelled）后清理任务级中间产物（temp），产物保留（C）
+        if state.status in ("done", "failed", "cancelled"):
+            cleanup_task_work(work_dir, task_id)

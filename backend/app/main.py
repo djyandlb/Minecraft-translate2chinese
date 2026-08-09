@@ -4,6 +4,7 @@ import os
 import re
 import string
 import sys
+import tempfile
 import uuid
 import zipfile
 from pathlib import Path
@@ -40,8 +41,9 @@ def _base() -> Path:
 
 app = FastAPI(title="MC 自动翻译器")
 BASE = _base()                                        # backend/（frozen 后为 exe 同目录）
-CONFIG_PATH = BASE / "config.json"
-WORK_DIR = BASE / "work"
+CONFIG_PATH = BASE / "config.json"                    # config 保持 exe 旁（用户可见可改）
+OUTPUTS_DIR = BASE / "outputs"                        # 产物：exe 旁 outputs/（download 从这里读）
+WORK_DIR = Path(tempfile.gettempdir()) / "mc-translator"   # 中间产物：系统 temp，任务终态后清理
 STORE = TaskStore(WORK_DIR / "tasks")
 _TASKS: dict[str, asyncio.Task] = {}    # 保存后台任务引用，防止被 GC 回收（F2）
 
@@ -188,7 +190,7 @@ async def translate(req: TranslateRequest):
     state = STORE.new()
     state.status = "running"
     STORE.save(state)
-    task = asyncio.create_task(run_translation(state.id, req, cfg, STORE, WORK_DIR))
+    task = asyncio.create_task(run_translation(state.id, req, cfg, STORE, WORK_DIR, OUTPUTS_DIR))
     _TASKS[state.id] = task
     task.add_done_callback(lambda t: _TASKS.pop(state.id, None))
     return {"task_id": state.id}
@@ -201,7 +203,7 @@ async def auto_translate(req: AutoRequest):
     state = STORE.new()
     state.status = "running"
     STORE.save(state)
-    task = asyncio.create_task(run_auto_translation(state.id, req, cfg, STORE, WORK_DIR))
+    task = asyncio.create_task(run_auto_translation(state.id, req, cfg, STORE, WORK_DIR, OUTPUTS_DIR))
     _TASKS[state.id] = task
     task.add_done_callback(lambda t: _TASKS.pop(state.id, None))
     return {"task_id": state.id}
@@ -246,7 +248,8 @@ def download(task_id: str):
     if not re.fullmatch(r"[0-9a-f]{12}", task_id):
         raise HTTPException(404, "任务不存在")
     # A5：产物目录优先（资源包 + hardcoded jar）→ 打包成 {task_id}.zip；否则旧单文件兼容
-    out_dir = WORK_DIR / "outputs" / task_id
+    # 任务 C：产物移 OUTPUTS_DIR（exe 旁 outputs/），与 temp 中间产物分离；任务后清理不影响下载
+    out_dir = OUTPUTS_DIR / task_id
     if out_dir.is_dir():
         import io
         buf = io.BytesIO()
@@ -258,7 +261,7 @@ def download(task_id: str):
         return StreamingResponse(buf, media_type="application/zip",
                                  headers={"Content-Disposition": f'attachment; filename="{task_id}.zip"'})
     # M4-6：资源包任务导出 .zip，地图任务导出 .mcworld，两者都匹配，避免地图产物 404
-    for f in (WORK_DIR / "outputs").glob(f"{task_id}_*.*"):
+    for f in OUTPUTS_DIR.glob(f"{task_id}_*.*"):
         return FileResponse(f, filename=f.name)
     raise HTTPException(404, "尚未生成产物")
 
@@ -341,7 +344,7 @@ async def map_translate(req: MapTranslateRequest):
     state = STORE.new()
     state.status = "running"
     STORE.save(state)
-    task = asyncio.create_task(maps_flow.run_map_translation(state.id, req, cfg, STORE, WORK_DIR))
+    task = asyncio.create_task(maps_flow.run_map_translation(state.id, req, cfg, STORE, WORK_DIR, OUTPUTS_DIR))
     _TASKS[state.id] = task
     task.add_done_callback(lambda t: _TASKS.pop(state.id, None))
     return {"task_id": state.id}
@@ -379,7 +382,7 @@ async def hardcode_translate(req: HardcodeRequest):
     state = STORE.new()
     state.status = "running"
     STORE.save(state)
-    task = asyncio.create_task(run_hardcode_translation(state.id, req, cfg, STORE, WORK_DIR))
+    task = asyncio.create_task(run_hardcode_translation(state.id, req, cfg, STORE, WORK_DIR, OUTPUTS_DIR))
     _TASKS[state.id] = task
     task.add_done_callback(lambda t: _TASKS.pop(state.id, None))
     return {"task_id": state.id}

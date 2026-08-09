@@ -16,6 +16,7 @@ import shutil
 from pathlib import Path
 
 from app.archive import extract_modpack, is_archive
+from app.cleanup import cleanup_task_work
 from app.config import AppConfig
 from app.detect import (_HARDCODE_MAX_BYTES, detect_input_type, detect_source_lang,
                         infer_pack_format, needs_translation)
@@ -37,11 +38,14 @@ from app.translate.machine import MachineClient
 
 
 async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
-                               store: TaskStore, work_dir: Path) -> None:
+                               store: TaskStore, work_dir: Path, outputs_dir: Path) -> None:
     """统一全自动翻译：自动识别类型 → 全文本覆盖 + 硬编码 AI 判断并入 → 资源包 + 汉化 jar；map 委托。
 
     流程骨架照 translator.py / hardcode_flow.py：扫描 → 查记忆 → 引擎翻译
     （术语注入+简繁捷径+token统计）→ 资源包 + jar 副本改写。
+
+    work_dir 为中间产物区（temp，任务终态后清理任务级子目录）；
+    outputs_dir 为产物区（exe 旁 outputs/，资源包/汉化 jar 落这里）。
     """
     state = store.load(task_id)
     memory = MemoryStore(work_dir / "memory.json")
@@ -59,7 +63,7 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                 MapTranslateRequest(path=str(path),
                                     source_lang=req.source_lang or "en_us",
                                     target_lang=req.target_lang),
-                cfg, store, work_dir)
+                cfg, store, work_dir, outputs_dir)
             return
         if kind == "unknown":
             state.status = "failed"
@@ -309,8 +313,8 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                                    "error": (f"{state.failed} 条翻译失败"
                                              f"（可能因 API Key 无效或网络问题），已保留原文")})
 
-        # 产物组织 work/outputs/<task_id>/ 下
-        out_dir = work_dir / "outputs" / task_id
+        # 产物组织 outputs/<task_id>/ 下（exe 旁 outputs，download 从这里读）
+        out_dir = outputs_dir / task_id
         out_dir.mkdir(parents=True, exist_ok=True)
         pack_format = infer_pack_format(path)
         exported: list[str] = []
@@ -377,3 +381,7 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
         state.status = "failed"
         state.progress.append({"status": "error", "error": str(e)})
         store.save(state)
+    finally:
+        # 任务终态（done/failed/cancelled）后清理任务级中间产物（temp），产物保留（C）
+        if state.status in ("done", "failed", "cancelled"):
+            cleanup_task_work(work_dir, task_id)

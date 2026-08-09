@@ -47,11 +47,12 @@ def test_translate_starts_background_task(tmp_path, monkeypatch):
     # 此处隔离 work/task 目录并替换 run_translation，验证后台任务被调度。
     import app.main as main
     monkeypatch.setattr(main, "WORK_DIR", tmp_path)
+    monkeypatch.setattr(main, "OUTPUTS_DIR", tmp_path / "outputs")
     monkeypatch.setattr(main, "STORE", TaskStore(tmp_path / "tasks"))
 
     calls = []
 
-    async def fake_run(task_id, req, cfg, store, work_dir):
+    async def fake_run(task_id, req, cfg, store, work_dir, outputs_dir):
         calls.append((task_id, req))
         await asyncio.sleep(0)
 
@@ -70,10 +71,11 @@ def test_cancel_pause_flags(tmp_path, monkeypatch):
     # F8：cancel/pause 端点应立即生效——依赖 F1 内存缓存，端点与后台任务共享同一 TaskState 对象
     import app.main as main
     monkeypatch.setattr(main, "WORK_DIR", tmp_path)
+    monkeypatch.setattr(main, "OUTPUTS_DIR", tmp_path / "outputs")
     store = TaskStore(tmp_path / "tasks")
     monkeypatch.setattr(main, "STORE", store)
 
-    async def fake_run(task_id, req, cfg, s, work_dir):
+    async def fake_run(task_id, req, cfg, s, work_dir, outputs_dir):
         await asyncio.sleep(0)   # 立即完成，不真正调引擎
 
     monkeypatch.setattr(main, "run_translation", fake_run)

@@ -67,12 +67,14 @@ async def test_run_hardcode_translation(tmp_path, monkeypatch):
     store.save(state)
     work = tmp_path / "work"
     work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
     req = SimpleNamespace(path=str(jar), source_lang="en_us", target_lang="zh_cn")
-    await run_hardcode_translation(state.id, req, None, store, work)
+    await run_hardcode_translation(state.id, req, None, store, work, outputs)
     # 铁律：原 jar 未被改写（原档只读）
     assert scan_hardcoded_strings(jar) == ["Hello World"]
     # 输出 jar 存在且已汉化
-    outs = list((work / "outputs").glob("*_hardcoded.jar"))
+    outs = list(outputs.glob("*_hardcoded.jar"))
     assert outs, "输出 jar 未生成"
     found = scan_hardcoded_strings(outs[0])
     assert "你好世界" in found

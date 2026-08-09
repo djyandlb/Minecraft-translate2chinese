@@ -3,6 +3,7 @@ import asyncio
 from pathlib import Path
 
 from app.archive import is_archive, extract_modpack
+from app.cleanup import cleanup_task_work
 from app.config import AppConfig
 from app.diff import build_jobs
 from app.glossary import load_glossary, term_inject_prompt
@@ -18,8 +19,12 @@ from app.version import version_to_pack_format
 
 
 async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
-                          store: TaskStore, work_dir: Path) -> None:
-    """后台翻译流程：扫描→查记忆→引擎翻译（术语注入+简繁捷径+token统计）→资源包。"""
+                          store: TaskStore, work_dir: Path, outputs_dir: Path) -> None:
+    """后台翻译流程：扫描→查记忆→引擎翻译（术语注入+简繁捷径+token统计）→资源包。
+
+    work_dir 为中间产物区（temp，任务终态后清理任务级子目录）；
+    outputs_dir 为产物区（exe 旁 outputs/，资源包落这里，download 从这里读）。
+    """
     state = store.load(task_id)
     memory = MemoryStore(work_dir / "memory.json")
     glossary = load_glossary(work_dir / "glossary.json")
@@ -88,7 +93,7 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
                 store.save(state)
 
         memory.save()
-        out = work_dir / "outputs" / f"{task_id}_{req.target_lang}.zip"
+        out = outputs_dir / f"{task_id}_{req.target_lang}.zip"
         build_resource_pack(by_mod, req.target_lang, pack_format, out)
         state.status = "done"
         state.progress.append({"status": "done", "file": str(out)})
@@ -102,3 +107,7 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
         state.status = "failed"
         state.progress.append({"status": "error", "error": str(e)})
         store.save(state)
+    finally:
+        # 任务终态（done/failed/cancelled）后清理任务级中间产物（temp），产物保留（C）
+        if state.status in ("done", "failed", "cancelled"):
+            cleanup_task_work(work_dir, task_id)
