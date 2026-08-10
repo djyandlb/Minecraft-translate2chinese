@@ -441,7 +441,9 @@ async def test_auto_llm_ai_judge_only_visible(tmp_path, monkeypatch):
     engine = LLMClient("https://x", "k", "m")
     monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: engine)
 
-    async def fake_judge(engine, candidates, target):
+    async def fake_judge(engine, candidates, target, on_batch_done=None):
+        if on_batch_done:
+            on_batch_done(len(candidates))
         return {"Hello World": "你好世界"}   # AI 只判定 Hello World 可见
 
     monkeypatch.setattr("app.auto_flow.ai_judge_translate", fake_judge)
@@ -521,12 +523,14 @@ async def test_auto_llm_ai_judge_cancel_between_jars(tmp_path, monkeypatch):
 
     calls = {"n": 0}
 
-    async def judge_then_cancel(engine, candidates, target):
+    async def judge_then_cancel(engine, candidates, target, on_batch_done=None):
         calls["n"] += 1
         # 处理完第一个 jar 后立即置取消（TaskStore 缓存使 auto_flow 与本测试共享同一 state 对象）
         if calls["n"] == 1:
             state.cancelled = True
             store.save(state)
+        if on_batch_done:
+            on_batch_done(len(candidates))   # 逐批进度回调（进度条实时推进）
         return {"Hello World": "你好世界"}
 
     monkeypatch.setattr("app.auto_flow.ai_judge_translate", judge_then_cancel)
@@ -943,7 +947,9 @@ async def test_auto_llm_total_includes_all_candidates(tmp_path, monkeypatch):
     engine = LLMClient("https://x", "k", "m")
     monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: engine)
 
-    async def fake_judge(engine, candidates, target):
+    async def fake_judge(engine, candidates, target, on_batch_done=None):
+        if on_batch_done:
+            on_batch_done(len(candidates))
         return {"Hello World": "你好世界"}        # AI 判定 1 条可见
 
     monkeypatch.setattr("app.auto_flow.ai_judge_translate", fake_judge)

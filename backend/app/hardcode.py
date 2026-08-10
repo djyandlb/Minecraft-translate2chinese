@@ -910,7 +910,8 @@ async def _ai_judge_batch(engine, client, batch: list[dict], target_lang: str,
 
 
 async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
-                             known_translations: dict[str, str] | None = None) -> AiJudgeResult:
+                             known_translations: dict[str, str] | None = None,
+                             on_batch_done: Callable[[int], None] | None = None) -> AiJudgeResult:
     """LLM 判断硬编码候选是否用户可见并翻译（P0-2 三分类，不静默漏判）。
 
     分页 ≤25 条/批并发请求；每批对照候选检查，未返回的并入 unresolved；
@@ -920,6 +921,9 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
 
     P0-3：known_translations（已确认术语 {text: translation}）注入 user prompt，
     强制沿用已确认译名。复用 engine（LLMClient）的 base_url/model 与 httpx 客户端。
+
+    on_batch_done：每批判断完成回调（传该批候选数），供调用方逐批推进进度——
+    ai_judge 是批量判断，若 done 只在全部判断完累加，进度条会长时间不动（用户反馈）。
     """
     if not candidates:
         return AiJudgeResult()
@@ -932,7 +936,10 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
 
     async def run_batch(batch: list[dict]) -> AiJudgeResult:
         async with sem:
-            return await _ai_judge_batch(engine, client, batch, target_lang, known_translations)
+            result = await _ai_judge_batch(engine, client, batch, target_lang, known_translations)
+            if on_batch_done:
+                on_batch_done(len(batch))   # 逐批推进进度（事件循环内同步执行，无竞态）
+            return result
 
     results = await asyncio.gather(*(run_batch(b) for b in batches))
     merged = AiJudgeResult()

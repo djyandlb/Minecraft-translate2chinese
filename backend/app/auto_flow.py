@@ -398,7 +398,15 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                     return
                 await _wait_if_paused()
                 try:
-                    judged = await ai_judge_translate(engine, cands, req.target_lang)
+                    # 逐批推进进度：ai_judge 每判断完一批回调，进度条实时涨（用户反馈
+                    # 「硬编码时进度条不涨」——不能等全部判断完才一次性 done）
+                    def _judge_progress(n: int) -> None:
+                        state.done += n
+                        state.progress.append({"status": "translating", "count": n,
+                                               "note": "AI 判断硬编码"})
+                        store.save(state)
+                    judged = await ai_judge_translate(engine, cands, req.target_lang,
+                                                      on_batch_done=_judge_progress)
                 except Exception as exc:
                     # 失败 → 仅计 failed 并跳过本批（不再累加 done，
                     # 避免异常路径 done+failed 双计超 total，B 审查 🟡4）。
@@ -430,10 +438,8 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                     state.progress.append({"status": "warn",
                                            "error": (f"{jar.name}: {len(unresolved)} 条硬编码未判定"
                                                      f"（LLM 未返回/降级失败），未翻译：{preview}")})
-                # 进度按候选数推进（total 已在初始计算含全部硬编码候选）：
-                # 每个候选都算「已处理」（可见翻译或 exclude 判定）——用户最新需求
-                state.done += len(cands)
                 # B 审查 🔵6：LLM 分支补一条汇总 progress（judged/visible 便于前端展示）
+                # 注意：done 已由 _judge_progress 逐批累加（total 含全部硬编码候选），不再重复加
                 state.progress.append({"jar": jar.name, "judged": len(cands),
                                        "visible": len(mapping), "unresolved": len(unresolved),
                                        "status": "done"})
