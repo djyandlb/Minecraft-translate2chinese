@@ -34,8 +34,21 @@ const dirs = ref([])
 const parent = ref('')
 const browsing = ref(false)
 
+const drives = ref([])   // 盘符快捷栏（C:\、D:\…，一键换盘）
+
+// 加载盘符列表：盘根 browse 返回所有盘符；失败兜底常见盘符
+async function loadDrives() {
+  try {
+    const r = await browse('C:\\')
+    drives.value = r.dirs || []
+  } catch {
+    drives.value = ['C:/', 'D:/', 'E:/', 'F:/']
+  }
+}
+
 async function openBrowser() {
   showBrowser.value = true
+  await loadDrives()
   await loadDirs('')
 }
 async function loadDirs(p) {
@@ -164,8 +177,16 @@ async function onFilePicked(e) {
 
     <!-- 目录浏览器（浏览器模式） -->
     <div v-if="showBrowser" class="browser">
+      <!-- 盘符快捷栏：一键换盘（不用一层层进到盘根） -->
+      <div class="drive-bar" v-if="drives.length">
+        <span class="drive-label">盘符</span>
+        <button v-for="d in drives" :key="d" class="drive" :class="{ active: browserPath.replace(/\\\\$/,'').toLowerCase() === d.replace(/\\\\$/,'').toLowerCase() }"
+                @click="loadDirs(d)">{{ d }}</button>
+      </div>
       <div class="browser-head">
-        <span class="cur">{{ browserPath || '（主目录）' }}</span>
+        <!-- 路径可编辑：粘贴路径后回车/失焦跳转（用户反馈不能复制粘贴链接） -->
+        <input class="cur-input" v-model="browserPath" placeholder="粘贴路径后回车跳转…"
+               @keyup.enter="loadDirs(browserPath)" @blur="loadDirs(browserPath)" />
         <span class="spacer"></span>
         <button class="btn" :disabled="browsing" @click="goUp">上级</button>
         <button class="btn primary" :disabled="browsing" @click="pickPath">选择</button>
@@ -240,7 +261,21 @@ async function onFilePicked(e) {
   margin-bottom: 16px;
 }
 .browser-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.browser-head .cur { color: var(--accent); word-break: break-all; font-size: 13px; }
+/* 盘符快捷栏：一键换盘 */
+.drive-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.drive-label { color: var(--text-dim); font-size: 12px; }
+.drive {
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: 5px;
+  color: var(--text); padding: 3px 10px; cursor: pointer; font-size: 12px;
+}
+.drive:hover { border-color: var(--accent); color: var(--accent); }
+.drive.active { background: var(--accent-2); border-color: var(--accent-2); color: #0b1510; }
+/* 路径可编辑：粘贴后回车/失焦跳转 */
+.cur-input {
+  flex: 1; background: var(--bg-3); border: 1px solid var(--line); border-radius: 5px;
+  color: var(--text); padding: 5px 8px; font-size: 12px; outline: none; min-width: 120px;
+}
+.cur-input:focus { border-color: var(--accent); }
 .spacer { flex: 1; }
 .browser-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow: auto; }
 .browser-list .dir {
