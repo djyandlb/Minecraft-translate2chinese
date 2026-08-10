@@ -207,14 +207,16 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                     state.progress.append({"status": "warn",
                                            "error": f"扫描 {jar.name} 硬编码字符串失败：{e}"})
 
-        # 进度总量：语言文件 jobs + jar 内 json/lines + 整合包目录文本源。
-        # 硬编码候选不预先计入（含日志/技术串，需 ai_judge 判断后按「可见数」动态追加，
-        # 让进度条显示的是「删减日志+AI 判断后」的真实数量——用户反馈）
+        # 进度总量：语言文件 jobs + jar 内 json/lines + 整合包目录文本源
+        # + 硬编码候选数（过滤 log 后的真实候选；用户最新需求：进度条显示
+        # 「语言文件 + 硬编码」的一共数量）。machine 引擎不扫硬编码，不计入。
+        # 硬编码阶段 done 按候选数推进（可见翻译或 exclude 判定都算「已处理」）。
         state.total = len(jobs) + sum(
             len(s.entries) for srcs in text_sources_by_jar.values() for s in srcs)
         state.total += sum(len(s.entries) for s in pack_sources)
-        # total 不含硬编码候选（待 ai_judge 后按可见数追加）；若语言/文本源为空但
-        # 有硬编码候选（LLM 引擎），仍需继续流程（ai_judge 判断后 total 才有值）
+        if not engine_machine:
+            state.total += sum(len(c) for c in hard_candidates_by_jar.values())
+        # 若语言/文本源为空但有硬编码候选（LLM/兜底引擎），仍需继续流程
         if state.total == 0 and not (hard_candidates_by_jar and not engine_machine):
             # 空词条（且无硬编码待判断）：直接 done + warn，不导出空包
             state.status = "done"
@@ -399,9 +401,8 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                     judged = await ai_judge_translate(engine, cands, req.target_lang)
                 except Exception as exc:
                     # 失败 → 仅计 failed 并跳过本批（不再累加 done，
-                    # 避免异常路径 done+failed 双计超 total，B 审查 🟡4）
-                    # total 补上失败候选数（保持 done+failed <= total 的进度约束）
-                    state.total += len(cands)
+                    # 避免异常路径 done+failed 双计超 total，B 审查 🟡4）。
+                    # total 已在初始计算含候选数，这里不再补加。
                     state.failed += len(cands)
                     state.progress.append({"status": "warn",
                                            "error": f"{jar.name} AI 判断硬编码失败：{exc}"})
@@ -429,10 +430,9 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                     state.progress.append({"status": "warn",
                                            "error": (f"{jar.name}: {len(unresolved)} 条硬编码未判定"
                                                      f"（LLM 未返回/降级失败），未翻译：{preview}")})
-                # 进度只按「AI 判定可见」的候选推进（total 动态追加可见数，
-                # 显示删减日志+AI 判断后的真实数量；exclude 的候选不计入——用户反馈）
-                state.total += len(mapping)
-                state.done += len(mapping)
+                # 进度按候选数推进（total 已在初始计算含全部硬编码候选）：
+                # 每个候选都算「已处理」（可见翻译或 exclude 判定）——用户最新需求
+                state.done += len(cands)
                 # B 审查 🔵6：LLM 分支补一条汇总 progress（judged/visible 便于前端展示）
                 state.progress.append({"jar": jar.name, "judged": len(cands),
                                        "visible": len(mapping), "unresolved": len(unresolved),
@@ -441,9 +441,8 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                     memory.save()
                     store.save(state)
         elif not engine_machine:
-            # 兜底引擎（测试假引擎等）：硬编码批量全翻（无 AI 判断，复用批量流水线）
-            # total 补上硬编码数（兜底全翻，无 exclude）
-            state.total += sum(len(c) for c in hard_candidates_by_jar.values())
+            # 兜底引擎（测试假引擎等）：硬编码批量全翻（无 AI 判断，复用批量流水线）。
+            # total 已在初始计算含硬编码候选数（_translate_batch_pipeline 按条目推进 done）。
             for jar, cands in hard_candidates_by_jar.items():
                 mapping: dict[str, str] = {}
                 hard_items = ({"key": c["text"], "text": c["text"], "sink": mapping}

@@ -374,6 +374,8 @@ async def test_auto_machine_skips_hardcode(tmp_path, monkeypatch):
     await run_auto_translation(state.id, req, None, store, work, outputs)
     st = store.load(state.id)
     assert st.status == "done"
+    # machine 引擎 total 不含硬编码候选（只含语言文件 1 词条）
+    assert st.total == 1
     # 语言文件正常翻 → 资源包产出
     packs = list((outputs / state.id).glob("模组汉化资源包.zip"))
     assert packs, "语言文件应正常翻译成资源包"
@@ -892,3 +894,73 @@ async def test_auto_vp_download_fallback_hardcoded_jar(tmp_path, monkeypatch):
         with zipfile.ZipFile(patch) as zf:
             assert "vault-patcher.jar" not in zf.namelist()
 
+
+
+# ---------- 进度总量含硬编码候选（用户最新需求：语言文件 + 硬编码 一共数量） ----------
+
+@pytest.mark.asyncio
+async def test_auto_total_includes_hardcode_candidates(tmp_path, monkeypatch):
+    """兜底引擎：进度总量 = 语言文件词条数 + 硬编码候选数（过滤 log 后），done 按候选数推进。"""
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    _make_mod_jar(mods)                            # 语言文件 1 词条（key.hello → Hello World）
+    _make_jar_with_hardcode(mods, name="h.jar")    # 硬编码候选 "Hello World"
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: _FakeEngine())
+    # 固定硬编码候选数（过滤 log 后的真实候选；兜底引擎走全翻）。
+    # 只 h.jar 返回 2 条候选（_FakeEngine 都能翻译，避免 failed 干扰 total 断言）。
+    monkeypatch.setattr(
+        "app.auto_flow.scan_hardcoded_candidates",
+        lambda jar: ([{"text": "Hello World", "occurrences": 1, "context": []},
+                      {"text": "Welcome", "occurrences": 1, "context": []}]
+                     if jar.name == "h.jar" else []))
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang="en_us")
+    await run_auto_translation(state.id, req, None, store, work, outputs)
+    st = store.load(state.id)
+    assert st.status == "done"
+    # total = 语言文件 1 + 硬编码候选 2
+    assert st.total == 1 + 2
+    # done 按候选数推进：语言文件 1 条 + 硬编码 2 条都算已处理
+    assert st.done == 1 + 2
+    assert st.done <= st.total
+
+
+@pytest.mark.asyncio
+async def test_auto_llm_total_includes_all_candidates(tmp_path, monkeypatch):
+    """LLM 引擎：进度总量含全部硬编码候选（非只含 AI 判定可见），done 按候选数推进。"""
+    from app.translate.llm import LLMClient
+
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    _make_jar_with_hardcode(mods, name="h.jar")   # 硬编码候选 "Hello World"（无语言文件）
+    engine = LLMClient("https://x", "k", "m")
+    monkeypatch.setattr("app.auto_flow.create_engine", lambda cfg: engine)
+
+    async def fake_judge(engine, candidates, target):
+        return {"Hello World": "你好世界"}        # AI 判定 1 条可见
+
+    monkeypatch.setattr("app.auto_flow.ai_judge_translate", fake_judge)
+    store = TaskStore(tmp_path / "tasks")
+    state = store.new()
+    state.status = "running"
+    store.save(state)
+    work = tmp_path / "work"
+    work.mkdir()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    req = SimpleNamespace(path=str(tmp_path), target_lang="zh_cn", source_lang="en_us")
+    await run_auto_translation(state.id, req, None, store, work, outputs)
+    st = store.load(state.id)
+    assert st.status == "done"
+    # total = 硬编码候选数（无语言文件/文本源）
+    assert st.total == 1
+    # done 按候选数推进（AI 判定可见的 1 条）
+    assert st.done == 1
+    assert st.done <= st.total

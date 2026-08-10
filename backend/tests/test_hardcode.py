@@ -19,6 +19,7 @@ from app.hardcode import (
     scan_hardcoded_candidates,
     scan_hardcoded_strings,
 )
+from jawa.constants import String
 
 JAVA_SRC = '''
 public class HelloMod {
@@ -398,20 +399,19 @@ def test_replace_content_mismatch_restores_bytes(tmp_path, monkeypatch):
     assert "🎉 你好世界" not in found
 
 
-def test_replace_emoji_content_damage_restores(tmp_path):
-    """内容级校验（真实场景）：含 emoji 的译文被 jawa Modified-UTF8 编码静默丢字符。
+def test_replace_emoji_content_preserved(tmp_path):
+    """内容级修复（真实场景）：含 emoji 的译文不再被 jawa Modified-UTF8 静默丢字符。
 
-    jawa 的 encode_modified_utf8 对 U+10000+（emoji）无编码分支，静默丢弃；
-    替换后 String 数不变但内容已损坏。旧校验只比数量会误判成功，
-    内容级校验必须拦下：还原原字节 + failed_classes + replaced 不虚高。
+    jawa 的 encode_modified_utf8 对 U+10000+（emoji）无编码分支，save 静默丢弃；
+    自研 _rebuild_class 兜底用正确 MUTF-8（代理对）重编码，校验通过 → 替换成功。
     """
     jar = _make_test_jar(tmp_path)
     result = replace_hardcoded_strings(jar, {"Hello World": "🎉 你好世界"})
-    assert result["failed_classes"], "emoji 内容损坏应被内容级校验拦下并记入 failed_classes"
-    assert result["replaced"] == 0
+    assert result["failed_classes"] == []
+    assert result["replaced"] == 1
     found = scan_hardcoded_strings(jar)
-    assert "Hello World" in found          # 原字节已还原
-    assert "🎉 你好世界" not in found       # 损坏内容不得进输出 jar
+    assert "🎉 你好世界" in found          # emoji 完整保留
+    assert "Hello World" not in found
 
 
 # ---------- B 阶段：scan 候选带相邻常量上下文（供 AI 判断） ----------
@@ -860,3 +860,86 @@ async def test_ai_judge_empty_array_downgrades():
     assert result.unresolved == []
     assert calls["n"] == 2   # 1 批量 + 1 逐条降级
     await engine._client.aclose()
+
+
+# ---------- 自研 class 重建（_rebuild_class 兜底 jawa save 不可靠） ----------
+
+def _read_class_bytes(jar: Path, name: str = "HelloMod.class") -> bytes:
+    """从 jar 里读出指定 class 文件的原始字节。"""
+    with zipfile.ZipFile(jar) as zf:
+        return zf.read(name)
+
+
+def _rebuild_and_load_strings(tmp_path: Path, data: bytes,
+                              class_name: str = "HelloMod") -> list[str]:
+    """用 _rebuild_class 重建后，再用 jawa 重读该 class，返回 String 常量值列表。"""
+    work = tmp_path / "verify"
+    work.mkdir(exist_ok=True)
+    (work / f"{class_name}.class").write_bytes(data)
+    loader = hardcode._class_loader(work)
+    klass = loader[class_name]
+    return [c.string.value for c in klass.constants if isinstance(c, String)]
+
+
+def test_rebuild_class_replaces_string(tmp_path):
+    """_rebuild_class：字节级重建，命中 mapping 的 Utf8（被 String 引用）被替换，
+    String 常量数不变，其余常量池原样保留。"""
+    jar = _make_test_jar(tmp_path)
+    data = _read_class_bytes(jar)
+    rebuilt = hardcode._rebuild_class(data, {"Hello World": "你好世界"})
+    assert rebuilt != data, "重建后的字节应与原始不同"
+    strings = _rebuild_and_load_strings(tmp_path, rebuilt)
+    assert "你好世界" in strings
+    assert "Hello World" not in strings
+    assert len(strings) == 6  # Hello World/Welcome/iron_ingot/OK/mymod:item/com.example.Mod
+
+
+def test_rebuild_class_emoji_preserved(tmp_path):
+    """_rebuild_class：emoji 译文用正确 MUTF-8（代理对）编码，不丢字符（jawa 会丢）。"""
+    jar = _make_test_jar(tmp_path)
+    data = _read_class_bytes(jar)
+    rebuilt = hardcode._rebuild_class(data, {"Hello World": "🎉 你好世界"})
+    strings = _rebuild_and_load_strings(tmp_path, rebuilt)
+    assert "🎉 你好世界" in strings
+    assert "Hello World" not in strings
+
+
+def test_rebuild_class_untouched_strings_preserved(tmp_path):
+    """_rebuild_class：未命中 mapping 的 String 保持原文，class 可被 jawa 正常加载。"""
+    jar = _make_test_jar(tmp_path)
+    data = _read_class_bytes(jar)
+    rebuilt = hardcode._rebuild_class(data, {"Hello World": "你好世界"})
+    strings = _rebuild_and_load_strings(tmp_path, rebuilt)
+    assert "Welcome to the server" in strings
+    assert "iron_ingot" in strings
+
+
+def test_rebuild_class_invalid_magic_raises():
+    """_rebuild_class：非法 class（魔数错误）应抛 ValueError，不静默产出坏字节。"""
+    with pytest.raises(ValueError):
+        hardcode._rebuild_class(b"not a class file", {"x": "y"})
+
+
+def test_replace_success_when_jawa_save_unavailable(tmp_path, monkeypatch):
+    """jawa save 抛 NotImplementedError（复杂 class 场景，如 voxy VoxyConfigScreenPages）
+    → 自研 _rebuild_class 兜底，替换仍成功，不记 failed_classes。"""
+    def boom(self, *a, **kw):
+        raise NotImplementedError("模拟 jawa save 对复杂 class 不支持")
+    monkeypatch.setattr("jawa.cf.ClassFile.save", boom)
+    jar = _make_test_jar(tmp_path)
+    result = replace_hardcoded_strings(jar, {"Hello World": "你好世界"})
+    assert result["failed_classes"] == []
+    assert result["replaced"] == 1
+    found = scan_hardcoded_strings(jar)
+    assert "你好世界" in found
+    assert "Hello World" not in found
+
+
+def test_is_hardcode_translatable_long_gui_text():
+    """长度上限放宽到 200：101+ 字符的真实 GUI 说明不再被误过滤（voxy 实测）。"""
+    long_gui = ("Extends the cloud distance where chunks will still be loaded. "
+                "Increases memory usage and render distance far away from the player.")
+    assert len(long_gui) > 100
+    assert is_hardcode_translatable(long_gui)
+    # 超长技术串（>200）仍排除
+    assert not is_hardcode_translatable("x" * 201)
