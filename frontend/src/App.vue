@@ -152,7 +152,7 @@ function openSetup() { showSetup.value = true }
       <span class="spacer"></span>
       <div class="conn" :class="backendStatus">
         <span class="dot"></span>
-        <span>{{ backendStatus === 'ok' ? '已连接' : backendStatus === 'fail' ? '未连接' : '检测中…' }}</span>
+        <span>{{ backendStatus === 'ok' ? '已连接后端' : backendStatus === 'fail' ? '未连接后端' : '检测中…' }}</span>
       </div>
       <button class="btn" @click="openSetup">⚙ 设置</button>
     </header>
