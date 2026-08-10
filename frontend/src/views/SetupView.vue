@@ -111,10 +111,11 @@ onMounted(async () => {
     if (cfg.engine) engine.value = cfg.engine
     if (cfg.provider && PROVIDERS[cfg.provider]) provider.value = cfg.provider
     if (cfg.target_lang) targetLang.value = cfg.target_lang
-    if (cfg.llm) {
-      baseUrl.value = cfg.llm.base_url || ''
-      model.value = cfg.llm.model || ''
-    }
+    // llm 参数：config 有则回填；否则/为空用厂商预置默认（默认地址/模型，
+    // 玩家无需手动填——用户反馈「默认地址和模型应是默认保存，非玩家手动」）
+    const prov = PROVIDERS[provider.value] || {}
+    baseUrl.value = (cfg.llm && cfg.llm.base_url) || prov.base_url || ''
+    model.value = (cfg.llm && cfg.llm.model) || prov.model || ''
     // 并发数回填：未配置（None）时保持默认 5
     if (cfg.concurrency) concurrency.value = cfg.concurrency
     // O2：本地未存 key 时，问后端 keyring 是否已配置过——已配置则回显占位符，不空白
