@@ -400,6 +400,8 @@ async def run_auto_translation(task_id: str, req: AutoRequest, cfg: AppConfig,
                 except Exception as exc:
                     # 失败 → 仅计 failed 并跳过本批（不再累加 done，
                     # 避免异常路径 done+failed 双计超 total，B 审查 🟡4）
+                    # total 补上失败候选数（保持 done+failed <= total 的进度约束）
+                    state.total += len(cands)
                     state.failed += len(cands)
                     state.progress.append({"status": "warn",
                                            "error": f"{jar.name} AI 判断硬编码失败：{exc}"})
