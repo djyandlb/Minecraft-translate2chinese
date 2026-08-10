@@ -79,9 +79,11 @@ async function runTest(which) {
   testResult.value = ''
   testOk.value = null
   try {
-    // 传当前表单值（base_url/model/api_key），后端仅本次测试使用，不落盘
+    // 传当前表单值（base_url/model/api_key），后端仅本次测试使用，不落盘。
+    // 占位符「已配置（••••）」不是真实 key：不传，让后端回退 keyring 读取（否则占位符当 key → 401 链接失效）
     const body = which === 'llm'
-      ? { engine: 'llm', llm: { base_url: baseUrl.value.trim(), model: model.value.trim() }, api_key: apiKey.value || undefined }
+      ? { engine: 'llm', llm: { base_url: baseUrl.value.trim(), model: model.value.trim() },
+          api_key: (apiKey.value && apiKey.value !== API_KEY_PLACEHOLDER) ? apiKey.value : undefined }
       : { engine: 'machine' }
     const r = await testConnection(body)
     testOk.value = !!r.ok
