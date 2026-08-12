@@ -777,6 +777,17 @@ class AutoFlow:
             if enqueue_fn is None:
                 self.memory.save()
             self.store.save(self.state)
+            # 断点续联实时保存（用户诉求彻底修复）：_save_progress 原本只在任务终态
+            # finally 调一次，而桌面版关窗是 os._exit(0) 直接杀进程、finally 不执行 →
+            # progress 从不落盘 → 重启后「未完成项目」列表为空（无法续联 / 名称回退哈希）。
+            # 这里每批末节流（≥2s）写一次 progress：项目指纹 + 真实名 + 原始路径 + 实时进度。
+            _now = time.time()
+            if _now - getattr(self, "_last_progress_save", 0) > 2:
+                try:
+                    self._save_progress()
+                except Exception:
+                    pass
+                self._last_progress_save = _now
             pending.clear()
 
         for item in items:
