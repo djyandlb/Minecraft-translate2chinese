@@ -273,22 +273,11 @@ function toggleFold(name, ev) {
   const foldEl = headEl && headEl.closest ? headEl.closest('.fold') : null
   openFold.value = wasOpen ? '' : name
   nextTick(() => {
-    // 应用是顶层窗口（无父页面）→ scrollIntoView 精准滚到折叠项头部，无跨页面副作用
-    if (window.self === window.top) {
-      const target = wasOpen ? flowPanelRef.value : (foldEl || flowPanelRef.value)
-      target?.scrollIntoView({ block: 'start' })
-      return
-    }
-    // 嵌在 iframe（宣传页演示）→ scrollIntoView 会沿祖先链跨 frame 冒泡滚动父页面，
-    // 改用手动改 iframe 内滚动容器的 scrollTop（.task-panel，overflow:auto），物理切断父子联系
-    const scrollEl = flowPanelRef.value?.closest('.task-panel') || flowPanelRef.value
-    if (!scrollEl) return
-    if (wasOpen) { scrollEl.scrollTop = 0; return }   // 收起 → 回工作区顶部
-    if (!foldEl) return
-    const tr = foldEl.getBoundingClientRect()
-    const sr = scrollEl.getBoundingClientRect()
-    const padTop = parseFloat(getComputedStyle(scrollEl).paddingTop) || 0
-    scrollEl.scrollTop = Math.max(0, scrollEl.scrollTop + (tr.top - sr.top) - padTop)
+    // 真实应用是顶层窗口（无父页面）：scrollIntoView 平滑滚到折叠项头部。
+    // 宣传页 iframe 的滚动隔离由宣传页自己的脚本覆写 scrollIntoView 实现，
+    // 本文件只保留真实应用的逻辑，不掺杂宣传页专用代码。
+    const target = wasOpen ? flowPanelRef.value : (foldEl || flowPanelRef.value)
+    target?.scrollIntoView({ block: 'start', behavior: 'smooth' })
   })
 }
 

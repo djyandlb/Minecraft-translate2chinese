@@ -29,7 +29,7 @@ const LANGUAGES = [
 // keyring 已配置时的回显占位符：避免用户每次误以为要重输（保存时跳过该占位值）
 const API_KEY_PLACEHOLDER = '已配置（••••）'
 // 应用版本号：打包时同步更新（设置页「配置」标题右侧淡灰小字展示）
-const APP_VERSION = '1.0.1'
+const APP_VERSION = '1.0.2'
 
 const engine = ref('llm')            // llm(用户 API) | free(免费 API) | machine(机翻)，三选项互斥
 const provider = ref('DeepSeek')
@@ -217,6 +217,10 @@ async function runThroughputTest() {
 // 回填配置期间为 true：applyProvider 只在用户手动切换厂商下拉时覆盖 base_url/model，
 // 避免 onMounted 回填用户保存过的自定义值时被厂商预置覆盖
 let loading = true
+// 配置读取成功标记：getConfig 失败（后端未就绪）时保持 false，autoSave/saveAndClose 据此
+// 拒绝保存默认值——否则 onefile 冷启动期间前端先加载、后端还没起，回填失败 provider 是
+// 默认 DeepSeek，用户一保存就把已有 config.json（stepfun/自定义等）覆盖成 deepseek（用户反馈）
+let loaded = false
 
 function applyProvider(name) {
   if (loading) return
@@ -249,7 +253,7 @@ function buildConfigBody() {
 }
 
 async function autoSave() {
-  if (loading) return
+  if (loading || !loaded) return
   clearTimeout(saveTimer)
   saveTimer = setTimeout(async () => {
     try {
@@ -311,6 +315,7 @@ onMounted(async () => {
     }
     await refreshCacheSize()      // 回填配置后顺带加载缓存占用
     await refreshCfpaStatus()     // 加载 CFPA 社区词库状态
+    loaded = true                 // 回填成功才允许 autoSave 写盘（防后端未就绪时用默认覆盖已有配置）
   } catch (e) {
     tip.value = '读取后端配置失败（后端未启动？将使用默认值）'
   } finally {
@@ -329,6 +334,11 @@ function onKeyFocus() {
 async function saveAndClose() {
   saving.value = true
   error.value = ''
+  if (!loaded) {
+    error.value = '无法保存：后端配置读取失败，请确认应用已完全启动后重试'
+    saving.value = false
+    return
+  }
   try {
     // 修复：api_key 只写后端 keyring（AI 引擎真正读取的地方），不再落 localStorage——
     // 明文存 key 冗余且不安全（keyring 是权威，localStorage 这份拷贝毫无必要）

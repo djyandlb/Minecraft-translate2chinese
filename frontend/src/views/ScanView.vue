@@ -154,12 +154,14 @@ async function onFilePicked(e) {
             <template v-if="job.detectResult.summary.total_hardcoded != null"> · 硬编码 {{ job.detectResult.summary.total_hardcoded }}</template>
           </span>
           <span v-else-if="job.detectResult && job.detectResult.source_lang" class="job-summary">源语言 {{ job.detectResult.source_lang }}</span>
-          <!-- 断点续联标记：识别后即显示（用户诉求），该项目有记忆/进度 → 可续联。
-               修复（recheck）：任务完成后隐藏——detectResult 是入队时旧快照（当时有记忆），
-               done 后仍显示「可断点续联 X%」与「完成 ✓」矛盾（用户实测） -->
-          <span v-if="job.detectResult?.resume?.available && job.status !== 'done'" class="resume-tag"
-                :title="`项目记忆 ${job.detectResult.resume.memory_count} 条${job.detectResult.resume.progress_pct != null ? `，上次进度 ${job.detectResult.resume.progress_pct}%` : ''}`">
-            可断点续联{{ job.detectResult.resume.progress_pct != null ? ` · ${job.detectResult.resume.progress_pct}%` : '' }}
+          <!-- 断点续联标记：识别后即显示，**点击即续联**（用户诉求：不是死条目）。
+               修复：任务完成/运行中隐藏——done 后仍显示与「完成 ✓」矛盾；running 时点续联会移除运行中任务。
+               点击 @click.stop 阻止冒泡到任务行 select-job，直接触发续联。 -->
+          <span v-if="job.detectResult?.resume?.available && job.status !== 'done' && job.status !== 'running'"
+                class="resume-tag act" role="button" tabindex="0"
+                :title="`点击续联：项目记忆 ${job.detectResult.resume.memory_count} 条${job.detectResult.resume.progress_pct != null ? `，上次进度 ${job.detectResult.resume.progress_pct}%` : ''}`"
+                @click.stop="emit('resume-project', { path: job.path, name: job.name })">
+            可断点续联{{ job.detectResult.resume.progress_pct != null ? ` · ${job.detectResult.resume.progress_pct}%` : '' }} → 点击续联
           </span>
         </div>
         <span class="job-kind">{{ KIND_TEXT[job.kind] || (job.kind || '未知') }}</span>
@@ -268,6 +270,9 @@ async function onFilePicked(e) {
   background: rgba(63, 101, 72, .14); border: 1px solid var(--accent); color: var(--accent);
   cursor: default;
 }
+/* 可点击续联：hover 反色提示可操作 */
+.resume-tag.act { cursor: pointer; text-decoration: underline; }
+.resume-tag.act:hover { background: var(--accent); color: #f5f1e6; }
 .job-kind { color: var(--text-dim); font-size: 12px; flex-shrink: 0; }
 .job-status { font-size: 12px; flex-shrink: 0; color: var(--text-dim); }
 .job-row.st-running .job-status { color: var(--accent); }
