@@ -1457,3 +1457,24 @@ async def test_auto_modpack_pack_format_from_mc_version(tmp_path, monkeypatch):
     pk = _pack_zip(outputs / state.id)
     meta = json.loads(pk["resourcepacks/模组汉化资源包/pack.mcmeta"])
     assert meta["pack"]["pack_format"] == 32, f"1.20.6 应写 pack_format 32，实际 {meta['pack']}"
+
+
+def test_term_protect_unifies_compound_terms(tmp_path):
+    """术语保护（通用词级一致）：已确认英文术语 Zeno 无论出现在哪个条目（组合词/变体）
+    都被保护成占位符 → 还原为规范译名「泽诺」，杜绝 AI 翻成 zero/泽昂 等变体。
+    修复 recheck：名称归一化只认同一原文，词级术语保护补组合词（Zeno Red / Zeno's）。"""
+    flow = _make_flow(tmp_path)
+    flow.base_terms = {"Zeno": "泽诺"}
+    flow.project_terms = {}
+    # 组合词：Zeno Red → 占位符 + 保留其余
+    masked, mapping = flow._protect_terms("Zeno Red Armor")
+    assert masked == "%%ZT0%% Red Armor", f"Zeno 应被保护，实际 {masked}"
+    assert mapping["%%ZT0%%"] == "泽诺"
+    # 模拟 AI 保留占位符翻译 → 还原为泽诺
+    assert flow._restore_terms("%%ZT0%% 红 护甲", mapping) == "泽诺 红 护甲"
+    # 变体：Zeno's → Zeno 被保护（' 非字母，词边界匹配）
+    masked2, _ = flow._protect_terms("Zeno's Sword")
+    assert "Zeno" not in masked2, "Zeno's 里的 Zeno 应被保护"
+    # 词边界不误伤：Zenith 不匹配 Zeno
+    masked3, _ = flow._protect_terms("Zenith Peak")
+    assert "Zenith" in masked3, "Zenith 不应被误保护"

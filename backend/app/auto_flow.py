@@ -281,8 +281,14 @@ class AutoFlow:
         # 术语统一（用户诉求：专有名词翻译必须统一，否则乱）：
         # 用户术语表 + 记忆里已确认的短术语对照一起注入 prompt，让 AI 翻译时沿用已确认译名，
         # 同一专有名词全篇一个译名（防一词多译）。memory 提取的术语是短词条（专有名词/物品名）。
-        self.glossary_prompt = term_inject_prompt(load_glossary(work_dir / "glossary.json"))
+        # 基础术语表（**历史确认**：用户术语表 + 记忆提取的短术语）——词级术语覆盖
+        #（_apply_term_override）用它，让历史确认的 Zeno→泽诺 对本次「Zeno Red」这类组合词
+        # 也生效（对齐名称统一化：名称归一化只认同一原文，词级覆盖补组合词/变体）。
+        _gloss = load_glossary(work_dir / "glossary.json")
+        self.base_terms: dict[str, str] = dict(_gloss)
+        self.glossary_prompt = term_inject_prompt(_gloss)
         _mem_terms = extract_terms(self.memory.data, req.target_lang, max_terms=150)
+        self.base_terms.update(_mem_terms)
         if _mem_terms:
             _terms_str = "\n".join(f"{k} => {v}" for k, v in _mem_terms.items())
             self.glossary_prompt = (self.glossary_prompt + "\n\n"
@@ -480,8 +486,56 @@ class AutoFlow:
         self.store.save(self.state)
         return g
 
+    def _term_map(self) -> dict[str, str]:
+        """当前生效术语表（历史 base_terms + 本次 project_terms），筛出「英文 → 纯中文」对照，
+        供术语保护用。筛选：term 含英文（≥2 字符）、norm 无英文（纯目标语言译名，如 泽诺）。
+        """
+        terms = {**getattr(self, "base_terms", {}), **self.project_terms}
+        out: dict[str, str] = {}
+        for t, n in terms.items():
+            if not t or not n or t == n:
+                continue
+            if len(t) < 2 or not re.search(r"[A-Za-z]", t):
+                continue
+            if re.search(r"[A-Za-z]", n):
+                continue   # 译名仍含英文（保留原文决策）→ 保护无意义
+            out[t] = n
+        return out
+
+    def _protect_terms(self, text: str) -> tuple[str, dict[str, str]]:
+        """**术语保护**（通用词级一致核心）：把 source 里已确认英文术语替换为占位符，
+        AI 翻译时不碰占位符 → 同一英文词（Zeno）无论出现在哪个条目（Zeno Red / Zeno's）
+        都 100% 还原为规范译名（泽诺），杜绝 AI 翻成 zero/泽昂 等变体。按长度降序组合正则
+        一次扫描（长词优先，防子串冲突）；词边界匹配防误伤（Zeno 不碰 Zenith）。
+        """
+        terms = self._term_map()
+        if not terms:
+            return text, {}
+        pattern = ("(?<![A-Za-z])(?:"
+                   + "|".join(re.escape(t) for t in sorted(terms, key=len, reverse=True))
+                   + ")(?![A-Za-z])")
+        mapping: dict[str, str] = {}
+
+        def _repl(m, _terms=terms, _mapping=mapping):
+            ph = f"%%ZT{len(_mapping)}%%"
+            _mapping[ph] = _terms[m.group(0)]
+            return ph
+
+        return re.sub(pattern, _repl, text), mapping
+
+    def _restore_terms(self, text: str, mapping: dict[str, str]) -> str:
+        """还原占位符为规范译名（AI 保留占位符 → 替换为泽诺）。"""
+        out = text
+        for ph, norm in mapping.items():
+            out = out.replace(ph, norm)
+        return out
+
     async def _engine_translate(self, texts: list[str], reasons=None, **kw) -> tuple[list[str], dict]:
         """引擎批量翻译包装：返回 (results, meta)。
+
+        **术语保护**：翻译前把已确认英文术语替换为占位符（AI 不碰 → 词级一致），翻译后还原
+        规范译名——同一英文词全项目统一译法（用户诉求：所有一样的英文翻译成一样的中文）。
+        保护不影响 it["source"]/memory 映射（只在传给 AI 的文本上做）。
 
         meta 携带本次调用的失败标记/错误类别/致命错误（per-call 隔离）——修复并行管道
         共享同一 engine 实例时实例属性 clear() 互相污染（请求失败被误判「AI 故意保留」
@@ -490,14 +544,27 @@ class AutoFlow:
         """
         meta = {}
         reasons = list(reasons) if reasons else None
-        if isinstance(self.engine, LLMClient):
+        # 术语保护仅 LLM 引擎生效（修复 recheck）：机翻（Google）可能把 %%ZTn%% 占位符当普通
+        # 文本翻译破坏还原，且机翻场景无术语表意义（一致性靠 memory 命中）
+        _is_llm = isinstance(self.engine, LLMClient)
+        protected = [self._protect_terms(t) for t in texts] if _is_llm else [(t, {}) for t in texts]
+        masked = [p[0] for p in protected]
+        if _is_llm:
             results = await self.engine.translate_batch(
-                texts, self.req.target_lang, meta=meta, feedback=reasons or None, **kw)
+                masked, self.req.target_lang, meta=meta, feedback=reasons or None, **kw)
         else:
-            results = await self.engine.translate_batch(texts, self.req.target_lang, **kw)
+            results = await self.engine.translate_batch(masked, self.req.target_lang, **kw)
             meta = {"failed": set(getattr(self.engine, "_batch_failed_texts", ())),
                     "kind": getattr(self.engine, "_last_error_kind", "other"),
                     "fatal": getattr(self.engine, "_fatal_error", None)}
+        results = [self._restore_terms(g, p[1]) for g, p in zip(results, protected)]
+        # 失败集还原（修复 recheck）：保护后 LLMClient/machine 记录的 failed 是 **masked** 文本
+        #（含占位符），上层用原始 source 比对 failed 集会误判成功/失败。还原为原始 source。
+        if meta.get("failed"):
+            orig_by_masked: dict[str, str] = {}
+            for p, t in zip(protected, texts):
+                orig_by_masked.setdefault(p[0], t)
+            meta["failed"] = {orig_by_masked.get(f, f) for f in meta["failed"]}
         return results, meta
 
     async def _wait_network_retry(self, translate_fn, texts: list[str],
@@ -1008,6 +1075,9 @@ class AutoFlow:
         # 后续与规范译名不一致的（AI 自由发挥/并发竞态）在此覆盖统一——审查通过
         # 的前提是「译名一致」。归一化后的译名写 memory → 后续条目命中直接沿用。
         translated = self._apply_name_norm(it.get("source") or "", translated)
+        # 修复（recheck）：词级术语覆盖——已确认英文术语（Zeno→泽诺）出现在译文里（AI 保留
+        # 原文/变体）时强制替换为规范译名，管到「Zeno Red」这类组合词（名称归一化只认同一原文）
+        translated = self._apply_term_override(translated)
         # 修复：sink 用 None 判断（依赖空 dict falsy 脆弱，Agent 审查确认）
         sink = it.get("sink")
         if sink is None:
@@ -1093,6 +1163,31 @@ class AutoFlow:
         elif translated != src and self._is_target_lang(translated, self.req.target_lang):
             self._norm_terms[src] = translated
         return translated
+
+    def _apply_term_override(self, translated: str) -> str:
+        """译文**词级**术语覆盖：已确认的英文术语（project_terms 的 Zeno→泽诺）出现在译文里时，
+        替换为规范译名——修「Zeno Red」被 AI 翻成「zero 红 / Zeno 红」而不统一的场景。
+
+        修复（recheck）：名称归一化是「完整原文精确匹配」，只对同一原文生效；「Zeno」登记的
+        规范译名管不到「Zeno Red」这种含该词的条目（AI 把 Zeno 保留原文/翻成音近词）。
+        这里按**词边界**把译文里的已确认英文术语替换为规范译名（\bZeno\b 不匹配 Zenith，
+        长度 ≥3 防误伤单字母；非英文术语如路径/代码不替换）。
+        术语表 = **历史确认**（base_terms：用户术语表 + 记忆提取）+ **本次确认**（project_terms）
+        ——历史 Zeno→泽诺 对本次组合词同样生效。
+        """
+        out = translated
+        terms = {**getattr(self, "base_terms", {}), **self.project_terms}
+        for term, norm in terms.items():
+            if not term or not norm or term == norm:
+                continue                       # 保留原文决策 / 空
+            if len(term) < 3 or not re.search(r"[A-Za-z]", term):
+                continue                       # 太短 / 非英文术语（路径/代码）不替换
+            if re.search(r"[A-Za-z]", norm):
+                continue                       # norm 仍含英文（保留原文决策/未翻出）→ 替换无意义；
+                                               # 只有 norm 是纯目标语言（泽诺）才替换译文里的英文术语
+            # 词边界匹配：Zeno → 泽诺（不匹配 Zenith/Zenithal 的 Zen 前缀）
+            out = re.sub(rf"(?<![A-Za-z]){re.escape(term)}(?![A-Za-z])", norm, out)
+        return out
 
     def _record_consistency(self, source: str, translated: str) -> None:
         """一致性统计累加：记录「原文→译名」出现次数（收尾归一化选主译名用）。
@@ -2071,8 +2166,11 @@ class AutoFlow:
                         pass
             # 修复：切到项目记忆后重建术语注入（__init__ 用全局记忆生成——续联应注入本项目
             # 记忆的专有名词对照，否则一词多译，Agent 审查确认）
-            self.glossary_prompt = term_inject_prompt(load_glossary(self.work_dir / "glossary.json"))
+            _gloss2 = load_glossary(self.work_dir / "glossary.json")
+            self.base_terms = dict(_gloss2)   # 重建基础术语表（切项目记忆后）
+            self.glossary_prompt = term_inject_prompt(_gloss2)
             _proj_terms = extract_terms(self.memory.data, self.req.target_lang, max_terms=150)
+            self.base_terms.update(_proj_terms)
             if _proj_terms:
                 _terms_str = "\n".join(f"{k} => {v}" for k, v in _proj_terms.items())
                 self.glossary_prompt = (self.glossary_prompt + "\n\n"
