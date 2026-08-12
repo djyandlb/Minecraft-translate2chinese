@@ -265,12 +265,23 @@ async function doOpenOutput(id) {
 
 // —— 空态三折叠（实装）：动态效果区常态显示 + 使用说明/免责声明手风琴（同时只开一个）——
 const openFold = ref('')   // '' 全收起 / 'usage' 使用说明 / 'disclaimer' 免责声明
-function toggleFold(name) {
-  openFold.value = openFold.value === name ? '' : name
-  // 修复：切换折叠后右栏滚回顶部——从该部分的顶端阅读，不保留上次展开的滚动进度
+function toggleFold(name, ev) {
+  const wasOpen = openFold.value === name
+  openFold.value = wasOpen ? '' : name
   nextTick(() => {
+    // 修复（recheck）：点开折叠项 → 滚动到**该项头部**阅读（不在中段/不在 hero 开头）；
+    // 收起 → 回到工作区顶部。
+    const target = wasOpen ? null : (ev?.currentTarget?.closest('.fold') || null)
     const scrollEl = flowPanelRef.value?.closest('.task-panel') || flowPanelRef.value
-    if (scrollEl) scrollEl.scrollTop = 0
+    if (scrollEl) {
+      if (target) {
+        const tr = target.getBoundingClientRect()
+        const sr = scrollEl.getBoundingClientRect()
+        scrollEl.scrollTop += tr.top - sr.top   // 滚动到折叠项头部（精确，不受 offsetParent 影响）
+      } else {
+        scrollEl.scrollTop = 0
+      }
+    }
   })
 }
 
@@ -409,7 +420,7 @@ onUnmounted(() => {
 
       <!-- 使用说明（折叠） -->
       <div class="fold" :class="{ open: openFold === 'usage' }">
-        <div class="fold-head" @click="toggleFold('usage')">
+        <div class="fold-head" @click="toggleFold('usage', $event)">
           <span class="mark" :class="{ on: openFold === 'usage' }"></span>
           <span class="t">使用说明 · 全流程</span>
           <span class="arrow">▼</span>
@@ -460,7 +471,7 @@ onUnmounted(() => {
 
       <!-- 免责声明（折叠） -->
       <div class="fold" :class="{ open: openFold === 'disclaimer' }">
-        <div class="fold-head" @click="toggleFold('disclaimer')">
+        <div class="fold-head" @click="toggleFold('disclaimer', $event)">
           <span class="mark" :class="{ on: openFold === 'disclaimer' }"></span>
           <span class="t">免责声明</span>
           <span class="arrow">▼</span>

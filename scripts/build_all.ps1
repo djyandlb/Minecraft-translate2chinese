@@ -17,6 +17,9 @@ function Find-ISCC {
         "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
         "C:\Program Files\Inno Setup 6\ISCC.exe"
     )
+    # 修复：winget 装 Inno Setup 默认到用户级（%LOCALAPPDATA%\Programs）——build_all 漏检
+    $userInno = Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"
+    if (Test-Path $userInno) { $candidates += $userInno }
     foreach ($c in $candidates) {
         if (Test-Path $c) { return $c }
     }
