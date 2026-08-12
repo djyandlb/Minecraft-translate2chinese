@@ -1120,26 +1120,38 @@ async def cfpa_download(payload: dict):
             "count": g["count"], "size_mb": g["size_mb"]}
 
 
-# GitHub 镜像代理前缀（国内可访问，官方直连失败时依次尝试，总能下到）。
+# GitHub 镜像代理前缀（国内可访问，官方直连失败时并发尝试，总能下到）。
 # 代理的是 github.com / api.github.com / raw 路径；download URL 形如
 # https://github.com/<owner>/<repo>/releases/download/<tag>/<asset> 同样可代理。
+# 修复（recheck）：不同镜像对 api.github.com 的支持不一，多发几个总有能通的。
 _GITHUB_PROXIES = [
-    "",                       # 官方直连
-    "https://ghfast.top/",    # ghfast 镜像
-    "https://gh-proxy.com/",  # gh-proxy 镜像
-    "https://ghproxy.net/",   # ghproxy.net 镜像
+    "",                              # 官方直连
+    "https://ghfast.top/",           # ghfast 镜像
+    "https://gh-proxy.com/",         # gh-proxy 镜像
+    "https://ghproxy.net/",          # ghproxy.net 镜像
+    "https://mirror.ghproxy.com/",   # mirror.ghproxy 镜像
+    "https://ghps.cc/",              # ghps 镜像
+    "https://gh.ddlc.top/",          # ddlc 镜像
+    "https://ghproxy.cc/",           # ghproxy.cc 镜像
 ]
 
 
 async def _github_get(client: httpx.AsyncClient, url: str) -> httpx.Response | None:
-    """带多镜像代理的 GET：官方 + 各镜像依次尝试，第一个 200 返回；全失败返回 None。"""
-    for prefix in _GITHUB_PROXIES:
+    """带多镜像代理的 GET：**官方 + 全部镜像并发尝试**（gather 取第一个 200，比串行快得多），
+    全失败返回 None。api 小请求并发无压力；下载大文件也并发试，取先到者。"""
+    async def _one(prefix: str):
         try:
-            resp = await client.get(f"{prefix}{url}", timeout=20)
+            resp = await client.get(f"{prefix}{url}", timeout=10)
             if resp.status_code == 200:
                 return resp
         except Exception:
-            continue
+            pass
+        return None
+
+    results = await asyncio.gather(*(_one(p) for p in _GITHUB_PROXIES))
+    for r in results:
+        if r is not None:
+            return r
     return None
 
 
@@ -1168,20 +1180,63 @@ async def _github_latest_jar(repo: str, asset_filter) -> tuple[str, bytes] | Non
     return None
 
 
+def _internal_data_dir() -> Path:
+    """内置资源目录（源码 backend/app/data；frozen _MEIPASS/app/data）。"""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / "data"
+
+
+def _bundled_resource_version(subdir: str) -> str:
+    """读内置 / 更新版 jar 的版本号（i18n/vp：fabric.mod.json 或 mods.toml 的 version）。
+    优先应用目录更新版，否则内置。无版本元数据返回空串。"""
+    import zipfile as _zf
+    for base in (update_dir() / subdir, _internal_data_dir() / subdir):
+        if not base.is_dir():
+            continue
+        for jar in sorted(base.glob("*.jar")):
+            try:
+                with _zf.ZipFile(jar) as zf:
+                    names = zf.namelist()
+                    if "fabric.mod.json" in names:
+                        d = json.loads(zf.read("fabric.mod.json"))
+                        return str(d.get("version") or "")
+                    for t in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"):
+                        if t in names:
+                            raw = zf.read(t).decode("utf-8", "replace")
+                            for line in raw.splitlines():
+                                if line.strip().startswith("version="):
+                                    return line.split("=", 1)[1].strip()
+            except Exception:
+                continue
+    return ""
+
+
+def _normalize_version(v: str) -> str:
+    """版本号归一化：去 v 前缀 / 非版本字符，取 x.y(.z) 形式；无则小写原文。"""
+    m = re.search(r"(\d+\.\d+(?:\.\d+)?)", str(v or ""))
+    return m.group(1) if m else str(v or "").strip().lower()
+
+
 async def _check_update_github(repo: str, asset_filter, subdir: str, prefix: str) -> dict:
-    """GitHub release 检查更新：最新 tag vs 应用目录已下载版本；有更新下载到应用目录
+    """GitHub release 检查更新（版本对比）：源最新 tag vs **内置版本** + 应用目录已下载版本，
+    一样就不下载（用户诉求：内置就是当前版没必要重复下）。有更新下载到应用目录
     data/{subdir}/（持久，清 temp 缓存不删），没更新/没连上给明确状态可重试。"""
     found = await _github_latest_jar(repo, asset_filter)
     if not found:
         return {"ok": False, "status": "unreachable",
                 "message": "无法连接更新源（网络/代理），请重试"}
     tag, data = found
+    src_ver = _normalize_version(tag)
+    bundled_ver = _normalize_version(_bundled_resource_version(subdir))
     d = update_dir() / subdir
     ver_file = d / "version.txt"
-    local_ver = ver_file.read_text(encoding="utf-8").strip() if ver_file.exists() else ""
-    if local_ver == tag:
+    local_ver = _normalize_version(
+        ver_file.read_text(encoding="utf-8").strip()) if ver_file.exists() else ""
+    # 版本对比：源版本 == 内置版本 或 应用目录已下载版本 → 已最新不下载
+    if src_ver and (src_ver == bundled_ver or (local_ver and src_ver == local_ver)):
+        display = f"内置 {bundled_ver}" if src_ver == bundled_ver else src_ver
         return {"ok": True, "status": "up_to_date", "version": tag,
-                "message": f"已是最新版（{tag}），无需更新"}
+                "message": f"已是最新（{display}），无需更新"}
     d.mkdir(parents=True, exist_ok=True)
     try:
         for old in d.glob("*.jar"):
