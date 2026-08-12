@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from app.archive import archive_fingerprint, dir_fingerprint, extract_cached, is_archive
-from app.auto_flow import run_auto_translation
+from app.auto_flow import RUNNING_FLOWS, _flows_lock, run_auto_translation
 from app.cfpa import (download_cfpa, get_cfpa_progress, list_bundled_versions,
                       load_cfpa, update_dir)
 from app.config import AppConfig
@@ -129,6 +129,20 @@ def post_config(payload: dict):
     # extracted 大缓存（整合包解压，可达数百 MB）不迁移（指纹缓存断了下次自动重解压）。
     if new_cache != old_cache:
         _switch_work_dir(new_cache)
+    # 运行中任务热更新吞吐（用户诉求：翻译中切换吞吐档位立即生效——改属性，
+    # LLMClient 下一次 translate_batch 即按新并发/批次跑，无需重启任务）
+    _cc = payload.get("concurrency")
+    _bs = payload.get("batch_size")
+    if _cc or _bs:
+        try:
+            with _flows_lock:
+                for _flow in list(RUNNING_FLOWS.values()):
+                    try:
+                        _flow.set_throughput(concurrency=_cc, batch_size=_bs)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     return cfg.data
 
 

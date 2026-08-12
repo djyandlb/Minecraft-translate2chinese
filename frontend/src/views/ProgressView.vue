@@ -265,12 +265,30 @@ async function doOpenOutput(id) {
 
 // —— 空态三折叠（实装）：动态效果区常态显示 + 使用说明/免责声明手风琴（同时只开一个）——
 const openFold = ref('')   // '' 全收起 / 'usage' 使用说明 / 'disclaimer' 免责声明
-function toggleFold(name) {
-  openFold.value = openFold.value === name ? '' : name
-  // 修复：切换折叠后右栏滚回顶部——从该部分的顶端阅读，不保留上次展开的滚动进度
+function toggleFold(name, ev) {
+  const wasOpen = openFold.value === name
+  // 同步捕获当前折叠项（ev.currentTarget 在事件回调返回后会被浏览器置为 null，
+  // 绝不能拖到 nextTick 异步回调里再访问——之前"只到中段/不滚"就是它害的）
+  const headEl = ev?.currentTarget
+  const foldEl = headEl && headEl.closest ? headEl.closest('.fold') : null
+  openFold.value = wasOpen ? '' : name
   nextTick(() => {
+    // 应用是顶层窗口（无父页面）→ scrollIntoView 精准滚到折叠项头部，无跨页面副作用
+    if (window.self === window.top) {
+      const target = wasOpen ? flowPanelRef.value : (foldEl || flowPanelRef.value)
+      target?.scrollIntoView({ block: 'start' })
+      return
+    }
+    // 嵌在 iframe（宣传页演示）→ scrollIntoView 会沿祖先链跨 frame 冒泡滚动父页面，
+    // 改用手动改 iframe 内滚动容器的 scrollTop（.task-panel，overflow:auto），物理切断父子联系
     const scrollEl = flowPanelRef.value?.closest('.task-panel') || flowPanelRef.value
-    if (scrollEl) scrollEl.scrollTop = 0
+    if (!scrollEl) return
+    if (wasOpen) { scrollEl.scrollTop = 0; return }   // 收起 → 回工作区顶部
+    if (!foldEl) return
+    const tr = foldEl.getBoundingClientRect()
+    const sr = scrollEl.getBoundingClientRect()
+    const padTop = parseFloat(getComputedStyle(scrollEl).paddingTop) || 0
+    scrollEl.scrollTop = Math.max(0, scrollEl.scrollTop + (tr.top - sr.top) - padTop)
   })
 }
 
@@ -409,7 +427,7 @@ onUnmounted(() => {
 
       <!-- 使用说明（折叠） -->
       <div class="fold" :class="{ open: openFold === 'usage' }">
-        <div class="fold-head" @click="toggleFold('usage')">
+        <div class="fold-head" @click="toggleFold('usage', $event)">
           <span class="mark" :class="{ on: openFold === 'usage' }"></span>
           <span class="t">使用说明 · 全流程</span>
           <span class="arrow">▼</span>
@@ -460,7 +478,7 @@ onUnmounted(() => {
 
       <!-- 免责声明（折叠） -->
       <div class="fold" :class="{ open: openFold === 'disclaimer' }">
-        <div class="fold-head" @click="toggleFold('disclaimer')">
+        <div class="fold-head" @click="toggleFold('disclaimer', $event)">
           <span class="mark" :class="{ on: openFold === 'disclaimer' }"></span>
           <span class="t">免责声明</span>
           <span class="arrow">▼</span>

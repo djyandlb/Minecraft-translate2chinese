@@ -13,3 +13,8 @@ backend/_trunc.jar
 .pytest_cache/
 backend/cfpa_glossary.json
 backend/outputs/
+
+# 源码仓库不含：docs（内部文档）、宣传页（营销站点，单独部署）、根 icon.svg（宣传页资产）
+docs/
+宣传页/
+icon.svg

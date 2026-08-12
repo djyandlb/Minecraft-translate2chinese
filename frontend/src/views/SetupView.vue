@@ -28,6 +28,8 @@ const LANGUAGES = [
 ]
 // keyring 已配置时的回显占位符：避免用户每次误以为要重输（保存时跳过该占位值）
 const API_KEY_PLACEHOLDER = '已配置（••••）'
+// 应用版本号：打包时同步更新（设置页「配置」标题右侧淡灰小字展示）
+const APP_VERSION = '1.0.1'
 
 const engine = ref('llm')            // llm(用户 API) | free(免费 API) | machine(机翻)，三选项互斥
 const provider = ref('DeepSeek')
@@ -353,7 +355,7 @@ async function saveAndClose() {
 
 <template>
   <section class="panel">
-    <h2>配置</h2>
+    <h2>配置<span class="ver">v{{ APP_VERSION }}</span></h2>
     <p class="hint">选择翻译引擎与目标语言（源语言自动识别）</p>
 
     <div class="field">
@@ -556,6 +558,7 @@ async function saveAndClose() {
 </template>
 
 <style scoped>
+.ver { font-size: 11px; font-weight: 400; color: var(--text-dim); margin-left: 10px; letter-spacing: .05em; vertical-align: middle; }
 /* 测试连接：按钮 + 结果横排，结果绿=成功 / 红=失败 */
 .test-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .test-result { font-size: 13px; }
