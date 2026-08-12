@@ -239,8 +239,9 @@ function onConfigSaved(cfg) {
   const prevCache = config.value.cache_dir
   config.value = { ...config.value, ...cfg }
   // 修复（用户诉求）：更换缓存目录后重新检测未完成项目——后端 _switch_work_dir
-  // 已把 progress/memory 迁移到新目录，前端需重新扫描才能显示可续联项目
-  if (cfg.cache_dir && cfg.cache_dir !== prevCache) loadProjects()
+  // 已把 progress/memory 迁移到新目录，前端需重新扫描才能显示可续联项目。
+  // 目录变化（含清空回默认）都刷新
+  if (cfg.cache_dir !== prevCache) loadProjects()
 }
 function closeSetup() {
   showSetup.value = false
@@ -284,7 +285,8 @@ function openSetup() { showSetup.value = true }
     <!-- 设置弹窗：首次开屏（强制配置）或 ⚙设置 随时打开 -->
     <div v-if="showSetup" class="overlay">
       <div class="dialog">
-        <SetupView :on-done="onConfigSaved" :on-close="closeSetup" :closable="configured" />
+        <SetupView :on-done="onConfigSaved" :on-close="closeSetup" :closable="configured"
+                   :on-cache-cleared="loadProjects" />
       </div>
     </div>
   </div>

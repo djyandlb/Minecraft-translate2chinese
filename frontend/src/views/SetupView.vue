@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { checkUpdate, clearCache, getCacheSize, getCfpaStatus, getConfig, getKeyStatus, saveConfig, saveKey, testConnection, testThroughput } from '../api'
 
 // props：onDone(配置对象) / onClose() 由 App 注入（保存后回调）；closable=false 时隐藏「取消」（首次开屏强制配置）
-const props = defineProps({ onDone: Function, onClose: Function, closable: { type: Boolean, default: true } })
+const props = defineProps({ onDone: Function, onClose: Function, onCacheCleared: Function, closable: { type: Boolean, default: true } })
 
 // 厂商预置映射：选中自动带出 base_url + model（允许手动覆盖）
 const PROVIDERS = {
@@ -148,6 +148,7 @@ async function doClearCache() {
     const r = await clearCache()
     cacheMsg.value = `已清除 ${r.cleared_mb} MB 缓存`
     await refreshCacheSize()      // 清理后刷新占用显示
+    props.onCacheCleared?.()      // 清理缓存会删 progress/memory → 即时刷新断点续联列表（用户诉求）
   } catch (e) {
     cacheMsg.value = `清除失败：${e.message}`
   } finally {
