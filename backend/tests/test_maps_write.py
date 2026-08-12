@@ -104,6 +104,15 @@ def test_write_translations_dat(tmp_path: Path):
     assert (tmp_path / "x.dat.bak").exists()   # 备份已建
 
 
+def test_write_customname_json_component(tmp_path):
+    """JSON 组件（CustomName={"text":...}）写回：只替换组件内 text 值，保留 JSON 结构。"""
+    p = tmp_path / "x.dat"
+    File({"Data": Compound({"CustomName": String('{"text":"Guard NPC","color":"green"}')})}).save(p, gzipped=True)
+    write_translations(p, [{"nbt_path": "Data.CustomName", "text": "Guard NPC", "translated": "守卫NPC"}])
+    loaded = File.load(p, gzipped=True)
+    assert str(loaded["Data"]["CustomName"]) == '{"text":"守卫NPC","color":"green"}'
+
+
 def test_write_translations_json_text(tmp_path: Path):
     import json
     p = tmp_path / "a.json"
@@ -111,6 +120,29 @@ def test_write_translations_json_text(tmp_path: Path):
     write_translations(p, [{"nbt_path": "title.text", "text": "old text", "translated": "新标题"}])
     data = json.loads(p.read_text(encoding="utf-8"))
     assert data["title"]["text"] == "新标题"
+
+
+def test_write_translations_flat_lang_json(tmp_path: Path):
+    """地图自带资源包 lang 文件（扁平 dict，键含点）→ 整键替换，不崩、不破坏其他条目。"""
+    import json
+    p = tmp_path / "assets" / "map" / "lang" / "zh_cn.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"map.title": "Old Map Title", "map.button": "Start"}),
+                 encoding="utf-8")
+    write_translations(p, [{"nbt_path": "map.title", "text": "Old Map Title", "translated": "新地图标题"}])
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["map.title"] == "新地图标题"     # 键含点也整键替换
+    assert data["map.button"] == "Start"        # 未翻译条目保留原样
+
+
+def test_write_translations_nested_mismatch_no_crash(tmp_path: Path):
+    """嵌套 json 路径不匹配（新版 translations 结构等）→ 跳过该条不崩。"""
+    import json
+    p = tmp_path / "data.json"
+    p.write_text(json.dumps({"translations": {"a.b": "v"}}), encoding="utf-8")
+    write_translations(p, [{"nbt_path": "a.b", "text": "v", "translated": "译"}])
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["translations"]["a.b"] == "v"   # 结构不匹配 → 保留原样
 
 
 # —— .mca region 写回（M4-mca）——

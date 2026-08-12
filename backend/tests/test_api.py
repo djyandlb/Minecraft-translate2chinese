@@ -1,5 +1,6 @@
 # FastAPI 路由集成测试（任务 13）：config 往返 / 扫描缺口统计 / 目录浏览 / 后台任务调度
 import asyncio
+import re
 import time
 
 import pytest
@@ -321,3 +322,37 @@ def test_config_configured_flag(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.json().get("configured") is True
     r = client.get("/api/config")
     assert r.status_code == 200 and r.json().get("configured") is True
+
+
+def test_auto_translate_endpoint_spawns_task(tmp_path, monkeypatch):
+    """POST /api/auto-translate（前端核心入口）→ 200 + 合法 task_id + 后台任务真实调度。
+
+    recheck 覆盖缺口：前端 App.vue 实际调用的是 /api/auto-translate（旧测试只测 run_auto_translation
+    函数，端点层的 body 解析 / _spawn_task 调度链路未被验证——重构端点契约时前端翻译启动会挂。
+    """
+    import app.main as main
+    monkeypatch.setattr(main, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(main, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(main, "OUTPUTS_DIR", tmp_path / "outputs")
+    monkeypatch.setattr(main, "CFPA_PATH", tmp_path / "cfpa.json")
+    new_store = TaskStore(tmp_path / "tasks")
+    monkeypatch.setattr(main, "STORE", new_store)
+    called = {}
+
+    async def fake_run(task_id, req, cfg, store, work_dir, outputs_dir, cfpa_path=None):
+        called["task_id"] = task_id
+        called["store"] = store
+        called["req_path"] = str(req.path)
+
+    monkeypatch.setattr(main, "run_auto_translation", fake_run)
+    r = client.post("/api/auto-translate", json={"path": str(tmp_path), "target_lang": "zh_cn"})
+    assert r.status_code == 200
+    tid = r.json()["task_id"]
+    assert re.fullmatch(r"[0-9a-f]{12}", tid), f"task_id 应为 12 位 hex，实际 {tid}"
+    # 后台任务在 portal 事件循环运行，稍候应已调度并传入同一 task_id / 注入的 store
+    deadline = time.time() + 5
+    while time.time() < deadline and not called.get("task_id"):
+        time.sleep(0.1)
+    assert called.get("task_id") == tid, "后台任务应使用端点返回的 task_id"
+    assert called.get("store") is new_store, "后台任务应使用注入的 STORE"
+    assert called.get("req_path") == str(tmp_path)

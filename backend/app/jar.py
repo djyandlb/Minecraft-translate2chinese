@@ -31,9 +31,11 @@ def list_jar_lang_files(jar_path: Path) -> list[dict]:
 
 
 def extract_jar_to(jar_path: Path, out_dir: Path) -> None:
-    """解压 jar 到 out_dir。"""
+    """解压 jar 到 out_dir（走 archive.safe_extract 的 zip-slip/炸弹防护）。"""
+    from app.archive import safe_extract
+    out_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(jar_path) as zf:
-        zf.extractall(out_dir)
+        safe_extract(zf, out_dir)
 
 
 def pack_dir_to_jar(src_dir: Path, jar_path: Path) -> None:

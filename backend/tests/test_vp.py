@@ -26,11 +26,12 @@ def test_build_vp_module_format():
     mod = build_vp_module({"Hello World": "你好世界"})
     assert isinstance(mod, list) and len(mod) == 2
     head = mod[0]
-    assert head["data_dynamic"] is True
-    assert head["data_i18n"] is False
+    assert head["dynamic"] is True     # VP 官方字段名（recheck 修复：data_dynamic 被 VP 丢弃）
+    assert head["i18n"] is False
     assert head["mods"] == "minecraft"
     assert mod[1]["target_classes"] == []
-    assert mod[1]["pairs"] == {"Hello World": "你好世界"}
+    # 修复：pairs 必须是键值对数组 [{key,value}]（VP 官方格式），不是 dict
+    assert mod[1]["pairs"] == [{"key": "Hello World", "value": "你好世界"}]
 
 
 # ---------- 整合包 loader + MC 版本推断 ----------
@@ -67,7 +68,8 @@ def test_infer_modpack_runtime_empty(tmp_path):
 # ---------- Modrinth 下载 ----------
 
 @pytest.mark.asyncio
-async def test_download_vault_patcher_success():
+async def test_download_vault_patcher_success(monkeypatch):
+    monkeypatch.setattr("app.vp.bundled_vp_jar", lambda: None)
     """匹配 loader + MC 版本 → 下载 primary file 字节。"""
 
     class _FakeResp:
@@ -92,17 +94,18 @@ async def test_download_vault_patcher_success():
                     "loaders": ["forge", "fabric", "neoforge"],
                     "files": [{"primary": True, "url": "https://x/vp.jar"}],
                 }])
-            return _FakeResp(b"vpjardata")
+            return _FakeResp(b"PKvpjardata")
 
     client = _FakeClient()
     data = await download_vault_patcher("fabric", "1.20.1", client=client)
-    assert data == b"vpjardata"
+    assert data == b"PKvpjardata"
     assert client.calls == ["https://api.modrinth.com/v2/project/vault-patcher/version",
                             "https://x/vp.jar"]
 
 
 @pytest.mark.asyncio
-async def test_download_vault_patcher_no_match():
+async def test_download_vault_patcher_no_match(monkeypatch):
+    monkeypatch.setattr("app.vp.bundled_vp_jar", lambda: None)
     """版本列表不匹配（MC 版本或 loader 不符）→ 返回 None。"""
 
     class _FakeResp:
@@ -125,7 +128,8 @@ async def test_download_vault_patcher_no_match():
 
 
 @pytest.mark.asyncio
-async def test_download_vault_patcher_empty_params():
+async def test_download_vault_patcher_empty_params(monkeypatch):
+    monkeypatch.setattr("app.vp.bundled_vp_jar", lambda: None)
     """loader/版本为空 → 直接 None，不联网。"""
     assert await download_vault_patcher("", "") is None
     assert await download_vault_patcher("fabric", "") is None

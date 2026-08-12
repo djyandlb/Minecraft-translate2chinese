@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """mod 中文名推断与友好产物命名。
 
-参考 bfy-study mod-name.js 的 resolveModName 优先级链，Python 化实现：
-  jar 内已有中文名 → known 表 → 英文名逐词词典翻译（处理 's 所有格）
+优先级链：jar 内已有中文名 → known 表 → 英文名逐词词典翻译（处理 's 所有格）
   → 文件名清洗去版本号 → mod id。
 产物命名统一为 {中文名}-汉化版.jar，取不到中文名回退原 jar stem。
 """
@@ -63,8 +62,12 @@ def original_project_label(filename: str) -> str | None:
     stem = stem.strip()
     if not stem or re.fullmatch(r"(?:download|mod|file|unknown)(?:[-_ ]?\d+)?", stem, re.I):
         return None
+    # 修复（recheck）：开头版本号（1.20.1-MyMod-0.3.5.jar）旧正则要求版本前有分隔符删不掉——
+    # 先剥开头版本段，再剥尾部版本段
     without_version = re.sub(
-        r"[-_ ]+(?:mc)?\d+\.\d+(?:\.\d+)?(?:[-+._][A-Za-z0-9.]+)*.*$", "", stem).strip()
+        r"^((?:mc)?\d+\.\d+(?:\.\d+)?(?:[-+._][A-Za-z0-9.]+)*)[-_ ]+", "", stem)
+    without_version = re.sub(
+        r"[-_ ]+(?:mc)?\d+\.\d+(?:\.\d+)?(?:[-+._][A-Za-z0-9.]+)*.*$", "", without_version).strip()
     label = re.sub(r"[_]+", " ", without_version or stem)
     label = re.sub(r"\s+", " ", label).strip()
     return label or None
@@ -79,6 +82,9 @@ def _translate_label(label: str) -> str | None:
         tail = "".join(_WORD_TRANSLATIONS.get(w.lower(), w) for w in poss.group(2).split())
         if re.search(r"[㐀-鿿]", tail):
             return f"{poss.group(1)} 的{tail}"
+    # 修复（recheck）：'s 所有格先统一拆成「的」，再逐词词典翻译——否则 Macaw's Windows 第二段
+    # 不在词典时会保留 "Macaw's窗户"（所有格粘连）而非 "Macaw 的窗户"
+    clean = re.sub(r"['’]s\s+", " 的 ", clean)
     translated = False
     parts: list[str] = []
     for word in clean.split():
@@ -209,4 +215,9 @@ def friendly_output_name(jar: Path, target_lang: str = "zh_cn") -> str:
     """
     name = resolve_mod_name(jar)
     base = name if usable_chinese_name(name) else jar.stem
+    # 修复（recheck）：displayName 可能含 Windows 非法字符（< > : " / \ | ? * 控制字符）——
+    # 不清理则 shutil.copy2 抛 OSError（WinError 123）使任务失败；统一替换为下划线并去首尾空白/点
+    base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", base).strip().strip(".")
+    if not base:
+        base = jar.stem
     return f"{base}-{lang_display_name(target_lang)}化.jar"

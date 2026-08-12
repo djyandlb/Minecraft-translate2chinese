@@ -12,6 +12,7 @@ from pathlib import Path
 
 from app.cleanup import cleanup_task_work
 from app.config import AppConfig
+from app.safeerr import sanitize_error
 from app.glossary import load_glossary, term_inject_prompt
 from app.hardcode import replace_hardcoded_strings, scan_hardcoded_strings
 from app.memory import MemoryStore
@@ -36,8 +37,9 @@ async def run_hardcode_translation(task_id: str, req: HardcodeRequest, cfg: AppC
         # 副本策略：原 jar 只读，一切写操作在 work 副本（按任务隔离目录，防并发互踩）
         jar_copy = work_dir / "jars" / task_id / "mod.jar"
         jar_copy.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(Path(req.path), jar_copy)
-        texts = scan_hardcoded_strings(jar_copy)
+        # 修复：复制/扫描几百 MB jar 是同步大 IO → to_thread 防阻塞事件循环（对齐 maps/flow.py）
+        await asyncio.to_thread(shutil.copy2, Path(req.path), jar_copy)
+        texts = await asyncio.to_thread(scan_hardcoded_strings, jar_copy)
         state.total = len(texts)
         if not texts:
             # M5-2：jar 内无可汉化硬编码字符串 → 直接失败，不导出无意义的空包（对齐 maps_flow）
@@ -64,25 +66,51 @@ async def run_hardcode_translation(task_id: str, req: HardcodeRequest, cfg: AppC
         same_script = is_same_script(req.source_lang, req.target_lang)
         mapping: dict[str, str] = {}
 
-        for t in texts:
+        # 修复（recheck）：逐条 translate_batch = 每条一次 HTTP 请求，硬编码候选上千时请求数
+        # 爆炸。改为分桶：记忆命中 / 简繁直转直接填，需引擎翻译的攒批一次调用。
+        need_engine: list[int] = []
+        translated_by_idx: dict[int, str] = {}
+        for i, t in enumerate(texts):
+            if state.cancelled:
+                state.status = "cancelled"
+                store.save(state)
+                return
+            cached = memory.get(t, req.target_lang)
+            if cached:
+                translated_by_idx[i] = cached
+            elif same_script:
+                # 简繁双向直转，免 AI：zh_tw 走繁化，zh_cn 走简化（F5，对齐 translator.py）
+                translated_by_idx[i] = traditional(t) if req.target_lang == "zh_tw" else simplify(t)
+            else:
+                need_engine.append(i)
+        _bs = getattr(engine, "batch_size", 20)
+        for start in range(0, len(need_engine), _bs):
             if state.cancelled:
                 state.status = "cancelled"
                 store.save(state)
                 return
             while state.paused and not state.cancelled:
                 await asyncio.sleep(0.5)
-            cached = memory.get(t, req.target_lang)
-            if cached:
-                translated = cached
-            elif same_script:
-                # 简繁双向直转，免 AI：zh_tw 走繁化，zh_cn 走简化（F5，对齐 translator.py）
-                translated = traditional(t) if req.target_lang == "zh_tw" else simplify(t)
-            else:
-                translated = (await engine.translate_batch([t], req.target_lang))[0]
-                # M5-2：引擎返回原文视为翻译失败（API Key 无效/网络问题），静默写回原文会误导用户
-                if translated == t:
+            idxs = need_engine[start:start + _bs]
+            batch_texts = [texts[i] for i in idxs]
+            try:
+                results = await engine.translate_batch(batch_texts, req.target_lang)
+            except Exception as exc:
+                # 引擎异常（Key 无效/网络/配置缺失）：明确计失败并给用户可见原因，不静默
+                results = list(batch_texts)
+                for t0 in batch_texts:
                     state.failed += 1
-            memory.set(t, req.target_lang, translated)
+                    state.progress.append({"status": "warn", "key": "hardcode",
+                                           "error": f"翻译失败：{t0[:40]}（{type(exc).__name__}）"})
+            for k, i in enumerate(idxs):
+                # 引擎成功但返回原文：AI 故意保留专有名词/命令/代码标识 → 不算失败
+                # （对齐 auto_flow 的 keep_original_ok 语义）
+                translated_by_idx[i] = results[k] if k < len(results) else texts[i]
+        # 写回映射 + 记忆（仅真译文写记忆：失败回原文 / AI 保留原文都不写，防记忆污染固化失败）
+        for i, t in enumerate(texts):
+            translated = translated_by_idx.get(i, t)
+            if translated != t:
+                memory.set(t, req.target_lang, translated)
             mapping[t] = translated
             state.done += 1
             if state.done % 10 == 0:
@@ -93,17 +121,18 @@ async def run_hardcode_translation(task_id: str, req: HardcodeRequest, cfg: AppC
         # 部分翻译失败仍算完成（status=done），但进度里给用户可见警告
         if state.failed > 0:
             state.progress.append({"status": "warn",
-                                   "error": f"{state.failed} 条翻译失败（可能因 API Key 无效或网络问题），已保留原文"})
+                                   "error": f"{state.failed} 条翻译失败（具体原因见流程结束后翻译报告），已保留原文"})
         # 替换 + 校验：原地改副本并重打包（replace_hardcoded_strings 内部逐 class 校验，失败记 failed_classes）
-        result = replace_hardcoded_strings(jar_copy, mapping)
+        # 修复：解压+逐 class 重写+重打包是同步大 IO → to_thread
+        result = await asyncio.to_thread(replace_hardcoded_strings, jar_copy, mapping)
         state.failed += len(result["failed_classes"])
         if result["failed_classes"]:
             state.progress.append({"status": "warn",
                                    "error": f"{len(result['failed_classes'])} 个 class 替换失败（已跳过保留原字节）"})
-        # 输出：改完的副本移到 outputs（exe 旁产物区）
+        # 输出：改完的副本移到 outputs（exe 旁产物区）；修复：大文件移动 to_thread
         out = outputs_dir / f"{task_id}_hardcoded.jar"
         out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(jar_copy), str(out))
+        await asyncio.to_thread(shutil.move, str(jar_copy), str(out))
         state.progress.append({"status": "done", "file": str(out), "replaced": result["replaced"]})
         state.status = "done"
         store.save(state)
@@ -114,7 +143,7 @@ async def run_hardcode_translation(task_id: str, req: HardcodeRequest, cfg: AppC
         raise
     except Exception as e:
         state.status = "failed"
-        state.progress.append({"status": "error", "error": str(e)})
+        state.progress.append({"status": "error", "error": sanitize_error(str(e))})
         store.save(state)
     finally:
         # 任务终态（done/failed/cancelled）后清理任务级中间产物（temp），产物保留（C）

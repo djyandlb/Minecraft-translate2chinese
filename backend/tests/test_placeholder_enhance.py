@@ -38,6 +38,32 @@ def test_protect_path_token():
     assert restore(masked, markers) == text
 
 
+def test_protect_slash_english_sentence_not_eaten():
+    """Xaero 审查修复：句子里的斜杠（world/server、background/shadow）不是路径，不得被
+    protect 吞掉——否则模型只翻斜杠前、restore 贴回英文 → 中英混杂。"""
+    text = ("The default cave mode type assigned to dimensions visited for the first time "
+            "in a world/server. You can read more about cave mode types by clicking...")
+    masked, markers = protect(text)
+    assert markers == [], f"world/server 被误保护: {markers}"
+    assert masked == text
+    # 逐词穿插案例：background/shadow 同样不保护
+    masked2, marks2 = protect("The color of the background/shadow under the cardinal directions.")
+    assert marks2 == []
+    assert masked2 == "The color of the background/shadow under the cardinal directions."
+
+
+def test_protect_real_paths_still_protected():
+    """真程序标识（多级路径/文件/命令）仍保护——修复不能误伤。"""
+    for text, should_hide in [
+        ("请修改 config/jei/jei.toml 文件", "jei.toml"),
+        ("执行 /give @p diamond 指令", "/give"),
+        ("资源位于 assets/minecraft/textures/blocks/stone.png", "stone.png"),
+    ]:
+        masked, markers = protect(text)
+        assert should_hide not in masked, f"{should_hide} 未被保护: {masked}"
+        assert restore(masked, markers) == text
+
+
 def test_validate_placeholder_identical():
     """占位符一致：数量与内容逐一相等返回 True。"""
     assert validate("你有 %s 个物品", "你有 %s 个物品") is True

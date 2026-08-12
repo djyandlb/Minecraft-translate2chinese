@@ -30,6 +30,32 @@ async def test_translate_batch_tagged():
     await client._client.aclose()
 
 @pytest.mark.asyncio
+async def test_translate_batch_feedback_and_forced_injected():
+    """审查反馈重翻：feedback（不合格原因）+ forced 必须注入翻译 prompt——
+    AI 针对原因修正翻译到合格（用户诉求：审查要修复，不是仅提出）。"""
+    captured = {}
+
+    def handler(request):
+        import json
+        captured["body"] = json.loads(request.content)
+        return Response(200, json={"choices": [{"message": {"content": "[i0] 路径点颜色"}}]})
+
+    client = _client_with(handler)
+    out = await client.translate_batch(
+        ["Waypoint Color"], "zh_cn",
+        forced=True, feedback=["这是界面文本，必须翻译成中文"])
+    assert out == ["路径点颜色"]
+    sys_prompt = captured["body"]["messages"][0]["content"]
+    user_prompt = captured["body"]["messages"][1]["content"]
+    # forced：system 要求必须翻译界面文本
+    assert "必须翻译成目标语言" in sys_prompt or "界面文本" in sys_prompt
+    # feedback：user prompt 对带原因条目标注「上次审查不合格」，让 AI 针对修正
+    assert "上次审查不合格" in user_prompt
+    assert "这是界面文本，必须翻译成中文" in user_prompt
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_technical_string_unchanged():
     def handler(request):
         return Response(200, json={"choices": [{"message": {"content": "[i0] 译"}}]})

@@ -1,5 +1,5 @@
 ﻿# ============================================================
-# MC 自动翻译器 一键构建脚本（中文注释）
+# 像素译站 一键构建脚本（中文注释）
 # 流程：前端 vite build -> PyInstaller(onedir + onefile) -> 整理发布目录 -> Inno Setup 安装版
 # 用法：powershell -ExecutionPolicy Bypass -File scripts\build_all.ps1
 # 依赖：Node.js / npm、Python 3.14 + pyinstaller、Inno Setup 6（仅安装版需要）
@@ -57,8 +57,10 @@ Write-Host "  前端产物: frontend\dist"
 
 # ---------- [2/4] PyInstaller 打包 ----------
 Write-Host "========== [2/4] PyInstaller 打包（onedir + onefile）=========="
-# 清理旧产物，保证全新一致（spec 原始输出到 dist\ 根，之后统一整理移动）
-foreach ($p in @("dist\MC自动翻译器", "dist\MC自动翻译器-portable.exe", "dist\安装版", "dist\便携版")) {
+# 清理旧产物，保证全新一致（spec 原始输出到 dist\ 根，之后统一整理移动）。
+# 修复：必须连 PyInstaller 的 build\ 缓存一起清——否则 EXE 图标/内容复用旧构建，
+# 新 app-icon.ico 不生效（用户实测「应用图标还是原来的」）
+foreach ($p in @("build", "dist\像素译站", "dist\像素译站.exe", "dist\安装版", "dist\便携版")) {
     if (Test-Path $p) {
         Remove-Item $p -Recurse -Force
         Write-Host "  清理旧产物: $p"
@@ -66,31 +68,31 @@ foreach ($p in @("dist\MC自动翻译器", "dist\MC自动翻译器-portable.exe"
 }
 pyinstaller scripts\mc_translator.spec
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 打包失败（退出码 $LASTEXITCODE）" }
-Write-Host "  PyInstaller 原始输出: dist\MC自动翻译器\ + dist\MC自动翻译器-portable.exe"
+Write-Host "  PyInstaller 原始输出: dist\像素译站\ + dist\像素译站.exe"
 
 # ---------- [3/4] 整理产物到发布目录 ----------
 Write-Host "========== [3/4] 整理发布目录 =========="
 # onedir -> 安装版源（供 Inno Setup 打包）
 New-Item -ItemType Directory -Path "dist\安装版" -Force | Out-Null
-Move-Item "dist\MC自动翻译器" "dist\安装版\MC自动翻译器"
-Write-Host "  onedir 已移动到: dist\安装版\MC自动翻译器\"
+Move-Item "dist\像素译站" "dist\安装版\像素译站"
+Write-Host "  onedir 已移动到: dist\安装版\像素译站\"
 # onefile -> 便携版
 New-Item -ItemType Directory -Path "dist\便携版" -Force | Out-Null
-Move-Item "dist\MC自动翻译器-portable.exe" "dist\便携版\MC自动翻译器-portable.exe"
-Write-Host "  onefile 已移动到: dist\便携版\MC自动翻译器-portable.exe"
+Move-Item "dist\像素译站.exe" "dist\便携版\像素译站.exe"
+Write-Host "  onefile 已移动到: dist\便携版\像素译站.exe"
 
 # ---------- [4/4] Inno Setup 安装版 ----------
 if ($iscc) {
     Write-Host "========== [4/4] Inno Setup 安装版 =========="
     & $iscc scripts\installer.iss
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup 编译失败（退出码 $LASTEXITCODE）" }
-    Write-Host "  安装版产物: dist\安装版\MC自动翻译器-Setup.exe"
+    Write-Host "  安装版产物: dist\安装版\像素译站-Setup.exe"
 } else {
     Write-Host "========== [4/4] 跳过 Inno Setup（未安装）=========="
 }
 
 Write-Host "=============================================="
 Write-Host "全部完成！"
-Write-Host "  安装版: dist\安装版\MC自动翻译器-Setup.exe（需 Inno Setup 6）"
-Write-Host "  便携版: dist\便携版\MC自动翻译器-portable.exe"
-Write-Host "  onedir:  dist\安装版\MC自动翻译器\（安装版源）"
+Write-Host "  安装版: dist\安装版\像素译站-Setup.exe（需 Inno Setup 6）"
+Write-Host "  便携版: dist\便携版\像素译站.exe"
+Write-Host "  onedir:  dist\安装版\像素译站\（安装版源）"

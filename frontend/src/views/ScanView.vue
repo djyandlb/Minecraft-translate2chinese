@@ -1,6 +1,5 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { browse } from '../api'
 
 // props：jobs（App 持有的任务队列，展示用）+ addPath/addUpload（App 注入的入队方法，可 await）
 const props = defineProps({
@@ -9,8 +8,10 @@ const props = defineProps({
   detecting: { type: Boolean, default: false },    // 有文件识别中 → 禁用添加
   addPath: { type: Function, required: true },     // 本地路径入队（内部 detect）
   addUpload: { type: Function, required: true },   // 上传文件入队（浏览器/无本地路径兜底）
+  viewedTaskId: { type: String, default: '' },     // 右侧当前查看的任务（点击任务行切换）
+  projects: { type: Array, default: () => [] },    // 未完成项目（断点续联，启动扫描临时文件显示）
 })
-const emit = defineEmits(['remove-job', 'clear-jobs', 'start-queue'])
+const emit = defineEmits(['remove-job', 'clear-jobs', 'start-queue', 'select-job', 'delete-project', 'resume-project'])
 
 // 桌面版（pywebview）检测：存在 window.pywebview → 可用 js_api 直接拿本地路径，不走上传
 const isDesktop = typeof window !== 'undefined' && !!window.pywebview
@@ -19,65 +20,13 @@ const dragOver = ref(false)
 const fileInput = ref(null)
 const error = ref('')
 
-const KIND_TEXT = { modpack: '整合包', modjar: '单个 mod', map: '地图存档' }
+const KIND_TEXT = { modpack: '整合包', modjar: '单个 mod', map: '地图存档', shader: '光影包' }
 const STATUS_TEXT = { pending: '待翻译', running: '翻译中…', done: '完成 ✓', failed: '失败 ✗' }
 const STATUS_ICON = { pending: '•', running: '◎', done: '✓', failed: '✗' }
 
 const pendingCount = computed(() => props.jobs.filter(j => j.status === 'pending').length)
 const startEnabled = computed(() => !props.processing && pendingCount.value > 0)
 const failCountTip = computed(() => props.jobs.some(j => j.status === 'failed'))
-
-// —— 目录浏览器（浏览器模式跨盘浏览，复用现有 browser，盘根可列盘符）——
-const showBrowser = ref(false)
-const browserPath = ref('')
-const dirs = ref([])
-const parent = ref('')
-const browsing = ref(false)
-
-const drives = ref([])   // 盘符快捷栏（C:\、D:\…，一键换盘）
-
-// 加载盘符列表：盘根 browse 返回所有盘符；失败兜底常见盘符
-async function loadDrives() {
-  try {
-    const r = await browse('C:\\')
-    drives.value = r.dirs || []
-  } catch {
-    drives.value = ['C:/', 'D:/', 'E:/', 'F:/']
-  }
-}
-
-async function openBrowser() {
-  showBrowser.value = true
-  await loadDrives()
-  await loadDirs('')
-}
-async function loadDirs(p) {
-  browsing.value = true
-  try {
-    const r = await browse(p)
-    browserPath.value = p || r.parent || ''
-    dirs.value = r.dirs
-    parent.value = r.parent || ''
-    error.value = ''
-  } catch (e) {
-    error.value = `读取目录失败：${e.message}`
-  } finally {
-    browsing.value = false
-  }
-}
-function enterDir(name) {
-  // 盘符（如 D:\）直接进入，不拼接当前路径（防 C:\/D:\ 拼接失效，永远进不了 D/E 盘）
-  if (name.includes(':')) { loadDirs(name); return }
-  loadDirs(browserPath.value ? `${browserPath.value}/${name}` : name)
-}
-function goUp() {
-  if (parent.value) loadDirs(parent.value)
-}
-// 选中目录后收浏览器并立即入队（App 内自动识别）
-async function pickPath() {
-  showBrowser.value = false
-  await props.addPath(browserPath.value)
-}
 
 // —— 桌面版 js_api：系统对话框选文件/目录，直接拿本地路径（不走上传）——
 async function pickLocal(kind) {
@@ -99,17 +48,17 @@ function onDragLeave(e) {
   dragOver.value = false
 }
 // 拖入的目录处理：不再当文件上传（否则报「无法连接后端」）
-// 桌面版能拿本地路径 → 直接本地识别；拿不到 → 引导用「选择目录」按钮
+// 桌面版能拿本地路径 → 直接本地识别；拿不到 → 弹系统目录选择框
 async function handleFolderDrop(file) {
   const localPath = isDesktop && file && file.path
   if (localPath) await props.addPath(localPath)   // 目录路径 → 后端 detect 识别为整合包
   else if (isDesktop) {
-    // pywebview 对拖入文件夹的 File.path 可能不可用 → 顺手弹系统目录选择框（与「选择目录」同路径）
-    error.value = '拖入的文件夹无法取得本地路径，请用「选择目录」按钮'
+    // pywebview 对拖入文件夹的 File.path 可能不可用 → 顺手弹系统目录选择框
+    error.value = '拖入的文件夹无法取得本地路径，已弹出系统目录选择框'
     await pickLocal('folder')
   } else {
     // 浏览器拖入文件夹只得到一个空 File（无 webkitdirectory）→ 提示走目录浏览
-    error.value = '浏览器不支持拖入文件夹，请用「选择目录」按钮选择整合包目录'
+    error.value = '浏览器不支持拖入文件夹，请改拖入整合包压缩包（zip）'
   }
 }
 async function onDrop(e) {
@@ -123,8 +72,10 @@ async function onDrop(e) {
     return
   }
   for (const file of files) {
-    // 目录判定：Chromium 中拖入的文件夹表现为 File（type='' 且 size=0）
-    const isFolder = file.type === '' && file.size === 0
+    // 目录判定：Chromium 中拖入的文件夹表现为 File（type='' 且 size=0）。
+    // 修复（recheck）：0 字节且 type 为空的真实文件（如无扩展名空文件）会被误判成文件夹——
+    // 收紧为「无扩展名」才算目录（带扩展名的 0 字节空文件走文件上传）
+    const isFolder = file.type === '' && file.size === 0 && !(file.name.split('.').length > 1)
     if (isFolder) { await handleFolderDrop(file); continue }
     // 常规文件：桌面版 File 若暴露本地 path 属性（pywebview WebView2 实测），直接用本地地址不走上传
     const localPath = isDesktop && (file.path || file.webkitRelativePath)
@@ -152,52 +103,35 @@ async function onFilePicked(e) {
 <template>
   <section class="panel scan-panel">
     <h2>添加文件</h2>
-    <p class="hint">拖入 jar / 整合包 / 地图文件，或选择目录（支持多个，队列逐个翻译）</p>
+    <p class="hint">拖入 mod / 整合包 / 地图 / 光影（支持多个，队列逐个翻译）</p>
 
-    <!-- 大拖放区：拖入多个 jar/压缩包/地图文件，或点击选文件 -->
     <div class="dropzone" :class="{ drag: dragOver }"
          @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop" @click="onZoneClick">
-      <p class="big">{{ dragOver ? '松手，放这里！' : '拖入 jar / 压缩包 / 地图文件' }}</p>
-      <p class="small">支持多个文件；桌面版可直接拖入整合包目录（浏览器请用「浏览目录」）</p>
+      <span class="upload-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><b></b></span>
+      <p class="big">{{ dragOver ? '松手，即享自动翻译！' : '拖入 MOD / 整合包 / 地图 / 光影' }}</p>
+      <p class="small">支持多个文件</p>
       <input ref="fileInput" type="file" multiple style="display:none" @change="onFilePicked" />
     </div>
 
-    <!-- 选择按钮：桌面版系统对话框；浏览器版点选文件 + 目录浏览 -->
-    <div class="path-row pick-row">
-      <template v-if="isDesktop">
-        <button class="btn" :disabled="detecting" @click="pickLocal('file')">选择文件</button>
-        <button class="btn" :disabled="detecting" @click="pickLocal('folder')">选择目录</button>
-      </template>
-      <template v-else>
-        <button class="btn" :disabled="detecting" @click="onClickDrop">选择文件</button>
-        <button class="btn" :disabled="detecting" @click="openBrowser">浏览目录</button>
-      </template>
-      <span v-if="detecting" class="detect-tip">识别中…</span>
-    </div>
+    <!-- 只留大框：点击选文件 / 拖入文件 / 拖入文件夹自动填路径；识别中提示 -->
+    <div v-if="detecting" class="detect-tip">识别中…</div>
 
-    <!-- 目录浏览器（浏览器模式） -->
-    <div v-if="showBrowser" class="browser">
-      <!-- 盘符快捷栏：一键换盘（不用一层层进到盘根） -->
-      <div class="drive-bar" v-if="drives.length">
-        <span class="drive-label">盘符</span>
-        <button v-for="d in drives" :key="d" class="drive" :class="{ active: browserPath.replace(/\\\\$/,'').toLowerCase() === d.replace(/\\\\$/,'').toLowerCase() }"
-                @click="loadDirs(d)">{{ d }}</button>
+    <!-- 未完成项目（断点续联，用户诉求：启动扫描临时文件直接显示，不用拖入） -->
+    <div v-if="projects.length" class="proj-list">
+      <div class="proj-head"><span class="proj-title">未完成项目（可续联）</span></div>
+      <div v-for="p in projects" :key="p.project_id" class="proj-row">
+        <span class="proj-icon">◎</span>
+        <div class="proj-copy">
+          <span class="proj-name" :title="p.project_id">{{ p.name }}</span>
+          <span class="proj-meta" v-if="p.total > 0">已翻译 {{ p.done.toLocaleString() }}/{{ p.total.toLocaleString() }} · {{ p.pct }}%</span>
+        </div>
+        <span class="resume-tag" :title="`记录上次进度，可从断点继续`">可断点续联</span>
+        <button v-if="p.path" class="btn mini" :title="'从上次进度继续翻译（自动命中记忆跳过已翻条目）'"
+                @click.stop="emit('resume-project', p)">续联</button>
+        <button class="btn mini x" :title="'删除项目（清理记忆/进度缓存）'"
+                @click.stop="emit('delete-project', p.project_id)">✕</button>
       </div>
-      <div class="browser-head">
-        <!-- 路径可编辑：粘贴路径后回车/失焦跳转（用户反馈不能复制粘贴链接） -->
-        <input class="cur-input" v-model="browserPath" placeholder="粘贴路径后回车跳转…"
-               @keyup.enter="loadDirs(browserPath)" @blur="loadDirs(browserPath)" />
-        <span class="spacer"></span>
-        <button class="btn" :disabled="browsing" @click="goUp">上级</button>
-        <button class="btn primary" :disabled="browsing" @click="pickPath">选择</button>
-        <button class="btn" @click="showBrowser = false">关闭</button>
-      </div>
-      <ul class="browser-list" v-if="dirs.length">
-        <li v-for="d in dirs" :key="d">
-          <button class="dir" @click="enterDir(d)">📁 {{ d }}</button>
-        </li>
-      </ul>
-      <p v-else class="tip">该目录下没有可进入的子目录</p>
+      <p class="tip proj-tip">拖入对应整合包即自动续联（内容指纹匹配）；删除会清理该项目记忆/进度缓存</p>
     </div>
 
     <!-- 任务列表 -->
@@ -205,18 +139,36 @@ async function onFilePicked(e) {
       <div class="job-head">
         <span class="job-title">任务列表（{{ jobs.length }}）</span>
         <span class="spacer"></span>
-        <button class="btn mini" :disabled="processing" @click="emit('clear-jobs')">清空</button>
+        <button class="btn mini" :disabled="processing || detecting" @click="emit('clear-jobs')">清空</button>
       </div>
-      <div v-for="(job, i) in jobs" :key="job.path + '-' + i" class="job-row" :class="'st-' + job.status">
+      <div v-for="(job, i) in jobs" :key="job.path + '-' + i" class="job-row"
+           :class="['st-' + job.status, { viewing: job.taskId && job.taskId === props.viewedTaskId }]"
+           :title="job.taskId ? '点击查看该任务汉化明细' : ''"
+           @click="job.taskId && emit('select-job', job.taskId)">
         <span class="job-icon">{{ STATUS_ICON[job.status] || '•' }}</span>
-        <span class="job-name" :title="job.path">{{ job.name }}</span>
+        <div class="job-copy">
+          <span class="job-name" :title="job.path">{{ job.name }}</span>
+          <!-- 识别摘要（M1）：工作量预期——jar 数/待翻译词条/硬编码候选/源语言 -->
+          <span v-if="job.detectResult && job.detectResult.summary" class="job-summary">
+            <template v-if="job.detectResult.summary.jar_count > 0">{{ job.detectResult.summary.jar_count }} 个 jar</template><template v-if="job.detectResult.summary.total_entries > 0"> · 约 {{ Number(job.detectResult.summary.total_entries).toLocaleString() }} 条待翻译</template>
+            <template v-if="job.detectResult.summary.total_hardcoded != null"> · 硬编码 {{ job.detectResult.summary.total_hardcoded }}</template>
+          </span>
+          <span v-else-if="job.detectResult && job.detectResult.source_lang" class="job-summary">源语言 {{ job.detectResult.source_lang }}</span>
+          <!-- 断点续联标记：识别后即显示（用户诉求），该项目有记忆/进度 → 可续联。
+               修复（recheck）：任务完成后隐藏——detectResult 是入队时旧快照（当时有记忆），
+               done 后仍显示「可断点续联 X%」与「完成 ✓」矛盾（用户实测） -->
+          <span v-if="job.detectResult?.resume?.available && job.status !== 'done'" class="resume-tag"
+                :title="`项目记忆 ${job.detectResult.resume.memory_count} 条${job.detectResult.resume.progress_pct != null ? `，上次进度 ${job.detectResult.resume.progress_pct}%` : ''}`">
+            可断点续联{{ job.detectResult.resume.progress_pct != null ? ` · ${job.detectResult.resume.progress_pct}%` : '' }}
+          </span>
+        </div>
         <span class="job-kind">{{ KIND_TEXT[job.kind] || (job.kind || '未知') }}</span>
         <span class="job-status">{{ STATUS_TEXT[job.status] || job.status }}</span>
-        <button class="btn mini x" :disabled="job.status === 'running'" :title="'移除'" @click="emit('remove-job', i)">✕</button>
+        <button class="btn mini x" :disabled="processing || job.status === 'running'" :title="'移除'" @click.stop="emit('remove-job', i)">✕</button>
       </div>
       <p v-if="failCountTip" class="tip fail-tip">失败项可在右侧查看原因，也可移除后重新添加</p>
     </div>
-    <p v-else class="tip empty-tip">还没有任务，拖入文件或选择目录开始</p>
+    <p v-else class="tip empty-tip">还没有任务，拖入文件开始</p>
 
     <p v-if="error" class="err">{{ error }}</p>
 
@@ -232,78 +184,89 @@ async function onFilePicked(e) {
 <style scoped>
 .scan-panel { max-width: 100%; padding: 0; }
 
-.pick-row { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; }
 .detect-tip { color: var(--text-dim); font-size: 12px; }
 
-/* 大拖放区 */
 .dropzone {
-  border: 2px dashed var(--line);
-  border-radius: 10px;
-  padding: 34px 20px;
+  border: 2px dashed rgba(63, 101, 72, .25);
+  border-radius: 0;
+  padding: 36px 20px;
   text-align: center;
-  background: var(--bg-2);
+  background: var(--surface);
   color: var(--text-dim);
   cursor: pointer;
-  transition: all .15s;
+  transition: all .18s;
   margin-bottom: 16px;
 }
-.dropzone:hover { border-color: var(--accent-2); }
-.dropzone.drag { border-color: var(--accent); background: var(--bg-3); color: var(--accent); }
-.dropzone .big { margin: 0 0 4px; font-size: 15px; }
+.dropzone:hover, .dropzone.drag { border-color: var(--moss); background: rgba(63, 101, 72, .04); }
+.dropzone.drag { color: var(--moss); }
+.dropzone .big { margin: 10px 0 4px; font-size: 17px; color: var(--ink); font-weight: 700; }
 .dropzone .small { margin: 0; font-size: 12px; }
+.dropzone.drag .big { color: var(--moss); }
+/* 上传图标（像素方块堆 + 像素下箭头） */
+.upload-glyph { position: relative; width: 56px; height: 50px; display: inline-block; margin-top: 4px; }
+.upload-glyph i { position: absolute; width: 12px; height: 12px; background: var(--accent); transition: transform .18s; }
+.upload-glyph i:nth-child(1) { left: 22px; top: 0; }
+.upload-glyph i:nth-child(2) { left: 8px; top: 16px; }
+.upload-glyph i:nth-child(3) { right: 8px; top: 16px; }
+.upload-glyph i:nth-child(4) { left: 22px; top: 16px; }
+.upload-glyph b { position: absolute; left: 20px; top: 34px; width: 16px; height: 10px; background: var(--accent); }
+.upload-glyph b::after { content: ""; position: absolute; left: -6px; top: -6px; border: 14px solid transparent; border-top-color: var(--accent); border-bottom: none; width: 0; height: 0; }
+.dropzone:hover .upload-glyph i:nth-child(1), .dropzone.drag .upload-glyph i:nth-child(1) { transform: translateY(4px); }
+.dropzone:hover .upload-glyph i:nth-child(4), .dropzone.drag .upload-glyph i:nth-child(4) { transform: translateY(4px); }
+.dropzone:hover .upload-glyph i:nth-child(2), .dropzone.drag .upload-glyph i:nth-child(2) { transform: translate(-3px, 2px); }
+.dropzone:hover .upload-glyph i:nth-child(3), .dropzone.drag .upload-glyph i:nth-child(3) { transform: translate(3px, 2px); }
 
-/* 目录浏览器 */
-.browser {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg-2);
-  padding: 12px;
-  margin-bottom: 16px;
+/* 未完成项目（断点续联）：启动扫描临时文件直接显示 */
+.proj-list { margin-bottom: 8px; }
+.proj-head { display: flex; align-items: center; margin-bottom: 6px; }
+.proj-title { color: var(--text-dim); font-size: 13px; font-weight: 600; }
+.proj-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border: 1px dashed var(--accent); border-radius: 0;
+  background: rgba(63, 101, 72, .06); margin-bottom: 6px;
 }
-.browser-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-/* 盘符快捷栏：一键换盘 */
-.drive-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
-.drive-label { color: var(--text-dim); font-size: 12px; }
-.drive {
-  background: var(--bg-3); border: 1px solid var(--line); border-radius: 5px;
-  color: var(--text); padding: 3px 10px; cursor: pointer; font-size: 12px;
+.proj-icon { width: 18px; text-align: center; flex-shrink: 0; color: var(--accent); }
+.proj-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.proj-name {
+  min-width: 0; font-size: 13px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.drive:hover { border-color: var(--accent); color: var(--accent); }
-.drive.active { background: var(--accent-2); border-color: var(--accent-2); color: #0b1510; }
-/* 路径可编辑：粘贴后回车/失焦跳转 */
-.cur-input {
-  flex: 1; background: var(--bg-3); border: 1px solid var(--line); border-radius: 5px;
-  color: var(--text); padding: 5px 8px; font-size: 12px; outline: none; min-width: 120px;
-}
-.cur-input:focus { border-color: var(--accent); }
-.spacer { flex: 1; }
-.browser-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow: auto; }
-.browser-list .dir {
-  display: block; width: 100%; text-align: left;
-  background: transparent; border: none; color: var(--text);
-  padding: 6px 8px; border-radius: 5px; cursor: pointer;
-}
-.browser-list .dir:hover { background: var(--bg-3); }
+.proj-meta { color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+.proj-tip { font-size: 11px; color: var(--text-dim); }
 
 /* 任务列表 */
 .job-list { margin-bottom: 8px; }
 .job-head { display: flex; align-items: center; margin-bottom: 6px; }
 .job-title { color: var(--text-dim); font-size: 13px; font-weight: 600; }
 .job-row {
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px;
-  background: var(--bg-2); margin-bottom: 6px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border: 1px solid transparent; border-radius: 0;
+  background: rgba(32, 37, 29, .03); margin-bottom: 6px;
+  transition: border-color .18s, background .18s;
+  cursor: pointer;
 }
-.job-icon { width: 16px; text-align: center; flex-shrink: 0; color: var(--text-dim); }
-.job-row.st-running { border-color: var(--accent); }
-.job-row.st-running .job-icon { color: var(--accent); }
-.job-row.st-done { border-color: var(--accent-2); }
-.job-row.st-done .job-icon { color: var(--accent); }
-.job-row.st-failed { border-color: var(--danger); }
-.job-row.st-failed .job-icon { color: var(--danger); }
+.job-row:hover { border-color: var(--line); }
+.job-row.viewing { border-color: var(--accent); background: rgba(63, 101, 72, .06); }
+.job-icon { width: 18px; text-align: center; flex-shrink: 0; color: var(--text-dim); }
+.job-row.st-running { border-color: rgba(63, 101, 72, .28); background: rgba(63, 101, 72, .06); }
+.job-row.st-running .job-icon { color: var(--moss); animation: item-pulse 1.2s ease-in-out infinite; }
+.job-row.st-done { border-color: rgba(63, 101, 72, .28); }
+.job-row.st-done .job-icon { color: var(--moss); }
+.job-row.st-failed { border-color: rgba(185, 95, 61, .5); }
+.job-row.st-failed .job-icon { color: var(--rust); }
+@keyframes item-pulse { 50% { opacity: .45; } }
+/* 任务行：名称 + 识别摘要（mod 工作量预期） */
+.job-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .job-name {
-  flex: 1; min-width: 0; font-size: 13px;
+  min-width: 0; font-size: 13px; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.job-summary { color: var(--text-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 断点续联标记：绿色小标签（识别后即显示） */
+.resume-tag {
+  display: inline-block; width: fit-content; font-size: 11px; padding: 1px 6px;
+  background: rgba(63, 101, 72, .14); border: 1px solid var(--accent); color: var(--accent);
+  cursor: default;
 }
 .job-kind { color: var(--text-dim); font-size: 12px; flex-shrink: 0; }
 .job-status { font-size: 12px; flex-shrink: 0; color: var(--text-dim); }

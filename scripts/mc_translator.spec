@@ -3,8 +3,8 @@
 # 用法：pyinstaller scripts/mc_translator.spec
 #
 # 产出（相对项目根 dist/）：
-#   dist/安装版/MC自动翻译器/        —— onedir（M6-3 Inno Setup 安装版源）
-#   dist/便携版/MC自动翻译器.exe      —— onefile 单 exe（构建后手动移动/改名）
+#   dist/安装版/像素译站/        —— onedir（M6-3 Inno Setup 安装版源）
+#   dist/便携版/像素译站.exe      —— onefile 单 exe（构建后手动移动/改名）
 #
 # 注意：
 #   - desktop.py 已把 uvicorn 字符串导入改为对象导入（from app.main import app），
@@ -28,6 +28,12 @@ BACKEND = ROOT / "backend"                   # Python 包根（app/ 在其下）
 APP = BACKEND / "app"
 sys.path.insert(0, str(BACKEND))             # 让 collect_submodules 能定位 app 子包
 
+# 修复（recheck）：直接跑 spec 时若 frontend/dist 缺失（跳过 npm run build）→ PyInstaller
+# 对不存在的 datas 只警告并跳过，产物是「无前端空壳」。这里硬校验：缺失直接中止并提示先构建。
+if not (ROOT / "frontend" / "dist" / "index.html").exists():
+    raise SystemExit(
+        "打包前置缺失：frontend/dist/index.html 不存在。请先在 frontend/ 下执行 npm run build。")
+
 a = Analysis(
     [str(APP / "desktop.py")],               # 打包入口：pywebview 壳 + 子线程 uvicorn
     pathex=[str(BACKEND)],                   # 让 "app.main" 等可被解析（app 包根）
@@ -35,6 +41,15 @@ a = Analysis(
         (str(ROOT / "frontend" / "dist"), "frontend/dist"),                    # 前端静态资源 → _MEIPASS/frontend/dist
         (str(ROOT / "assets"), "assets"),                                     # 应用/资源包图标 → _MEIPASS/assets
         (str(APP / "maps" / "scan_keys.json"), "app/maps/scan_keys.json"),    # 地图扫描关键词表
+        # 内置 CFPA 汉化资源包（i18n/VP 补丁，6 版本离线可用——用户刚需：整合包汉化
+        # 优先用现成人工翻译，不依赖在线下载）。frozen 下 → _MEIPASS/app/data/cfpa/
+        (str(APP / "data" / "cfpa"), "app/data/cfpa"),
+        # 内置 I18nUpdateMod（i18n 汉化下载器 mod，~49KB）——整合包产物 mods/ 用，
+        # 进游戏自动下载 CFPA 全量汉化。frozen 下 → _MEIPASS/app/data/i18n/
+        (str(APP / "data" / "i18n"), "app/data/i18n"),
+        # 内置 Vault Patcher（VP 硬编码汉化 mod，all jar 跨 loader+MC 通用，~200KB）——
+        # 整合包硬编码走 VP 补丁生效，产物 mods/ 用，离线可用。frozen → _MEIPASS/app/data/vp/
+        (str(APP / "data" / "vp"), "app/data/vp"),
         *collect_data_files("jawa"),        # jawa/util/bytecode.{json,yaml}：反编译常量/指令表
         *collect_data_files("opencc"),      # 简繁转换 config/*.json + dictionary/*.txt
         *collect_data_files("anvil"),       # legacy_blocks.json（区块版本回退表）
@@ -70,7 +85,7 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts,
     exclude_binaries=True,                    # onedir：dll/资源交给 COLLECT
-    name="MC自动翻译器",
+    name="像素译站",
     icon=str(ROOT / "assets" / "app-icon.ico"),   # 应用图标（圆形化处理）
     debug=False,
     strip=False,
@@ -82,13 +97,15 @@ coll = COLLECT(
     exe, a.binaries, a.datas,
     strip=False,
     upx=False,
-    name="MC自动翻译器",
+    name="像素译站",
 )
 
-# —— onefile（便携版）：全部打进单个 exe，冷启动较慢是特性 ——
+# —— onefile（便携版）：全部打进单个 exe，冷启动较慢是特性。
+# 命名：便携版与安装版都叫「像素译站.exe」（用户诉求：不要 -portable 后缀）——
+# onedir 在 dist/安装版/像素译站/ 文件夹内、onefile 在 dist/便携版/，不冲突
 exe_one = EXE(
     pyz, a.scripts, a.binaries, a.datas,
-    name="MC自动翻译器-portable",
+    name="像素译站",
     icon=str(ROOT / "assets" / "app-icon.ico"),   # 应用图标（圆形化处理）
     debug=False,
     strip=False,

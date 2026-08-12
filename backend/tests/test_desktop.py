@@ -125,7 +125,7 @@ def test_jsapi_save_output_modpack(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "webview", mod)
     res = _JsApi().save_output(task_id)
     assert res["ok"] is True
-    assert win.calls[0][1]["save_filename"] == f"{task_id}.zip"
+    assert win.calls[0][1]["save_filename"] == "整合包汉化.zip"   # 桌面保存框默认名（不再 task_id.zip）
     with zipfile.ZipFile(dest) as zf:
         names = zf.namelist()
     assert "模组汉化资源包.zip" in names and "汉化补丁包.zip" in names

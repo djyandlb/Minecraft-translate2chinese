@@ -1,9 +1,9 @@
-# MC 自动翻译器 项目元数据
+# 像素译站 项目元数据
 # 开发期散装多文件运行，不打包；pyproject 仅承载项目级配置
 [project]
 name = "mc-translate"
 version = "0.1.0"
-description = "MC 自动翻译器：把整合包/mod/地图里的英文自动翻译成中文（目标语言参数化）的 Windows 桌面应用"
+description = "像素译站：把整合包/mod/地图里的英文自动翻译成中文（目标语言参数化）的 Windows 桌面应用"
 readme = "README.md"
 requires-python = ">=3.14"
 

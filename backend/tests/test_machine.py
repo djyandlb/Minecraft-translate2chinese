@@ -7,7 +7,8 @@ def test_map_lang():
     assert map_lang("zh_tw") == "zh-TW"
     assert map_lang("en_us") == "en"
     assert map_lang("ja_jp") == "ja"
-    assert map_lang("unknown") == "unknown"   # 未知原样返回
+    assert map_lang("es_es") == "es"          # 修复：补欧系映射
+    assert map_lang("unknown") is None        # 修复：未知返回 None（机翻不支持，不透传崩溃）
 
 
 @pytest.mark.asyncio

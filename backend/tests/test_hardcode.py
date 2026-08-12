@@ -109,7 +109,7 @@ def _make_test_jar(tmp_path: Path) -> Path:
 def test_is_hardcode_translatable():
     assert is_hardcode_translatable("Hello World")
     assert is_hardcode_translatable("欢迎来到服务器")
-    assert is_hardcode_translatable("iron_ingot")           # snake_case 单词保留为候选（用户把关）
+    assert not is_hardcode_translatable("iron_ingot")       # 单单词含下划线 → 代码 ID/资源名，不翻（用户规则）
     assert not is_hardcode_translatable("OK")               # 纯大写缩写
     assert not is_hardcode_translatable("mymod:item")       # modid 前缀
     assert not is_hardcode_translatable("com.example.Mod")  # 类路径/包名
@@ -149,7 +149,7 @@ def test_is_hardcode_translatable():
 def test_is_hardcode_log_exclusion():
     """P0-1 日志形态剔除：日志句式/堆栈标记 → False；GUI 文本保留。
 
-    对照方块译匠「过滤前移」：扫描层就砍掉日志形态，不再留给 ai_judge。
+    过滤前移：扫描层就砍掉日志形态，不再留给 ai_judge。
     保守匹配（开头动词 + 技术名词），不误杀 GUI 错误提示。
     """
     logs = [
@@ -192,7 +192,7 @@ def test_scan_hardcoded_strings(tmp_path):
     found = scan_hardcoded_strings(jar)
     assert "Hello World" in found
     assert "Welcome to the server" in found
-    assert "iron_ingot" in found            # MIT 规则：snake_case 单词保留为候选
+    assert "iron_ingot" not in found        # 单单词含下划线 → 代码 ID/资源名，不翻（用户规则）
     assert "OK" not in found
     assert "mymod:item" not in found
     assert "com.example.Mod" not in found
@@ -220,6 +220,33 @@ def test_replace_hardcoded_strings(tmp_path):
     assert "你好世界" in found
     assert "欢迎来到服务器" in found
     assert "Hello World" not in found
+
+
+def test_replace_noop_keeps_class_bytes(tmp_path):
+    """Xaero 崩溃修复：mapping 原文映射原文（AI 对渲染 uniform 保留原文）不触发 class 重写——
+    否则 jawa 重写字节（值相同但结构/编码被改）→ WorldMapShader uniform null 崩溃实测。"""
+    import zipfile
+    jar = _make_test_jar(tmp_path)
+    before = {}
+    with zipfile.ZipFile(jar) as zf:
+        for n in zf.namelist():
+            if n.endswith(".class"):
+                before[n] = zf.read(n)
+    result = replace_hardcoded_strings(
+        jar, {"Hello World": "Hello World", "Welcome to the server": "Welcome to the server"})
+    assert result["replaced"] == 0
+    # class 字节必须原样保留（无实际替换绝不重写）
+    with zipfile.ZipFile(jar) as zf:
+        for n, b in before.items():
+            assert zf.read(n) == b, f"{n} 被重写（值相同但字节变了）"
+
+
+def test_is_hardcode_glsl_excluded():
+    """GLSL/着色器源码片段不进硬编码候选（翻译破坏 GLSL 编译 → shader 崩，Xaero 实测）。"""
+    for t in ["uniform mat4 ModelViewMat", "vec2 texCoord = texture(uv)",
+              "precision mediump float", "gl_Position = vec4(position, 1.0)",
+              "sampler2D colorMap", "layout(location = 0) out vec4 color"]:
+        assert is_hardcode_translatable(t) is False, t
 
 
 # ---------- 嵌套包类用例（com.example 包路径斜杠规范化覆盖） ----------
@@ -320,16 +347,14 @@ def test_extract_jar_zip_slip(tmp_path):
 def test_replace_restores_bytes_on_verify_failure(tmp_path, monkeypatch):
     """校验失败（模拟重读抛异常）时 class 必须还原为原字节，不进输出 jar。"""
     jar = _make_test_jar(tmp_path)
-    real_loader = hardcode._class_loader
     calls = {"n": 0}
 
-    def flaky_loader(work):
+    def flaky_reload(loader, work, name):
         calls["n"] += 1
-        if calls["n"] >= 2:  # 第二次调用即校验阶段：模拟重读失败
-            raise RuntimeError("模拟校验失败")
-        return real_loader(work)
+        raise RuntimeError("模拟校验失败")   # _reload_verify 只在验证阶段调用 → 直接失败
 
-    monkeypatch.setattr(hardcode, "_class_loader", flaky_loader)
+    # recheck：验证逻辑抽为 _reload_verify（复用外层 loader 防 O(N×M) 重建），注入点随之调整
+    monkeypatch.setattr(hardcode, "_reload_verify", flaky_reload)
     result = replace_hardcoded_strings(jar, {"Hello World": "你好世界"})
     monkeypatch.undo()
     # 失败 class 被记录，且替换数必须为 0（还原后无效替换）
@@ -362,32 +387,27 @@ def test_replace_content_mismatch_restores_bytes(tmp_path, monkeypatch):
     from jawa.constants import String
 
     jar = _make_test_jar(tmp_path)
-    real_loader = hardcode._class_loader
     calls = {"n": 0}
 
-    def corrupting_loader(work):
+    def corrupting_reload(loader, work, name):
         calls["n"] += 1
-        if calls["n"] >= 2:  # 第二次调用即校验阶段：返回内容被"改坏"的伪 loader
-            # 与 _make_test_jar 的 6 个 String 数量一致（数量校验拦不住），
-            # 仅把映射命中的 "Hello World" 位置写成丢 emoji 后的 " 你好世界"
-            corrupted = [
-                " 你好世界", "Welcome to the server", "iron_ingot",
-                "OK", "mymod:item", "com.example.Mod",
-            ]
+        # _reload_verify 只在验证阶段调用 → 直接返回内容被"改坏"的伪 class：
+        # 与 _make_test_jar 的 6 个 String 数量一致（数量校验拦不住），
+        # 仅把映射命中的 "Hello World" 位置写成丢 emoji 后的 " 你好世界"
+        corrupted = [
+            " 你好世界", "Welcome to the server", "iron_ingot",
+            "OK", "mymod:item", "com.example.Mod",
+        ]
 
-            class _FakeKlass:
-                def __init__(self):
-                    self.constants = [String(_FakePool(v), i, i)
-                                      for i, v in enumerate(corrupted)]
+        class _FakeKlass:
+            def __init__(self):
+                self.constants = [String(_FakePool(v), i, i)
+                                  for i, v in enumerate(corrupted)]
 
-            class _FakeLoader:
-                def __getitem__(self, name):
-                    return _FakeKlass()
+        return _FakeKlass()
 
-            return _FakeLoader()
-        return real_loader(work)
-
-    monkeypatch.setattr(hardcode, "_class_loader", corrupting_loader)
+    # recheck：验证逻辑抽为 _reload_verify（复用外层 loader 防 O(N×M) 重建），注入点随之调整
+    monkeypatch.setattr(hardcode, "_reload_verify", corrupting_reload)
     result = replace_hardcoded_strings(jar, {"Hello World": "🎉 你好世界"})
     monkeypatch.undo()
     # 内容不符必须被判定为失败：failed_classes 记录 + replaced 不虚高
@@ -509,8 +529,8 @@ async def test_ai_judge_exclude_developer_log_reason():
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_unresolved_missing_default_translated():
-    """宽松策略：批量 LLM 漏返回部分候选 → 重试仍漏 → 默认翻译并入 translations（不丢弃）。"""
+async def test_ai_judge_unresolved_missing_not_translated():
+    """严格策略：批量 LLM 漏返回部分候选 → 单条重判仍漏 → 不翻译（保持原文）。"""
     calls = {"n": 0}
 
     def handler(request):
@@ -539,16 +559,16 @@ async def test_ai_judge_unresolved_missing_default_translated():
         {"text": "Hello World", "context": []},
         {"text": "Good day", "context": []},
     ], "zh_cn")
-    # Hello World 由 ai_judge 直接翻译；Good day 漏返回 → 重试仍漏 → 默认翻译兜底
-    assert result.translations == {"Hello World": "译Hello World", "Good day": "译Good day"}
-    assert result.unresolved == []
-    assert calls["n"] == 4   # 1 批量 + 2 单条重试 + 1 默认翻译兜底
+    # 严格策略：Hello World 由 ai_judge 直接翻译；Good day 漏返回 → 单条重判仍漏 → 不翻译
+    assert result.translations == {"Hello World": "译Hello World"}
+    assert result.unresolved == ["Good day"]
+    assert calls["n"] == 2   # 1 批量 + 1 单条重判
     await engine._client.aclose()
 
 
 @pytest.mark.asyncio
 async def test_ai_judge_exclude_reason_tightened():
-    """exclude 收紧：reason=not_user_visible（软排除，不确定）→ 默认翻译；reason=developer_log（明确技术类）→ 排除。"""
+    """exclude 收紧：reason=not_user_visible（软排除，不确定）→ 不翻译；reason=developer_log（明确技术类）→ 排除。"""
     calls = {"n": 0}
 
     def handler(request):
@@ -573,9 +593,9 @@ async def test_ai_judge_exclude_reason_tightened():
         {"text": "Failed to load config", "context": []},
     ], "zh_cn")
     assert result.excluded == ["Failed to load config"]        # developer_log 明确技术类 → 排除
-    assert result.translations.get("Sky fog distance") == "译Sky fog distance"  # not_user_visible → 默认翻译
-    assert result.unresolved == []
-    assert calls["n"] == 4   # 1 批量 + 2 单条重试 + 1 默认翻译兜底
+    assert "Sky fog distance" not in result.translations       # not_user_visible 软排除 → 不翻译
+    assert result.unresolved == ["Sky fog distance"]
+    assert calls["n"] == 2   # 1 批量 + 1 单条重判
     await engine._client.aclose()
 
 
@@ -607,8 +627,8 @@ async def test_ai_judge_unresolved_retry_single():
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_unresolved_default_translated():
-    """宽松策略：unresolved 单条重试最多 2 次仍未解决 → 默认翻译并入 translations，不丢弃。"""
+async def test_ai_judge_unresolved_not_translated():
+    """严格策略：unresolved 单条重判一次仍未解决 → 不翻译（保持原文）。"""
     calls = {"n": 0}
 
     def handler(request):
@@ -626,15 +646,15 @@ async def test_ai_judge_unresolved_default_translated():
 
     engine = _llm_engine_with(handler)
     result = await ai_judge_translate(engine, [{"text": "Ghost", "context": []}], "zh_cn")
-    assert result.translations.get("Ghost") == "译Ghost"
-    assert result.unresolved == []
-    assert calls["n"] == 4   # 1 批量 + 2 次单条重试 + 1 默认翻译兜底
+    assert result.translations == {}        # 严格策略：重判仍不明确 → 不翻译
+    assert result.unresolved == ["Ghost"]
+    assert calls["n"] == 2   # 1 批量 + 1 单条重判
     await engine._client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_translate_invalid_json_default_translated():
-    """LLM 输出非法 JSON → 逐条降级仍 unresolved → 默认翻译兜底（不整批静默丢）。"""
+async def test_ai_judge_translate_invalid_json_not_translated():
+    """LLM 输出非法 JSON → 逐条降级仍 unresolved → 不翻译（不整批静默丢，也不误翻）。"""
     calls = {"n": 0}
 
     def handler(request):
@@ -647,15 +667,15 @@ async def test_ai_judge_translate_invalid_json_default_translated():
 
     engine = _llm_engine_with(handler)
     result = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
-    assert result.translations.get("Hello") == "译Hello"
-    assert result.unresolved == []
-    assert calls["n"] == 5   # 1 批量 + 1 逐条降级 + 2 次 unresolved 重试 + 1 默认翻译兜底
+    assert result.translations == {}        # 严格策略：判断不了 → 不翻译
+    assert result.unresolved == ["Hello"]
+    assert calls["n"] == 3   # 1 批量 + 1 逐条降级 + 1 单条重判
     await engine._client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_translate_missing_field_default_translated():
-    """LLM 输出缺失 action/translation 字段 → 该条进 unresolved → 默认翻译兜底，不崩。"""
+async def test_ai_judge_translate_missing_field_not_translated():
+    """LLM 输出缺失 action/translation 字段 → 该条进 unresolved → 不翻译（保持原文，不崩）。"""
     calls = {"n": 0}
 
     def handler(request):
@@ -675,9 +695,8 @@ async def test_ai_judge_translate_missing_field_default_translated():
         {"text": "Hello World", "context": []},
         {"text": "Good day", "context": []},
     ], "zh_cn")
-    assert result.unresolved == []
-    assert result.translations.get("Hello World") == "译Hello World"
-    assert result.translations.get("Good day") == "译Good day"
+    assert result.unresolved == ["Hello World", "Good day"]
+    assert result.translations == {}
     await engine._client.aclose()
 
 
@@ -720,8 +739,8 @@ async def test_ai_judge_translate_paging_concurrent():
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_translate_null_content_default_translated():
-    """LLM 返回 content=null → 该批全进 unresolved → 默认翻译兜底，不抛 AttributeError（B 审查 🟡1）。"""
+async def test_ai_judge_translate_null_content_not_translated():
+    """LLM 返回 content=null → 该批全进 unresolved → 不翻译，不抛 AttributeError（B 审查 🟡1）。"""
     calls = {"n": 0}
 
     def handler(request):
@@ -734,9 +753,9 @@ async def test_ai_judge_translate_null_content_default_translated():
 
     engine = _llm_engine_with(handler)
     result = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
-    assert result.translations.get("Hello") == "译Hello"
-    assert result.unresolved == []
-    assert calls["n"] == 4   # 1 批量 + 2 次单条重试 + 1 默认翻译兜底
+    assert result.translations == {}        # 严格策略：判断不了 → 不翻译
+    assert result.unresolved == ["Hello"]
+    assert calls["n"] == 2   # 1 批量 + 1 单条重判
     await engine._client.aclose()
 
 
@@ -769,9 +788,9 @@ def test_ai_judge_system_prompt_mix_rules():
     # 配置界面 GUI 文本（设置项名/工具提示/说明/选项标签）必须翻译
     assert "配置界面" in s and "必须翻译" in s
     assert "设置项名" in s
-    # 不确定时默认翻译：宁可多翻，不可漏翻玩家看到的界面文本
-    assert "不确定时默认翻译" in s
-    assert "宁可多翻" in s
+    # 不确定时不翻译：只翻判断明确的界面文本，模棱两可的保持原文
+    assert "不确定时选择不翻译" in s
+    assert "保持原文" in s
     # 仅明确技术类排除（开发日志/序列化格式/本地化键）
     assert "开发日志" in s and "排除" in s
     assert "developer_log" in s

@@ -27,7 +27,8 @@ def test_scan_dat_hits_command(tmp_path: Path):
     p = tmp_path / "x.dat"
     _make_dat(p, {"Command": "say Hello world", "Unrelated": "skip me"})
     hits = scan_dat(p, {"Command"})
-    assert len(hits) == 1 and hits[0]["text"] == "say Hello world"
+    # 只收集指令的文本参数（say 后的引号文本），不整体翻译指令字
+    assert len(hits) == 1 and hits[0]["text"] == "Hello world"
     # M4-6：scan_world 给每个 entry 补 file 字段，写回需要知道目标文件
     world_hits = scan_world(tmp_path)
     assert world_hits and world_hits[0]["file"] == str(p)
@@ -121,11 +122,53 @@ def _make_modern_mca(path: Path):
     path.write_bytes(_build_mca_bytes(zlib.compress(buf.getvalue())))
 
 
+def _make_entities_mca(path: Path):
+    """生成含 entities 列表（实体 CustomName，剧情地图 NPC）的 .mca 副本。"""
+    import io
+    import zlib
+    from nbt.nbt import NBTFile, TAG_Compound, TAG_Int, TAG_List, TAG_String
+
+    root = NBTFile()
+    root.tags.append(TAG_Int(name="DataVersion", value=3465))
+    ents = TAG_List(name="entities", type=TAG_Compound)
+    ent = TAG_Compound()
+    ent.tags.extend([
+        TAG_String(name="id", value="minecraft:armor_stand"),
+        TAG_String(name="CustomName", value="Guard Captain"),
+    ])
+    ents.tags.append(ent)
+    root.tags.extend([
+        TAG_Int(name="xPos", value=0), TAG_Int(name="zPos", value=0),
+        ents,
+    ])
+    buf = io.BytesIO()
+    root.write_file(buffer=buf)
+    path.write_bytes(_build_mca_bytes(zlib.compress(buf.getvalue())))
+
+
 def test_scan_mca_block_entities(tmp_path: Path):
     p = tmp_path / "r.0.0.mca"
     _make_modern_mca(p)
     hits = scan_file(p, {"Command"})
-    assert any(h["text"] == "say Hello from mca" for h in hits)
+    # 命令方块只收集 say 的文本参数（保留指令字，不整体翻译）
+    assert any(h["text"] == "Hello from mca" for h in hits)
+
+
+def test_scan_customname_json_component(tmp_path):
+    """CustomName 是 JSON 组件（{"text":"NPC"}）→ 只收 text 值，不整体收集 JSON 串（会坏组件）。"""
+    p = tmp_path / "x.dat"
+    _make_dat(p, {"CustomName": '{"text":"Guard NPC","color":"green"}', "Unrelated": "skip"})
+    hits = scan_dat(p, {"CustomName"})
+    assert any(h["text"] == "Guard NPC" for h in hits)
+    assert not any(h["text"].lstrip().startswith("{") for h in hits)   # 不整体收集 JSON 串
+
+
+def test_scan_mca_entities_customname(tmp_path: Path):
+    """剧情地图实体 NPC 名（CustomName）也被扫描（此前只扫 block_entities，漏 NPC 名）。"""
+    p = tmp_path / "r.0.0.mca"
+    _make_entities_mca(p)
+    hits = scan_file(p, {"CustomName"})
+    assert any("Guard Captain" in h["text"] for h in hits)
 
 
 def test_scan_file_mca_empty_on_missing(tmp_path: Path):

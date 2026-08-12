@@ -24,7 +24,8 @@ def _read_entries(zf: zipfile.ZipFile, path: str, fmt: str) -> dict[str, str]:
     的 snake_case 技术标识符规则——语言文件值是可翻译文本，键才是标识符，
     "Requires_Armor" 这类 snake_case 形态真实短语必须放行。
     """
-    raw = zf.read(path).decode("utf-8")
+    raw = zf.read(path).decode("utf-8-sig")   # 修复（recheck）：剥 BOM——带 BOM 的 json 会让
+                                              # json.loads 抛 JSONDecodeError 整 jar 漏翻
     if fmt == "lang":
         parsed = parse_lang(raw)
     elif fmt == "properties":

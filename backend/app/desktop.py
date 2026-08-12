@@ -12,12 +12,27 @@ from pathlib import Path
 
 # 运行日志：frozen 时写 exe 旁 mc-translator.log（诊断窗口自动关闭等问题），否则项目根
 _log_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
-logging.basicConfig(
-    filename=str(_log_dir / "mc-translator.log"),
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    encoding="utf-8",
-)
+try:
+    logging.basicConfig(
+        filename=str(_log_dir / "mc-translator.log"),
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        encoding="utf-8",
+    )
+except OSError:
+    # 修复（recheck）：frozen 装到只读目录（如 Program Files）时 basicConfig 抛
+    # PermissionError → 应用启动即崩。回退系统临时目录，不阻断启动。
+    import tempfile
+    try:
+        logging.basicConfig(
+            filename=str(Path(tempfile.gettempdir()) / "mc-translator.log"),
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            encoding="utf-8",
+        )
+    except OSError:
+        logging.basicConfig(level=logging.INFO,
+                            format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("desktop")
 
 
@@ -64,7 +79,7 @@ p { color: #7d95a8; font-size: 14px; }
         animation: r 1s linear infinite; vertical-align: middle; }
 @keyframes r { to { transform: rotate(360deg); } }
 </style></head><body><div class="box">
-<h2><span class="spin"></span>MC 自动翻译器 正在启动…</h2>
+<h2><span class="spin"></span>像素译站 正在启动…</h2>
 <p>首次启动需解压运行环境（约 30~60 秒），请稍候</p>
 </div></body></html>"""
 
@@ -126,29 +141,43 @@ class _JsApi:
             return {"ok": False, "error": "任务不存在"}
         out_dir = OUTPUTS_DIR / task_id
         src: Path | None = None            # 直接复制的单文件（modjar / map）
-        buf: io.BytesIO | None = None      # modpack 打包总 zip 的内存缓冲
+        tmp_zip: Path | None = None        # modpack 打包总 zip 的临时文件（防整包内存驻留 OOM）
         save_filename: str | None = None
         if out_dir.is_dir():
-            # 与 download 端点同规则：顶层单个汉化 jar → 直接存；否则打包总 zip
+            # 与 download 端点同规则：顶层单个 jar → 直接存；有资源包/补丁包 → 打包总 zip；空 → 报错
             top_jars = sorted(out_dir.glob("*.jar"))
-            if top_jars and not any(out_dir.glob("*_*.zip")):
+            if top_jars:
                 src = top_jars[0]
                 save_filename = src.name
-            else:
-                buf = io.BytesIO()
-                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            elif len(top_zips := sorted(out_dir.glob("*.zip"))) == 1:
+                # 修复（recheck）：顶层成品**总 zip**（整合包汉化.zip / {光影名}-{语言}化.zip）
+                # 直接复制——原逻辑会 rglob 到该 zip 再打包一层（zip 套 zip），与 download
+                # 端点（直接返回顶层 zip）产物语义不一致
+                src = top_zips[0]
+                save_filename = src.name
+            elif any(out_dir.rglob("*.zip")):
+                # 修复：原 BytesIO 整包内存驻留 + write_bytes 会 OOM（几百 MB 资源包）——
+                # 改系统临时文件打包，复制到目标后再清理（对齐 /api/download 临时文件方案）
+                import os as _os
+                import tempfile
+                _fd, _tmp = tempfile.mkstemp(suffix=".zip")
+                _os.close(_fd)
+                tmp_zip = Path(_tmp)
+                with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
                     for f in sorted(out_dir.rglob("*")):
                         if f.is_file():
                             zf.write(f, f.relative_to(out_dir).as_posix())
-                buf.seek(0)
-                save_filename = f"{task_id}.zip"
+                save_filename = "整合包汉化.zip"   # 桌面保存框默认名（避免 task_id.zip）
+            else:
+                return {"ok": False, "error": "该任务审查未通过或无产物"}
         else:
             # map 任务：mcworld 直接落 OUTPUTS_DIR/<task_id>_*.mcworld
-            for f in sorted(OUTPUTS_DIR.glob(f"{task_id}_*.*")):
+            # 修复：后缀限定 .mcworld（原 *.* 会匹配同前缀任意文件，可能暴露错误产物）
+            for f in sorted(OUTPUTS_DIR.glob(f"{task_id}_*.mcworld")):
                 src = f
                 save_filename = f.name
                 break
-        if src is None and buf is None:
+        if src is None and tmp_zip is None:
             return {"ok": False, "error": "尚未生成产物"}
 
         import webview  # 方法内延迟 import：未装 pywebview 不影响模块导入/其余测试
@@ -163,9 +192,16 @@ class _JsApi:
             if src is not None:
                 shutil.copy2(src, dest_path)
             else:
-                dest_path.write_bytes(buf.getvalue())
-        except OSError as exc:
-            return {"ok": False, "error": f"写入失败：{exc}"}
+                shutil.copy2(tmp_zip, dest_path)
+        except OSError:
+            # 修复：错误消息泛化（不回吐底层 OSError 原文含完整目标路径）
+            return {"ok": False, "error": "写入失败，请检查目标位置是否有写入权限"}
+        finally:
+            if tmp_zip is not None:
+                try:
+                    tmp_zip.unlink(missing_ok=True)
+                except OSError:
+                    pass
         return {"ok": True, "path": str(dest_path)}
 
 
@@ -178,8 +214,12 @@ def main() -> None:
     import webview  # 延迟导入：未装 pywebview 时不影响其余代码
     # 注意：pywebview 6 的 create_window 不支持 icon 参数（窗口图标靠 exe 图标自动显示，PyInstaller spec 已设）
     # js_api 暴露 select_path/save_output 给前端，桌面版直接拿本地路径/弹保存框
-    window = webview.create_window("MC 自动翻译器", html=PLACEHOLDER_HTML,
-                                   width=1150, height=780, min_size=(900, 640),
+    window = webview.create_window("像素译站", html=PLACEHOLDER_HTML,
+                                   # 固定窗口 1240×800、不可调（用户指定）——空态 hero 的
+                                   # 「拖入整合包 / Mod / 地图 / 光影，开始汉化之旅」一行完整显示
+                                   # （task-panel 空态约占 54% ≈ 670px，超过 hero 600px 设计基准，
+                                   # 原尺寸一排不换行不缩放）
+                                   width=1240, height=800, resizable=False,
                                    js_api=_JsApi())
     # 响应式关闭：监听窗口 closed 事件（用户点叉），记录日志并让后端跟随退出。
     # 注意：进程退出真正由下方 webview.start() 返回后 os._exit 执行；

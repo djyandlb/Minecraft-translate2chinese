@@ -60,7 +60,7 @@ pywebview 在 Windows 默认用 MSHTML/Edge WebView2，无额外依赖；`webvie
 
 ### 2.5 Inno Setup 安装版
 
-`scripts/installer.iss`：AppName「MC 自动翻译器」、输出 `dist/安装版/MC自动翻译器-Setup.exe`、打包 onedir 产物、开始菜单/桌面快捷方式、卸载器。
+`scripts/installer.iss`：AppName「像素译站」、输出 `dist/安装版/像素译站-Setup.exe`、打包 onedir 产物、开始菜单/桌面快捷方式、卸载器。
 
 ## 三、任务分解
 
@@ -72,7 +72,7 @@ pywebview 在 Windows 默认用 MSHTML/Edge WebView2，无额外依赖；`webvie
 ### M6-2 PyInstaller 打包（便携版 onedir + onefile）
 - `scripts/mc_translator.spec`：Analysis(datas=前端dist/资源, hiddenimports=[keyring/jawa/nbtlib/anvil...])
 - 实测构建 → 修正 hiddenimports/data 到 exe 能跑 → 便携版可运行（启动、/api 通）
-- 产物：`dist/便携版/MC自动翻译器.exe`（onefile）与 `dist/安装版/`（onedir 源）
+- 产物：`dist/便携版/像素译站.exe`（onefile）与 `dist/安装版/`（onedir 源）
 
 ### M6-3 Inno Setup 安装版 + 一键脚本
 - `scripts/installer.iss` + `scripts/build_all.ps1`（前端 build → pyinstaller → inno）

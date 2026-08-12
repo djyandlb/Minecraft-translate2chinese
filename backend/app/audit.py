@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """官方术语质量审计：对语言文件译文逐条检查 MC 官方简中术语 / 占位符一致性 / 键名语义。
 
-参考 bfy-study translation-quality.js 的 auditTranslation：机械交付不变量为主，
-语言选择属于证据而非硬性路线指令——所以这里只给「必须保留官方术语/材料语义/占位符」
-的强规则（error）与「建议结合模型确认」的软规则（warning）。
+机械交付不变量为主：语言选择属于证据而非硬性路线指令——所以这里只给
+「必须保留官方术语/材料语义/占位符」的强规则（error）与「建议结合模型确认」的软规则（warning）。
 """
 import re
 from collections import defaultdict
@@ -63,7 +62,14 @@ def _audit_key_semantics(key: str, chinese: str, errors: list, warnings: list) -
         errors.append(_err(key, "键名表示打开动作，译文必须与关闭动作明确区分"))
     if re.search(r"(?:^|[._])close$", key, re.I) and not re.search(r"(?:关闭|合上)", chinese):
         errors.append(_err(key, "键名表示关闭动作，译文必须与打开动作明确区分"))
-    if re.search(r"(?:^|_)log(?:_|$)", key, re.I) and "原木" not in chinese:
+    # 修复（recheck）：log 是**原木**材料语义只在该键确实指物品时成立——debug_log/error_log/
+    # enable_log 等日志语境键会被误判「必须含原木」→ 真实译文「调试日志」被报 error 触发强制重翻。
+    # 排除日志语境前缀后，仅独立 log / 物品相关键才要求「原木」。
+    _log_key = re.search(r"(?:^|_)(log)(?:_|$)", key, re.I)
+    if (_log_key
+            and not re.search(r"(?:debug|error|chat|console|warn|info|enable|disable|level|file|"
+                              r"server|client|open|close|show|hide)_log", key, re.I)
+            and "原木" not in chinese):
         errors.append(_err(key, "键名含 log 表明是原木版本，译名必须保留「原木」"))
 
 
@@ -85,11 +91,16 @@ def _audit_with_source(key: str, english: str, chinese: str,
     if re.search(r"\bStem\b", english, re.I) and "菌柄" not in chinese:
         errors.append(_err(key, "Stem 必须保留「菌柄」材料含义"))
 
-    # Log/Timber/Wood 材料语义（排除 Journal/Logbook 等非材料含义）
-    if (re.search(r"\b(?:Log|Stem|Timber|Wood)\b", english, re.I)
-            and not re.search(r"\b(?:Journal|Logbook|Research Log|Data Log)\b", english, re.I)
+    # Log/Timber/Wood 材料语义（排除 Journal/Logbook 及日志语境等非材料含义）。
+    # 修复（recheck）："Debug Log"/"Chat log"/"Console Log"/"Log file" 等日志 UI 文本
+    # 之前被 \bLog\b 命中要求「原木」→ 真实译文「调试日志」被误报 error；排除表扩展日志语境。
+    # 另去掉 Stem（84 行单独要求「菌柄」，与「原木」矛盾——Stem 译文不含原木会被这里误报）。
+    if (re.search(r"\b(?:Log|Timber|Wood)\b", english, re.I)
+            and not re.search(r"\b(?:Journal|Logbook|Research Log|Data Log|Debug Log|Chat Log|"
+                              r"Console Log|Log File|Log Output|Server Log|Error Log|Game Log|"
+                              r"Logs?)\b", english, re.I)
             and "原木" not in chinese):
-        errors.append(_err(key, "原文含 Log/Stem/Timber/Wood 材料语义，译名必须保留「原木」"))
+        errors.append(_err(key, "原文含 Log/Timber/Wood 材料语义，译名必须保留「原木」"))
 
     # Pane Window 玻璃板（软规则，需结合模型确认）
     if (re.search(r"\b(?:Four )?Pane Window\b", english, re.I)
@@ -100,13 +111,36 @@ def _audit_with_source(key: str, english: str, chinese: str,
     # Pane Window 语序：材质 + 玻璃板 + 窗
     if re.search(r"\bPane Window\b", english, re.I) and "玻璃板" in chinese:
         material = next((m for pat, m in _MATERIAL_ORDER if re.search(pat, english, re.I)), None)
-        if material and chinese.index(material) > chinese.index("玻璃板"):
+        # 修复：material 未必出现在 AI 译文中（可能漏译材质词），必须先在 chinese 判存在，
+        # 否则 chinese.index 抛 ValueError → 冒泡炸掉整个翻译任务
+        if material and material in chinese and chinese.index(material) > chinese.index("玻璃板"):
             errors.append(_err(key, "物品名应采用「材质 + 玻璃板 + 窗」的自然语序"))
 
     # Window Base 底座（软规则）
     if (re.search(r"\bWindow (?:Four |Half )?Pane Base\b|\bWindow Base\b", english, re.I)
             and "底座" not in chinese):
         warnings.append(_warn(key, "作为合成组件的 Base 通常译为「底座」比「基础」自然"))
+
+
+def audit_invariants(source: dict[str, str], target: dict[str, str]) -> list[dict]:
+    """机械交付不变量审计：缺少译文（error）/ 占位符不一致（error）/ 额外条目（warning）。
+
+    对标主流汉化工具的不变量审计：不变量是硬性交付要求，**error 级 key
+    作为 hardKeys 由调用方强制重翻**（语言文件阶段审计→重翻闭环用），而非仅提示。
+    语言选择不属于此处（术语/语义由 audit_translation 负责）。
+    """
+    issues: list[dict] = []
+    for key, english in source.items():
+        chinese = target.get(key)
+        if not isinstance(chinese, str) or not chinese.strip():
+            issues.append(_err(key, "缺少中文译文"))
+            continue
+        if not validate(english, chinese):
+            issues.append(_err(key, "译文丢失或改写了占位符，与源文本不一致"))
+    for key in target:
+        if key not in source:
+            issues.append(_warn(key, "目标语言文件包含源语言不存在的额外条目"))
+    return issues
 
 
 def audit_translation(by_mod: dict[str, dict[str, str]], target: str,

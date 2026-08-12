@@ -2,7 +2,7 @@
 
 > **给代理工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实施此计划。步骤使用复选框（`- [ ]`）语法进行跟踪。
 
-**目标：** 构建 Windows 桌面应用「MC 自动翻译器」——把整合包、单个 mod、地图里的英文文本自动翻译成中文（目标语言参数化，默认 `zh_cn`），核心是「扫描提取 → 翻译引擎 → 资源包/改写输出」流水线。
+**目标：** 构建 Windows 桌面应用「像素译站」——把整合包、单个 mod、地图里的英文文本自动翻译成中文（目标语言参数化，默认 `zh_cn`），核心是「扫描提取 → 翻译引擎 → 资源包/改写输出」流水线。
 
 **架构：** Python FastAPI 后端 + Vue3 前端。开发期散装多文件直接跑（uvicorn + vite dev，浏览器访问），**不打包**；最后 debug 完才进入 M6 打包（pywebview 加载本地静态资源 + PyInstaller + Inno Setup 出安装版，另出单文件便携版，共两个版本）。翻译引擎抽象为可插拔接口，UI 互斥选择「LLM API」或「在线机翻」。
 
@@ -1207,7 +1207,7 @@ git add -A && git commit -m "feat: 任务状态与断点持久化"
 
 **实现要点：**（本任务代码由执行者按下列契约补全，模型与路由真实实现）
 - `models.py`：Pydantic `ScanRequest`、`TranslateRequest`、`ScanResponse`
-- `main.py`：`app = FastAPI(title="MC 自动翻译器")`；配置读写直接走 `AppConfig("config.json")`；`/api/scan` 同步扫描返回 ModScan 的 JSON 化列表；`/api/translate` 用 `asyncio` 后台任务跑 `create_engine` 逐批翻译并写入 `TaskStore`；`/api/task/{tid}` 返回任务进度；下载端点把生成的资源包 zip 用 `FileResponse` 返回
+- `main.py`：`app = FastAPI(title="像素译站")`；配置读写直接走 `AppConfig("config.json")`；`/api/scan` 同步扫描返回 ModScan 的 JSON 化列表；`/api/translate` 用 `asyncio` 后台任务跑 `create_engine` 逐批翻译并写入 `TaskStore`；`/api/task/{tid}` 返回任务进度；下载端点把生成的资源包 zip 用 `FileResponse` 返回
 - 测试：用 `fastapi.testclient.TestClient` 打 `POST /api/config` 与 `POST /api/scan`（临时目录造 jar）
 
 - [ ] 步骤 1：写失败测试（TestClient 打 config/scan）

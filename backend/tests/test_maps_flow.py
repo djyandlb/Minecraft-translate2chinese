@@ -94,4 +94,5 @@ async def test_flow_translates_mca_command(tmp_path, monkeypatch):
     with zipfile.ZipFile(out) as zf:
         data = zf.read("region/r.0.0.mca")
     root = _chunk0_nbt(data)
-    assert str(root["block_entities"][0]["Command"]) == "【译】say Hello from mca"
+    # 只替换指令的文本参数（say 后的文本），保留指令字——整体翻译会让指令无法执行
+    assert str(root["block_entities"][0]["Command"]) == "say 【译】Hello from mca"

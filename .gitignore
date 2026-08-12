@@ -10,3 +10,6 @@ _upstream/
 config.json
 backend/work/
 backend/_trunc.jar
+.pytest_cache/
+backend/cfpa_glossary.json
+backend/outputs/

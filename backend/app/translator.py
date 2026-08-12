@@ -10,6 +10,7 @@ from app.glossary import load_glossary, term_inject_prompt
 from app.memory import MemoryStore
 from app.models import TranslateRequest
 from app.resourcepack import build_resource_pack
+from app.safeerr import sanitize_error
 from app.scanner import scan_modpack, scan_jar
 from app.tasks import TaskState, TaskStore
 from app.translate.engine import create_engine
@@ -32,12 +33,16 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
     try:
         path = Path(req.path)
         if is_archive(path):
-            # 按任务隔离解压目录，避免并发任务共用 extracted/ 互相覆盖（F4）
-            path = extract_modpack(path, work_dir / "extracted" / task_id)
-        scans = (scan_jar(path, req.source_lang, req.target_lang)
-                 if req.mode == "jar"
-                 else scan_modpack(path, req.source_lang, req.target_lang, req.scope))
-        jobs = build_jobs(scans)
+            # 按任务隔离解压目录，避免并发任务共用 extracted/ 互相覆盖（F4）。
+            # 修复：同步解压/扫描大整合包阻塞事件循环 → to_thread
+            path = await asyncio.to_thread(
+                extract_modpack, path, work_dir / "extracted" / task_id)
+        if req.mode == "jar":
+            scans = await asyncio.to_thread(scan_jar, path, req.source_lang, req.target_lang)
+        else:
+            scans = await asyncio.to_thread(
+                scan_modpack, path, req.source_lang, req.target_lang, req.scope)
+        jobs = build_jobs(scans, req.target_lang)
         state.total = len(jobs)
         store.save(state)
 
@@ -62,7 +67,28 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
                         else version_to_pack_format("1.20.1")))
         by_mod: dict[str, dict[str, str]] = {}
 
-        for job in jobs:
+        # 修复（recheck）：逐条 translate_batch = 每条一次 HTTP 请求，数万条=数万次往返，
+        # 且每次带完整 system prompt，token/延迟爆炸。改为分桶：记忆命中 / 简繁直转直接填，
+        # 需引擎翻译的攒批后一次 translate_batch（引擎支持批量 + 内部降级链）。
+        need_engine: list[int] = []
+        translated_by_idx: dict[int, str] = {}
+        for i, job in enumerate(jobs):
+            if state.cancelled:
+                state.status = "cancelled"
+                store.save(state)
+                return
+            cached = memory.get(job.source_text, req.target_lang)
+            if cached:
+                translated_by_idx[i] = cached
+            elif same_script:
+                # 简繁双向直转，免 AI：zh_tw 走繁化，zh_cn 走简化（F5）
+                translated_by_idx[i] = (traditional(job.source_text)
+                                        if req.target_lang == "zh_tw"
+                                        else simplify(job.source_text))
+            else:
+                need_engine.append(i)
+        _bs = getattr(engine, "batch_size", 20)
+        for start in range(0, len(need_engine), _bs):
             if state.cancelled:
                 state.status = "cancelled"
                 store.save(state)
@@ -70,20 +96,23 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
             while state.paused and not state.cancelled:
                 # Y4：暂停等待也必须响应取消，否则取消被暂停卡死
                 await asyncio.sleep(0.5)
-            cached = memory.get(job.source_text, req.target_lang)
-            from_engine = False
-            if cached:
-                translated = cached
-            elif same_script:
-                # 简繁双向直转，免 AI：zh_tw 走繁化，zh_cn 走简化（F5）
-                translated = traditional(job.source_text) if req.target_lang == "zh_tw" else simplify(job.source_text)
-            else:
-                translated = (await engine.translate_batch([job.source_text], req.target_lang))[0]
-                from_engine = True
-            if from_engine and translated == job.source_text:
-                # Y3：引擎失败回原文 → 计入 failed，前端醒目提示
-                state.failed += 1
-            memory.set(job.source_text, req.target_lang, translated)
+            idxs = need_engine[start:start + _bs]
+            texts_batch = [jobs[i].source_text for i in idxs]
+            try:
+                results = await engine.translate_batch(texts_batch, req.target_lang)
+            except Exception:
+                # 修复：引擎异常（未配置 key/鉴权/网络）必须接住——整批保留原文继续
+                results = list(texts_batch)
+            for k, i in enumerate(idxs):
+                tr = results[k] if k < len(results) else texts_batch[k]
+                if tr == texts_batch[k]:
+                    state.failed += 1   # Y3：引擎失败回原文 → 计入 failed，前端醒目提示
+                translated_by_idx[i] = tr
+        # 写回产物 + 记忆（仅真译文写记忆，失败回原文不写，防记忆被原文污染固化失败）
+        for i, job in enumerate(jobs):
+            translated = translated_by_idx.get(i, job.source_text)
+            if translated != job.source_text:
+                memory.set(job.source_text, req.target_lang, translated)
             by_mod.setdefault(job.modid, {})[job.key] = translated
             state.done += 1
             state.progress.append({"key": job.key, "source": job.source_text,
@@ -105,7 +134,7 @@ async def run_translation(task_id: str, req: TranslateRequest, cfg: AppConfig,
         raise
     except Exception as e:
         state.status = "failed"
-        state.progress.append({"status": "error", "error": str(e)})
+        state.progress.append({"status": "error", "error": sanitize_error(str(e))})
         store.save(state)
     finally:
         # 任务终态（done/failed/cancelled）后清理任务级中间产物（temp），产物保留（C）
