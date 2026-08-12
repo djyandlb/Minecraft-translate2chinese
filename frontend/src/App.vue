@@ -78,6 +78,9 @@ async function removeProject(pid) {
 // 后端 _check_resume / run() 按内容指纹匹配项目记忆/进度，命中跳过已翻条目。
 async function resumeProject(p) {
   if (!p || !p.path) return
+  // 续联前移除同路径的旧任务（用户从任务行「可断点续联」点击触发时，
+  // 该任务还停在队列里，不移除会重复翻译同一文件）
+  jobs.value = jobs.value.filter(j => j.path !== p.path)
   try {
     await addPath(p.path, p.name)
     // detect 完成后自动启动队列（无需再点「开始翻译」）
@@ -232,7 +235,13 @@ function selectJob(taskId) {
 }
 
 // —— 配置弹窗：保存由后端 config.json 持久（configured 标记），不再依赖 localStorage；设置按钮可随时重开 ——
-function onConfigSaved(cfg) { config.value = { ...config.value, ...cfg } }
+function onConfigSaved(cfg) {
+  const prevCache = config.value.cache_dir
+  config.value = { ...config.value, ...cfg }
+  // 修复（用户诉求）：更换缓存目录后重新检测未完成项目——后端 _switch_work_dir
+  // 已把 progress/memory 迁移到新目录，前端需重新扫描才能显示可续联项目
+  if (cfg.cache_dir && cfg.cache_dir !== prevCache) loadProjects()
+}
 function closeSetup() {
   showSetup.value = false
   configured.value = true
