@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+build/
+dist/
+_upstream/
+*.log
+.superpowers/
+config.json
+backend/work/
+backend/_trunc.jar
+.pytest_cache/
+backend/cfpa_glossary.json
+backend/outputs/

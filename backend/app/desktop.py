@@ -1,0 +1,251 @@
+"""桌面壳：子线程起 uvicorn，pywebview 窗口加载本地前端。打包入口。
+
+pywebview 延迟 import（放在 main() 内）：未安装时不影响其余代码与测试。
+"""
+import logging
+import os
+import socket
+import sys
+import threading
+import time
+from pathlib import Path
+
+# 运行日志：frozen 时写 exe 旁 mc-translator.log（诊断窗口自动关闭等问题），否则项目根
+_log_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
+try:
+    logging.basicConfig(
+        filename=str(_log_dir / "mc-translator.log"),
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        encoding="utf-8",
+    )
+except OSError:
+    # 修复（recheck）：frozen 装到只读目录（如 Program Files）时 basicConfig 抛
+    # PermissionError → 应用启动即崩。回退系统临时目录，不阻断启动。
+    import tempfile
+    try:
+        logging.basicConfig(
+            filename=str(Path(tempfile.gettempdir()) / "mc-translator.log"),
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            encoding="utf-8",
+        )
+    except OSError:
+        logging.basicConfig(level=logging.INFO,
+                            format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("desktop")
+
+
+def _free_port() -> int:
+    """找一个空闲端口（绑定 127.0.0.1:0 由系统分配）。"""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _run_server(port: int) -> None:
+    import uvicorn
+    from app.main import app   # 对象导入：PyInstaller 静态分析可收集整个 app 包
+    try:
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    except Exception:
+        # 诊断：uvicorn 崩溃（某个请求导致）会体现在这里；不影响窗口，但记录便于排查
+        logger.exception("uvicorn 服务异常退出")
+
+
+def _wait_port(port: int, timeout: float = 10.0) -> None:
+    """M6-1 Important-3：阻塞等待 uvicorn 就绪，防 webview 抢先加载白屏。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.2)
+
+
+# 占位页：onefile 冷启动需解压运行环境（可达 30~60 秒），
+# 窗口先显示启动提示，服务器就绪后再切真实前端地址，根治「拒绝连接」
+PLACEHOLDER_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+body { font-family: "Microsoft YaHei", sans-serif; margin: 0; height: 100vh;
+       display: flex; align-items: center; justify-content: center;
+       background: #0f1720; color: #cfe3d8; }
+.box { text-align: center; }
+h2 { color: #58e6a0; }
+p { color: #7d95a8; font-size: 14px; }
+.spin { display: inline-block; width: 16px; height: 16px; margin-right: 8px;
+        border: 3px solid #2a3a45; border-top-color: #58e6a0; border-radius: 50%;
+        animation: r 1s linear infinite; vertical-align: middle; }
+@keyframes r { to { transform: rotate(360deg); } }
+</style></head><body><div class="box">
+<h2><span class="spin"></span>像素译站 正在启动…</h2>
+<p>首次启动需解压运行环境（约 30~60 秒），请稍候</p>
+</div></body></html>"""
+
+
+def _wait_and_load(window, port: int, timeout: float = 120.0) -> None:
+    """阻塞等服务器就绪（onefile 冷启动可达 40s+），就绪后把窗口切到真实前端地址。"""
+    _wait_port(port, timeout=timeout)
+    try:
+        window.load_url(f"http://127.0.0.1:{port}")
+    except Exception:
+        # 极端超时：占位页已给出提示，前端 api 封装也会兜底报「无法连接后端」
+        pass
+
+
+class _JsApi:
+    """暴露给前端 window.pywebview.api 的 Python 方法（桌面版专用）。
+
+    让前端拿到真实本地路径（选文件/选目录），不再依赖浏览器上传妥协。
+    """
+
+    def select_path(self, kind: str) -> list:
+        """kind='file'|'folder'：打开系统对话框选文件/目录，返回路径列表（未选返回空列表）。
+
+        先做 kind 白名单校验，非法值不弹对话框、不触达 webview 调用。
+        """
+        if kind not in ("file", "folder"):
+            return []
+        import webview  # 方法内延迟 import：未装 pywebview 不影响模块导入/其余测试
+        win = webview.windows[0]   # pywebview 维护全局 windows 列表，取首个窗口
+        if kind == "folder":
+            res = win.create_file_dialog(webview.FOLDER_DIALOG)
+        else:
+            res = win.create_file_dialog(
+                webview.OPEN_DIALOG,
+                file_types=("JAR/ZIP/MCWORLD (*.jar;*.zip;*.mrpack;*.mcworld)",
+                            "*.jar;*.zip;*.mrpack;*.mcworld",
+                            "所有文件 (*.*)", "*.*"),
+            )
+        return res or []
+
+    def save_output(self, task_id: str) -> dict:
+        """桌面版下载：弹「保存」对话框，把任务产物写到用户选择的位置。
+
+        产物解析与 /api/task/{id}/download 完全一致：
+          - modjar  → OUTPUTS_DIR/<task_id>/ 下单个汉化 jar → 直接保存该 jar；
+          - modpack → 资源包+补丁包多文件 → 打包总 zip（与下载端点相同产物）；
+          - map     → OUTPUTS_DIR/<task_id>_*.mcworld → 直接保存。
+        返回 {"ok": True, "path": ...} 或 {"ok": False, "error": ...}。
+        """
+        import io
+        import re
+        import shutil
+        import zipfile
+        from pathlib import Path
+        from app.main import OUTPUTS_DIR   # 惰性取当前值：测试可 monkeypatch
+
+        # task_id 为 12 位十六进制 uuid 前缀，先校验再拼路径，防路径注入（F6 对齐 download 端点）
+        if not re.fullmatch(r"[0-9a-f]{12}", str(task_id)):
+            return {"ok": False, "error": "任务不存在"}
+        out_dir = OUTPUTS_DIR / task_id
+        src: Path | None = None            # 直接复制的单文件（modjar / map）
+        tmp_zip: Path | None = None        # modpack 打包总 zip 的临时文件（防整包内存驻留 OOM）
+        save_filename: str | None = None
+        if out_dir.is_dir():
+            # 与 download 端点同规则：顶层单个 jar → 直接存；有资源包/补丁包 → 打包总 zip；空 → 报错
+            top_jars = sorted(out_dir.glob("*.jar"))
+            if top_jars:
+                src = top_jars[0]
+                save_filename = src.name
+            elif len(top_zips := sorted(out_dir.glob("*.zip"))) == 1:
+                # 修复（recheck）：顶层成品**总 zip**（整合包汉化.zip / {光影名}-{语言}化.zip）
+                # 直接复制——原逻辑会 rglob 到该 zip 再打包一层（zip 套 zip），与 download
+                # 端点（直接返回顶层 zip）产物语义不一致
+                src = top_zips[0]
+                save_filename = src.name
+            elif any(out_dir.rglob("*.zip")):
+                # 修复：原 BytesIO 整包内存驻留 + write_bytes 会 OOM（几百 MB 资源包）——
+                # 改系统临时文件打包，复制到目标后再清理（对齐 /api/download 临时文件方案）
+                import os as _os
+                import tempfile
+                _fd, _tmp = tempfile.mkstemp(suffix=".zip")
+                _os.close(_fd)
+                tmp_zip = Path(_tmp)
+                with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for f in sorted(out_dir.rglob("*")):
+                        if f.is_file():
+                            zf.write(f, f.relative_to(out_dir).as_posix())
+                save_filename = "整合包汉化.zip"   # 桌面保存框默认名（避免 task_id.zip）
+            else:
+                return {"ok": False, "error": "该任务审查未通过或无产物"}
+        else:
+            # map 任务：mcworld 直接落 OUTPUTS_DIR/<task_id>_*.mcworld
+            # 修复：后缀限定 .mcworld（原 *.* 会匹配同前缀任意文件，可能暴露错误产物）
+            for f in sorted(OUTPUTS_DIR.glob(f"{task_id}_*.mcworld")):
+                src = f
+                save_filename = f.name
+                break
+        if src is None and tmp_zip is None:
+            return {"ok": False, "error": "尚未生成产物"}
+
+        import webview  # 方法内延迟 import：未装 pywebview 不影响模块导入/其余测试
+        win = webview.windows[0]   # pywebview 维护全局 windows 列表，取首个窗口
+        dest = win.create_file_dialog(webview.SAVE_DIALOG, save_filename=save_filename)
+        if not dest:
+            return {"ok": False, "error": "已取消保存"}
+        # SAVE_DIALOG 各平台返回值可能是 str 或 tuple，统一取首项
+        dest_path = Path(dest if isinstance(dest, str) else dest[0])
+        try:
+            dest_path.parent.mkdir(parents=True, exist_ok=True)   # 防御：目标父目录缺失时先创建
+            if src is not None:
+                shutil.copy2(src, dest_path)
+            else:
+                shutil.copy2(tmp_zip, dest_path)
+        except OSError:
+            # 修复：错误消息泛化（不回吐底层 OSError 原文含完整目标路径）
+            return {"ok": False, "error": "写入失败，请检查目标位置是否有写入权限"}
+        finally:
+            if tmp_zip is not None:
+                try:
+                    tmp_zip.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return {"ok": True, "path": str(dest_path)}
+
+
+def main() -> None:
+    """启动后台 API 服务 + 桌面窗口。"""
+    # 标记桌面壳：/api/desktop 据此返回 true（前端下载等走桌面路径，不依赖 window.pywebview 检测）
+    os.environ["MC_DESKTOP"] = "1"
+    logger.info("桌面壳启动，端口 %s", (port := _free_port()))
+    threading.Thread(target=_run_server, args=(port,), daemon=True).start()
+    import webview  # 延迟导入：未装 pywebview 时不影响其余代码
+    # 注意：pywebview 6 的 create_window 不支持 icon 参数（窗口图标靠 exe 图标自动显示，PyInstaller spec 已设）
+    # js_api 暴露 select_path/save_output 给前端，桌面版直接拿本地路径/弹保存框
+    window = webview.create_window("像素译站", html=PLACEHOLDER_HTML,
+                                   # 固定窗口 1240×800、不可调（用户指定）——空态 hero 的
+                                   # 「拖入整合包 / Mod / 地图 / 光影，开始汉化之旅」一行完整显示
+                                   # （task-panel 空态约占 54% ≈ 670px，超过 hero 600px 设计基准，
+                                   # 原尺寸一排不换行不缩放）
+                                   width=1240, height=800, resizable=False,
+                                   js_api=_JsApi())
+    # 响应式关闭：监听窗口 closed 事件（用户点叉），记录日志并让后端跟随退出。
+    # 注意：进程退出真正由下方 webview.start() 返回后 os._exit 执行；
+    # 事件只用于「区分正常关闭 vs 异常/WebView2 崩溃」的诊断（用户反馈窗口会自动关闭）。
+    closed_flag = threading.Event()
+
+    def _on_closed() -> None:
+        logger.info("窗口 closed 事件触发（用户点击关闭按钮）")
+        closed_flag.set()
+
+    try:
+        window.events.closed += _on_closed
+    except Exception as exc:
+        logger.warning("注册窗口关闭事件失败（不影响退出）：%s", exc)
+    # 先加载占位页（防服务器未就绪时前端「拒绝连接」），就绪后切真实 URL
+    threading.Thread(target=_wait_and_load, args=(window, port), daemon=True).start()
+    webview.start()
+    # 走到这里说明窗口已全部关闭（start 返回）。区分关闭原因便于诊断「窗口自动关闭」：
+    if closed_flag.is_set():
+        logger.info("正常退出：用户关闭窗口 → 后端跟随退出")
+    else:
+        logger.warning("进程退出但未收到窗口 closed 事件——窗口可能异常关闭/WebView2 崩溃")
+    # 窗口全部关闭 → 强制退出进程：uvicorn 是 daemon 子线程，start() 返回后
+    # 本应随进程退出，os._exit 兜底确保「关闭前端窗口即关掉整个后端」（O2）
+    os._exit(0)
+
+
+if __name__ == "__main__":
+    main()
