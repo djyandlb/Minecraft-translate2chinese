@@ -314,9 +314,11 @@ onMounted(async () => {
         if (st.configured) apiKey.value = API_KEY_PLACEHOLDER
       } catch (e) { /* 后端不可用则保持空白，让用户手动填 */ }
     }
+    loaded = true                 // getConfig 成功即允许保存（防后端未就绪时用默认覆盖已有配置）。
+                                  // 必须放在 refresh 前——翻译中重开设置时 refresh 慢/失败不影响保存，
+                                  // 否则用户立即改吞吐点保存会被「配置读取失败」误拦（用户实测）
     await refreshCacheSize()      // 回填配置后顺带加载缓存占用
     await refreshCfpaStatus()     // 加载 CFPA 社区词库状态
-    loaded = true                 // 回填成功才允许 autoSave 写盘（防后端未就绪时用默认覆盖已有配置）
   } catch (e) {
     tip.value = '读取后端配置失败（后端未启动？将使用默认值）'
   } finally {
@@ -335,11 +337,6 @@ function onKeyFocus() {
 async function saveAndClose() {
   saving.value = true
   error.value = ''
-  if (!loaded) {
-    error.value = '无法保存：后端配置读取失败，请确认应用已完全启动后重试'
-    saving.value = false
-    return
-  }
   try {
     // 修复：api_key 只写后端 keyring（AI 引擎真正读取的地方），不再落 localStorage——
     // 明文存 key 冗余且不安全（keyring 是权威，localStorage 这份拷贝毫无必要）
