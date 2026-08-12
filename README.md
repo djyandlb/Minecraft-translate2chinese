@@ -116,15 +116,8 @@ Minecraft-translate/
 │   └── tests/               # 370+ 测试
 ├── frontend/                # Vue 3 前端
 ├── assets/                  # 应用图标
-├── scripts/                 # 打包脚本
-└── docs/                    # 文档 / 界面预览
+└── scripts/                 # 打包脚本
 ```
-
----
-
-## 🖥 界面预览
-
-查看主界面交互版预览（纸张工坊风格）：**[ui-preview.html](docs/ui-preview.html)**
 
 ---
 
