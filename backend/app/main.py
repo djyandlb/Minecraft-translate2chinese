@@ -1120,21 +1120,48 @@ async def cfpa_download(payload: dict):
             "count": g["count"], "size_mb": g["size_mb"]}
 
 
+# GitHub 镜像代理前缀（国内可访问，官方直连失败时依次尝试，总能下到）。
+# 代理的是 github.com / api.github.com / raw 路径；download URL 形如
+# https://github.com/<owner>/<repo>/releases/download/<tag>/<asset> 同样可代理。
+_GITHUB_PROXIES = [
+    "",                       # 官方直连
+    "https://ghfast.top/",    # ghfast 镜像
+    "https://gh-proxy.com/",  # gh-proxy 镜像
+    "https://ghproxy.net/",   # ghproxy.net 镜像
+]
+
+
+async def _github_get(client: httpx.AsyncClient, url: str) -> httpx.Response | None:
+    """带多镜像代理的 GET：官方 + 各镜像依次尝试，第一个 200 返回；全失败返回 None。"""
+    for prefix in _GITHUB_PROXIES:
+        try:
+            resp = await client.get(f"{prefix}{url}", timeout=20)
+            if resp.status_code == 200:
+                return resp
+        except Exception:
+            continue
+    return None
+
+
 async def _github_latest_jar(repo: str, asset_filter) -> tuple[str, bytes] | None:
     """GitHub latest release：拿 tag + 匹配 asset 的 jar bytes（PK 头校验防反代污染）。
-    失败返回 None（网络/无匹配）。"""
+    **多源**：官方直连失败自动走 ghfast/gh-proxy/ghproxy.net 镜像（修复 recheck：国内
+    直连 GitHub 超时「无法连接更新源」）。全失败返回 None（网络/无匹配）。"""
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"https://api.github.com/repos/{repo}/releases/latest")
-            resp.raise_for_status()
+            resp = await _github_get(client, f"https://api.github.com/repos/{repo}/releases/latest")
+            if resp is None:
+                return None
             data = resp.json()
             tag = str(data.get("tag_name", ""))
             for a in data.get("assets", []):
                 name = str(a.get("name", ""))
                 if name.endswith(".jar") and asset_filter(name):
-                    dl = await client.get(a.get("browser_download_url", ""))
-                    dl.raise_for_status()
-                    if dl.content[:2] == b"PK":
+                    url = a.get("browser_download_url", "")
+                    if not url:
+                        continue
+                    dl = await _github_get(client, url)
+                    if dl is not None and dl.content[:2] == b"PK":
                         return tag, dl.content
     except Exception:
         pass
@@ -1174,14 +1201,27 @@ async def _check_update_github(repo: str, asset_filter, subdir: str, prefix: str
 
 
 async def _check_update_cfpa(payload: dict) -> dict:
-    """CFPA 词库检查更新：联网拉取对应 MC 版本最新词库（下载 + 建索引）。"""
+    """CFPA 词库检查更新（版本检测）：联网拉取对应 MC 版本最新词库（下载 + 建索引），
+    下载后对比本地已下载版本——同版本提示「已最新」，不同版本提示「已更新」。"""
     mc = str(payload.get("mc_version", "") or "1.20.1").strip()
     try:
+        # 本地已下载版本（词库索引 mc_version）
+        local_ver = ""
+        if CFPA_PATH.exists():
+            try:
+                _g = json.loads(CFPA_PATH.read_text(encoding="utf-8"))
+                local_ver = str(_g.get("mc_version") or _g.get("version") or "")
+            except Exception:
+                pass
         g = await download_cfpa(mc, CFPA_PATH, on_progress=lambda _p: None)
         if g is None:
             return {"ok": False, "status": "unreachable", "message": "无法连接 CFPA 更新源，请重试"}
-        return {"ok": True, "status": "updated", "version": g["mc_version"],
-                "message": f"词库已更新（{g['mc_version']} · {g['count']} 词条）"}
+        new_ver = str(g.get("mc_version", mc))
+        if local_ver == new_ver and local_ver:
+            return {"ok": True, "status": "up_to_date", "version": new_ver,
+                    "message": f"词库已是最新（{new_ver}）"}
+        return {"ok": True, "status": "updated", "version": new_ver,
+                "message": f"词库已更新（{new_ver} · {g.get('count', 0)} 词条）"}
     except Exception as e:
         return {"ok": False, "status": "unreachable",
                 "message": f"无法连接 CFPA 更新源：{str(e)[:60]}"}

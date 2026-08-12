@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { checkUpdate, clearCache, downloadCfpa, getCacheSize, getCfpaStatus, getConfig, getKeyStatus, saveConfig, saveKey, testConnection, testThroughput } from '../api'
+import { checkUpdate, clearCache, getCacheSize, getCfpaStatus, getConfig, getKeyStatus, saveConfig, saveKey, testConnection, testThroughput } from '../api'
 
 // props：onDone(配置对象) / onClose() 由 App 注入（保存后回调）；closable=false 时隐藏「取消」（首次开屏强制配置）
 const props = defineProps({ onDone: Function, onClose: Function, closable: { type: Boolean, default: true } })
@@ -97,26 +97,19 @@ const cacheMsg = ref('')         // 清理结果提示
 const clearing = ref(false)      // 清除缓存进行中
 const showClearConfirm = ref(false)   // 自写清除缓存确认弹窗（不用浏览器 window.confirm）
 
-// CFPA 社区人工翻译词库：状态（已下载版本/词条数）+ 手动下载（按 MC 版本）
+// CFPA 社区人工翻译词库：状态（已下载版本/词条数）；检查更新走统一 runCheckUpdate（修复 recheck：
+// 原「下载词库」按钮换成新逻辑——版本检测 + 有更新下载/没更新提示/没连上重试，不再用老下载）
 const cfpaStatus = ref(null)     // { downloaded, mc_version, count, size_mb } 或 null
-const cfpaMsg = ref('')          // 下载结果提示
-const cfpaError = ref('')        // 下载错误
-const cfpaDownloading = ref(false)
 const cfpaVersion = ref('1.20.1')   // 默认 MC 版本（可改）
-// 下载实时进度：后端流式下载写全局进度，/status 合并返回，下载期间轮询展示（M2）
-const cfpaDlPct = ref(0)         // 下载百分比（无 content-length 时停滞在 0）
-const cfpaDlMB = ref('')         // 已下载 MB（文本，如 "12.3"）
-const cfpaDlTotal = ref('')      // 总 MB（有 content-length 才有）
-let cfpaTimer = null             // 下载进度轮询定时器
 // 三项内置资源（CFPA 词库 / i18n 汉化 mod / VP 硬编码 mod）「检查更新」状态
 // updState[kind] = { checking, msg, ok }，kind ∈ cfpa/i18n/vp
 const updState = ref({})
 async function runCheckUpdate(kind) {
-  // 通用检查更新（i18n / vp；CFPA 走 onDownloadCfpa——带进度条，不走这里）
   updState.value[kind] = { checking: true, msg: '', ok: null }
   try {
     const r = await checkUpdate({ kind, mc_version: cfpaVersion.value.trim() })
     updState.value[kind] = { checking: false, msg: r.message || '完成', ok: !!r.ok }
+    if (kind === 'cfpa' && r.ok) await refreshCfpaStatus()
   } catch (e) {
     updState.value[kind] = { checking: false, msg: e.message, ok: false }
   }
@@ -131,33 +124,6 @@ async function refreshCfpaStatus() {
       if (v) cfpaVersion.value = v.replace(/-/g, '.')
     }
   } catch { cfpaStatus.value = null }   // 后端不可用 → 显示「未下载」
-}
-async function onDownloadCfpa() {
-  cfpaDownloading.value = true
-  cfpaMsg.value = ''; cfpaError.value = ''
-  cfpaDlPct.value = 0; cfpaDlMB.value = ''; cfpaDlTotal.value = ''
-  // 下载期间轮询进度：/status 合并 download_progress（active 才显示进度条）
-  cfpaTimer = setInterval(async () => {
-    try {
-      const st = await getCfpaStatus()
-      const p = st?.download_progress
-      if (p?.active) {
-        cfpaDlPct.value = p.pct || 0
-        cfpaDlMB.value = p.downloaded ? (p.downloaded / 1048576).toFixed(1) : ''
-        cfpaDlTotal.value = p.total ? (p.total / 1048576).toFixed(0) : ''
-      }
-    } catch { /* 单次轮询失败忽略，下载主流程不受影响 */ }
-  }, 400)
-  try {
-    const r = await downloadCfpa(cfpaVersion.value.trim())
-    cfpaStatus.value = r
-    cfpaMsg.value = `词库已更新：${r.mc_version} · ${r.count} 词条（${r.size_mb}MB）`
-  } catch (e) {
-    cfpaError.value = e.message
-  } finally {
-    clearInterval(cfpaTimer); cfpaTimer = null
-    cfpaDownloading.value = false
-  }
 }
 
 async function refreshCacheSize() {
@@ -295,9 +261,6 @@ watch([engine, provider, baseUrl, model, targetLang, concurrency, scanConcurrenc
 // 组件卸载（关窗/销毁）时立即保存当前值，防防抖窗口期内的改动丢失（webview 关窗会丢弃 pending setTimeout）
 onUnmounted(() => {
   clearTimeout(saveTimer)
-  // 修复：CFPA 下载进度轮询定时器在组件卸载时必须清理，否则下载未完成时
-  // 每 400ms 持续请求 /api/cfpa/status 泄漏到组件销毁后
-  if (cfpaTimer) { clearInterval(cfpaTimer); cfpaTimer = null }
   saveConfig(buildConfigBody()).catch(() => {})   // 幂等：与保存按钮同值，静默兜底
   // 修复（recheck）：点「关闭」关窗时同步前端 config——否则后端已存 target_lang，前端
   // config 还是旧值，后续 detect/autoTranslate 请求带旧语言。之前引用未定义的 body
@@ -536,22 +499,12 @@ async function saveAndClose() {
           MC
           <input class="ver-input" v-model="cfpaVersion" placeholder="1.20.1" />
         </span>
-        <button class="btn" :disabled="cfpaDownloading" @click="onDownloadCfpa">
-          {{ cfpaDownloading ? '检查中……' : '检查更新' }}
+        <button class="btn" :disabled="updState.cfpa?.checking" @click="runCheckUpdate('cfpa')">
+          <span v-if="updState.cfpa?.checking" class="spinner"></span>{{ updState.cfpa?.checking ? '检查中……' : '检查更新' }}
         </button>
       </div>
-      <small class="sub">应用已内置 6 版本 CFPA 人工翻译词库（1.12.2~1.21），翻译时按整合包 MC 版本自动加载对应版本；「检查更新」可拉取最新版。</small>
-      <!-- 下载进度条：流式下载中实时显示（无 content-length 时只显示已下载 MB） -->
-      <div v-if="cfpaDownloading" class="cfpa-progress">
-        <div class="cfpa-progress-track">
-          <div class="cfpa-progress-bar" :style="{ width: (cfpaDlPct || 0) + '%' }"></div>
-        </div>
-        <span class="cfpa-progress-text">
-          {{ cfpaDlPct || 0 }}%<template v-if="cfpaDlTotal"> · {{ cfpaDlMB }} / {{ cfpaDlTotal }}MB</template>
-        </span>
-      </div>
-      <p v-if="cfpaMsg" class="tip">{{ cfpaMsg }}</p>
-      <p v-if="cfpaError" class="err">{{ cfpaError }}</p>
+      <small class="sub">应用已内置 6 版本 CFPA 人工翻译词库（1.12.2~1.21），翻译时按整合包 MC 版本自动加载对应版本；「检查更新」联网拉取最新版（有更新自动下载，无更新/无网络明确提示）。</small>
+      <p v-if="updState.cfpa?.msg" class="tip" :class="{ err: !updState.cfpa?.ok }">{{ updState.cfpa.msg }}</p>
     </div>
 
     <!-- i18n 汉化模组：内置 + 检查更新（更新版下载到应用目录，清缓存不删） -->
