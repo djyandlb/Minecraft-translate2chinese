@@ -112,11 +112,13 @@ class _JsApi:
         if kind == "folder":
             res = win.create_file_dialog(webview.FOLDER_DIALOG)
         else:
+            # pywebview 6.x：file_types 每个元素必须是「英文描述 (*.ext)」完整形式——
+            # 校验正则 ^([\w ]+)\((\.*...)\)$ 只认字母数字空格描述，中文/斜杠/裸模式串
+            # 都会抛 "not a valid file filter"（用户实测点击选文件报错）
             res = win.create_file_dialog(
                 webview.OPEN_DIALOG,
-                file_types=("JAR/ZIP/MCWORLD (*.jar;*.zip;*.mrpack;*.mcworld)",
-                            "*.jar;*.zip;*.mrpack;*.mcworld",
-                            "所有文件 (*.*)", "*.*"),
+                file_types=("Minecraft packs (*.jar;*.zip;*.mrpack;*.mcworld)",
+                            "All files (*.*)"),
             )
         return res or []
 
