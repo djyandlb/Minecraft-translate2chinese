@@ -117,8 +117,11 @@ def _is_pack_text_carrier(rel: str) -> bool:
     整合包自定义资源包/自带 lang（含 FTBQ 翻译键 ftbquestlocalizer、Create ponder 键等）
     全收，否则这些用户可见文本漏翻。"""
     p = PurePosixPath(rel)
-    if "assets" in p.parts and "lang" in p.parts:
-        return True    # 语言文件 assets/<mod>/lang/en_us.*（含 kubejs/assets、自定义资源包）
+    # 语言文件 assets/<mod>/lang/en_us.*（含 kubejs/assets、自定义资源包）。
+    # 修复（recheck）：只收 en_us（大小写不敏感）——原不区分语言码，de_de/zh_cn 等
+    # 也被当源提取翻译并原地覆盖，破坏 mod 自带多语言（用户实测方向）。
+    if "assets" in p.parts and "lang" in p.parts and p.name.lower().startswith("en_us"):
+        return True
     if "patchouli_books" in p.parts and "en_us" in p.parts:
         return True    # Patchouli 教程书
     if rel.startswith("config/ftbquests/") or rel.startswith("config/betterquesting/"):
@@ -129,8 +132,9 @@ def _is_pack_text_carrier(rel: str) -> bool:
 
 
 def _has_en_us_segment(path: str) -> bool:
-    """路径是否含 en_us 段（如 patchouli 书 assets/*/patchouli_books/*/en_us/...）。"""
-    return "en_us" in PurePosixPath(path).parts
+    """路径是否含 en_us 段（如 patchouli 书 assets/*/patchouli_books/*/en_us/...）。
+    大小写不敏感（修复 recheck：实测不少 mod 用 en_US 大写语言码，原判定漏收）。"""
+    return any(s.lower().startswith("en_us") for s in PurePosixPath(path).parts)
 
 
 def _zh_cn_path(path: str, target_lang: str = "zh_cn") -> str:
@@ -143,7 +147,8 @@ def _zh_cn_path(path: str, target_lang: str = "zh_cn") -> str:
     """
     parts = PurePosixPath(path).parts
     replaced = tuple(
-        (target_lang + p[len("en_us"):]) if p == "en_us" or p.startswith("en_us") else p
+        # 大小写不敏感（修复 recheck）：en_US.json / en_US/ 段也替换为目标语言
+        (target_lang + p[len("en_us"):]) if p.lower() == "en_us" or p.lower().startswith("en_us") else p
         for p in parts
     )
     return str(PurePosixPath(*replaced))
@@ -207,6 +212,25 @@ def _lines_entries(lines: list[str]) -> dict[str, str]:
             continue
         if s.lower() in _EASING_KEYWORDS:
             continue
+        out[f"line{i}"] = line
+    return out
+
+
+def _guide_lines_entries(lines: list[str]) -> dict[str, str]:
+    """GuideME 指南 md 行提取（v1.2.1 修复 recheck 🔴）：在 _lines_entries 基础上跳过
+    YAML front matter 键行（title:/parent: xxx.md）与组件标签行（<ItemLink>/<GameScene>）——
+    原逐行整行翻译会把 front matter 键名/组件标签改坏，AE2 指南解析失败、指南损坏。"""
+    out: dict[str, str] = {}
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not s:
+            continue
+        if s.lower() in _EASING_KEYWORDS:
+            continue
+        if re.match(r"^[A-Za-z_][\w-]*\s*:", s):
+            continue                    # front matter / YAML 键值行（title:/parent:）
+        if "<" in s and ">" in s:
+            continue                    # 组件标签行（<ItemLink .../> 等）
         out[f"line{i}"] = line
     return out
 
@@ -372,7 +396,8 @@ def discover_text_sources(jar: Path, target_lang: str = "zh_cn") -> list[TextSou
                 except UnicodeDecodeError:
                     continue
                 lines, snapshot = _split_lines(raw)
-                entries = _lines_entries(lines)
+                # guide（GuideME 指南）用严格提取：跳过 front matter/组件标签行，只翻正文
+                entries = (_guide_lines_entries(lines) if is_guide else _lines_entries(lines))
                 if not entries:
                     continue
                 # 已有目标语言版本（zh_cn/ 或 _zh_cn/ 镜像）跳过，不重翻自带中文 mod。
@@ -473,7 +498,12 @@ def _render_lang(work: Path, source: TextSource, translations: dict[str, str]) -
     data: dict[str, str] = {}
     if tgt.exists():
         data = _parse_lang_entry(fmt, tgt.read_bytes().decode("utf-8-sig"))
-    data.update(translations)
+    # 修复（recheck）：合并时**保留已有目标语言键**（mod 自带中文/人工译文不被 AI 覆盖），
+    # 只补 en_us 有而 target 缺失的键。原 data.update(translations) 会把已有中文键覆盖成
+    # AI 译文，质量回退（用户实测「本就适配中文的 mod 别胡扯重翻」）。
+    for k, v in translations.items():
+        if k not in data:
+            data[k] = v
     if fmt == "lang":
         return write_lang(data)
     if fmt == "properties":
@@ -729,8 +759,12 @@ def _pack_json_source(root: Path, p: Path, rel: str, target_lang: str = "zh_cn")
     游戏按目标语言读 zh_cn 永远看不到（用户实测 KubeJS 物品 + FTB 任务翻译键未汉化）。"""
     data = json.loads(p.read_bytes().decode("utf-8-sig"))
     entries: dict[str, str] = {}
+    # 修复（recheck）：语言文件（/lang/）用宽松过滤（lang_value_ok，同 jar 模式）——
+    # _pack_should_translate 的 should_translate 会把 "Requires_Armor" 这类 snake_case 真实
+    # 短语当技术标识滤掉（用户可见文本漏翻，与 jar 模式 lang 行为不一致）
+    _value_filter = (lambda v: lang_value_ok(v)) if "/lang/" in rel else _pack_should_translate
     # advancements 只收 display.title/description 文本，不收 criteria 触发条件（代码逻辑）
-    _walk_json(data, "", entries, _pack_should_translate,
+    _walk_json(data, "", entries, _value_filter,
                allow_keys=_ADV_TEXT_PATHS if _is_advancement_json(rel) else None)
     if not entries:
         return None
@@ -806,9 +840,12 @@ _JS_STR_RE = re.compile(r"""(['"])((?:\\.|(?!\1).)*)\1""")
 # 下划线/短横线（display_name、display-name），归一化后统一命中白名单（修复 recheck：
 # displayName 漏出白名单 → KubeJS 物品显示名整个脚本不进翻译流程，用户实测未汉化）。
 _JS_TEXT_FIELDS = {"text", "title", "name", "subtitle", "description",
-                   "tooltip", "line", "lines", "message", "display_name"}
-# 数组字段（tooltip: ['a','b'] / lines: [...]）：进入数组后本行及后续行的字符串都收，直到 ]
-_ARRAY_FIELDS = {"tooltip", "lines", "text", "line", "description", "message"}
+                   "tooltip", "line", "lines", "message", "display_name", "add"}
+# 数组字段（tooltip: ['a','b'] / lines: [...] / event.add('id', [...])）：
+# 进入数组后本行及后续行的字符串都收，直到 ]。
+# 修复（recheck）：加 add——KubeJS 1.20.1 官方 tooltip API 是 ItemEvents.tooltip +
+# event.add('modid:item', ['text',...])，原白名单只认对象属性 tooltip:，官方 API 整段漏收。
+_ARRAY_FIELDS = {"tooltip", "lines", "text", "line", "description", "message", "add"}
 # 字段名提取：`text: 'x'`（字段名+冒号）或 `.title('x')` / `text('x')`（方法调用）
 _JS_FIELD_RE = re.compile(r"([A-Za-z_$][\w$]*)\s*:\s*$")
 _JS_METHOD_FIELD_RE = re.compile(r"[.(\s]([A-Za-z_$][\w$]*)\s*\(\s*$")
@@ -867,14 +904,14 @@ def _pack_js_source(root: Path, p: Path, rel: str) -> TextSource | None:
     for li, line in enumerate(lines):
         opens = line.count("[")
         closes = line.count("]")
-        # 数组头检测（修复 recheck）：`tooltip: [` 单独成行（Prettier 常用折行）时本行
-        # 没有字符串字面量，原状态机只在「字符串匹配行」置位 in_array → 首元素及后续
-        # 元素全漏收（整段 tooltip 漏翻）。这里对每行先扫数组字段头（.tooltip([ /
-        # tooltip: [），命中即进入数组状态；同行数组（['a','b']）opens==closes 不提前置位，
-        # 仍走字符串匹配逻辑，互不冲突。
-        if not in_array and opens > closes:
+        # 数组头检测（修复 recheck）：`tooltip: [` / `.add('id', [` / 折行——本行出现
+        # **数组字段调用**（.add( / .tooltip( / tooltip: 等）+ 行内 `[` 即进入数组态。
+        # 原限制 opens>closes 漏掉同行数组（event.add('id', ['First','Second']) opens==closes，
+        # 且元素前有参数 'id', 导致 _js_field_before 匹配不到字段）；纯数组行（['a','b']）
+        # 无字段调用不置位，仍走字符串匹配逻辑，互不冲突。
+        if not in_array:
             for _f in _ARRAY_FIELDS:
-                if re.search(rf"(?:\.{re.escape(_f)}\s*\(|{re.escape(_f)}\s*:)\s*\[", line):
+                if re.search(rf"(?:\.{re.escape(_f)}\s*\(|{re.escape(_f)}\s*:)", line) and "[" in line:
                     in_array = True
                     break
         pos = 0
@@ -895,7 +932,10 @@ def _pack_js_source(root: Path, p: Path, rel: str) -> TextSource | None:
             if norm_field in _ARRAY_FIELDS and "[" in before:
                 in_array = True
             pos = m.end(1)
-        if in_array and closes >= opens:
+        # 修复（recheck）：退出条件加 closes>0——中间元素行（'Bbb', 行 closes==opens==0）
+        # 原逻辑 closes>=opens 成立 → 提前复位 in_array → 后续跨行元素漏收。
+        # 只有行内**实际出现 ]**（closes>0）且闭合（closes>=opens）才退出数组态。
+        if in_array and closes >= opens and closes > 0:
             in_array = False
     if not entries:
         return None

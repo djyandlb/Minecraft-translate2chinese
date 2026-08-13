@@ -1417,11 +1417,14 @@ class AutoFlow:
                         retry_items.append({"key": key, "text": source, "sink": entries,
                                             "modid": modid, "reason": fb})
         if retry_items:
+            # keep_original_ok=False（修复 recheck 🔴）：归一化重翻的条目原本有译文，若 AI
+            # forced 重翻返回原文（source），keep_original_ok=True 会把原文写回 sink 覆盖
+            # 已有译文 → 产物英文残留且收敛循环不恢复。这里拒绝原文写回（宁保留旧译文）。
             await self._translate_batch_pipeline(
                 retry_items,
                 lambda texts, _reasons=None: self._engine_translate(texts, _reasons, forced=True),
                 batch_size=5, skip_fn=lambda t: False,
-                force_engine=True, count_done=False)
+                force_engine=True, count_done=False, keep_original_ok=False)
             # 收敛：AI 重翻后仍 == 旧变体（未遵循提示）→ 定向替换 canonical（同语境安全）
             for source, canonical, old in unified:
                 for modid, entries in self.by_mod.items():
@@ -1864,8 +1867,10 @@ class AutoFlow:
                                                     "note": "AI 判断硬编码"})
                         self.store.save(self.state)
                     def _judge_done(n: int) -> None:
-                        # 批完成：逐批推进 done 与 hardcode 阶段明细（根因 1：不再整批静默）
-                        self._bump_stage(n)
+                        # 批完成：逐批推进 done 与 hardcode 阶段明细（根因 1：不再整批静默）。
+                        # 修复（recheck）：续联时硬编码候选全命中缓存不重判，无条件 _bump_stage
+                        # 会重复加 done（基准已含）→ 改 _bump_stage_only，与 pipeline 语义一致
+                        self._bump_stage(n) if not self._resume else self._bump_stage_only(n)
                         self.store.save(self.state)
                     # 省 token（用户诉求：14119 条候选烧 361 万 input token）：
                     # 硬编码字符串**跨 jar 重复率极高**（同文本出现在多个 mod）。判断过
@@ -1887,7 +1892,9 @@ class AutoFlow:
                         else:
                             _fresh.append(c)                 # 未判定过 → 才走 AI
                     if _cached_n:
-                        self._bump_stage(_cached_n)   # 缓存命中推进 done（total 含全部候选）
+                        # 缓存命中推进 done（total 含全部候选）。修复（recheck）：续联时
+                        # 用 _bump_stage_only（基准已含，防硬编码阶段 done 重复累计）
+                        self._bump_stage(_cached_n) if not self._resume else self._bump_stage_only(_cached_n)
                     judged = await ai_judge_translate(self.engine, _fresh, self.req.target_lang,
                                                       known_translations=dict(sorted(
                                                           self.project_terms.items(),
@@ -2335,9 +2342,11 @@ class AutoFlow:
             translated: dict[str, str] = {}
             items = ({"key": k, "text": v, "sink": translated}
                      for k, v in entries.items() if lang_value_ok(v))
+            # 修复（recheck）：走 _engine_translate（带 meta 局部 ctx）——原直接调
+            # engine.translate_batch 无 meta，LLMClient 失败状态改局部 ctx 后不再写实例属性，
+            # 光影模式失败返回原文被当「AI 保留」静默假成功、不记 failed、不触发网络重试。
             await self._translate_batch_pipeline(
-                items, lambda texts, _reasons=None: self.engine.translate_batch(
-                    texts, self.req.target_lang),
+                items, lambda texts, _reasons=None: self._engine_translate(texts, _reasons),
                 self._batch_size, skip_fn=needs_lang_value_translation)
             # 产出：复制光影包目录 → 写 shaders/lang/<目标语言langcode>.lang（合并已有）→ 打 zip
             out_dir = self.outputs_dir / self.task_id

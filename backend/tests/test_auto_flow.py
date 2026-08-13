@@ -1421,10 +1421,14 @@ async def test_stage_shader_output_name_uses_original(tmp_path, monkeypatch):
     flow.path = shader_pack
     # run() 开头已把原始输入名写入 display_name（本次修复）：原光影名，去扩展名
     flow.state.display_name = "SEUS PTGI HRR3"
-    # 翻译流水线用假引擎直填译文（绕开批处理细节，专注产物名）
+    # 翻译流水线用假引擎直填译文（绕开批处理细节，专注产物名）。
+    # translate_fn 现为 _engine_translate（返回 (results, meta) 元组，同真实 pipeline 约定）
     async def fake_pipeline(items, fn, batch_size, skip_fn=None):
         for item in items:
-            item["sink"][item["key"]] = (await fn([item["text"]]))[0]
+            r = await fn([item["text"]])
+            res = r[0] if (isinstance(r, tuple) and len(r) == 2
+                           and isinstance(r[1], dict)) else r
+            item["sink"][item["key"]] = res[0]
     flow._translate_batch_pipeline = fake_pipeline
     await flow._stage_shader()
     assert flow.state.status == "done"

@@ -482,6 +482,70 @@ def test_guide_md_mirror_target():
         "assets/ae2/ae2guide/_zh_tw/mechanics/x.md"
 
 
+def test_pack_js_tooltip_event_add(tmp_path):
+    """KubeJS 官方 tooltip API：ItemEvents.tooltip + event.add('id', [...]) 提取
+    （修复 recheck 🔴：原字段白名单无 add，官方 API 整段漏收）。"""
+    from app.text_sources import discover_pack_text_sources
+    js = tmp_path / "kubejs" / "client_scripts" / "tooltips.js"
+    js.parent.mkdir(parents=True)
+    js.write_text(
+        "ItemEvents.tooltip(event => {\n"
+        "  event.add('minecraft:diamond', ['First line', 'Second line'])\n"
+        "})\n", encoding="utf-8")
+    srcs = discover_pack_text_sources(tmp_path)
+    js_srcs = [s for s in srcs if "tooltips.js" in s.source_path]
+    assert js_srcs, "应发现 KubeJS tooltip 脚本"
+    vals = js_srcs[0].entries.values()
+    assert "First line" in vals and "Second line" in vals
+    assert "minecraft:diamond" not in vals   # id 技术串不提取
+
+
+def test_pack_js_multiline_array_all_elements(tmp_path):
+    """KubeJS 跨行数组多元素全提取（修复 recheck 🔴：原状态机在中间元素行提前退出，
+    跨行 tooltip 只收首元素/前两个，后续漏收）。"""
+    from app.text_sources import discover_pack_text_sources
+    js = tmp_path / "kubejs" / "client_scripts" / "tips.js"
+    js.parent.mkdir(parents=True)
+    js.write_text(
+        "const tips = {\n"
+        "  tooltip: ['Aaa',\n"
+        "      'Bbb',\n"
+        "      'Ccc']\n"
+        "}\n", encoding="utf-8")
+    srcs = discover_pack_text_sources(tmp_path)
+    js_srcs = [s for s in srcs if "tips.js" in s.source_path]
+    assert js_srcs
+    vals = list(js_srcs[0].entries.values())
+    assert "Aaa" in vals and "Bbb" in vals and "Ccc" in vals, \
+        f"跨行数组应全收，实际 {vals}"
+
+
+def test_guide_lines_skips_frontmatter_component():
+    """GuideME 指南行提取：跳过 front matter 键行与组件标签行，只翻正文
+    （修复 recheck 🔴：原整行翻译会把 title:/<ItemLink> 改坏，AE2 指南解析失败）。"""
+    from app.text_sources import _guide_lines_entries
+    lines = ["---", "title: Getting Started", "parent: index.md",
+             '<ItemLink id="ae2:controller" />', "Hello world", "---"]
+    entries = _guide_lines_entries(lines)
+    vals = entries.values()
+    assert "Hello world" in vals
+    assert "title: Getting Started" not in vals
+    assert '<ItemLink id="ae2:controller" />' not in vals
+    assert "parent: index.md" not in vals
+
+
+def test_pack_text_carrier_only_en_us_lang():
+    """整合包目录 lang 只收 en_us（大小写不敏感），zh_cn/de_de 不收（修复 recheck：
+    原不区分语言码，de_de 被当源翻译原地覆盖破坏 mod 自带多语言）。"""
+    from app.text_sources import _is_pack_text_carrier, _zh_cn_path
+    assert _is_pack_text_carrier("assets/mymod/lang/en_us.json")
+    assert _is_pack_text_carrier("assets/mymod/lang/en_US.json")
+    assert not _is_pack_text_carrier("assets/mymod/lang/zh_cn.json")
+    assert not _is_pack_text_carrier("assets/mymod/lang/de_de.json")
+    assert _zh_cn_path("assets/mymod/lang/en_US.json", "zh_cn") == \
+        "assets/mymod/lang/zh_cn.json"
+
+
 def test_render_pack_json_keeps_structure(tmp_path):
     """目录 json 渲染：按 key_path 覆写译文，技术串与结构保留。"""
     pack = _make_pack(tmp_path, {
