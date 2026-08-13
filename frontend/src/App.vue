@@ -227,6 +227,14 @@ async function startQueue() {
         job.status = 'failed'
         job.error = final ? (final.status === 'cancelled' ? '已取消' : '翻译失败') : '读取任务状态失败'
       }
+      // 修复（recheck #3）：手动查看的任务已终态（done/failed/cancelled）→ 恢复跟随队列，
+      // 右栏切回当前任务进度（不再永久锁定历史任务）
+      if (manualView.value) {
+        const _viewed = jobs.value.find(j => j.taskId === viewedTaskId.value)
+        if (!_viewed || ['done', 'failed', 'cancelled'].includes(_viewed.status)) {
+          manualView.value = false
+        }
+      }
     } catch (e) {
       job.status = 'failed'
       job.error = `启动翻译失败：${e.message}`
@@ -239,12 +247,23 @@ async function startQueue() {
 
 // —— 任务列表操作 ——
 function removeJob(i) {
-  if (processing.value || jobs.value[i]?.status === 'running') return   // 队列处理中禁止移除（防快照仍翻译）
+  const job = jobs.value[i]
+  if (!job) return
+  if (job.status === 'running') return   // 运行中不可移除（防后台任务失控）
+  // 修复（recheck #2）：队列处理中也允许移除 pending/failed——用户可停止不需要的后续任务，
+  // 防额度浪费；队列循环 find(pending) 会跳过已移除的
   jobs.value.splice(i, 1)
+  if (viewedTaskId.value && job.taskId === viewedTaskId.value) viewedTaskId.value = ''
 }
 function clearJobs() {
-  if (processing.value || detectingCount.value > 0) return   // 处理中或识别中禁止清空（防清空后 detect 完成又入队）
-  jobs.value = []
+  // 修复（recheck #2）：识别中禁止（防清空后 detect 完成又入队）；处理中允许清空
+  // **待翻/失败任务**（running 保留）——用户可停止队列后续任务防额度浪费，running 完成后队列自然结束
+  if (detectingCount.value > 0) return
+  if (processing.value) {
+    jobs.value = jobs.value.filter(j => j.status === 'running')
+  } else {
+    jobs.value = []
+  }
   viewedTaskId.value = ''
   manualView.value = false
 }

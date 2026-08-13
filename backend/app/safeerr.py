@@ -7,10 +7,14 @@ from pathlib import Path
 
 
 def _dirs() -> list[str]:
+    """返回本机路径前缀（正斜杠 + 反斜杠两个变体）。
+    修复（recheck）：Windows 异常消息（PermissionError 等）用反斜杠路径，
+    只生成正斜杠变体无法匹配 → 脱敏失效、本机目录结构泄露给前端。"""
     out = []
     for d in (tempfile.gettempdir(), str(Path.home())):
         if d:
             out.append(d.replace("\\", "/"))
+            out.append(d.replace("/", "\\"))
     return out
 
 
@@ -21,7 +25,7 @@ def sanitize_error(msg: str) -> str:
     """把消息里的本机绝对路径前缀替换为「<本机路径>」占位符。"""
     global _PATTERNS
     if _PATTERNS is None:
-        _PATTERNS = [re.compile(re.escape(d)) for d in _dirs()]
+        _PATTERNS = [re.compile(re.escape(d), re.IGNORECASE) for d in _dirs()]
     out = msg
     for pat in _PATTERNS:
         out = pat.sub("<本机路径>", out)

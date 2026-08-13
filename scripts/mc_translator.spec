@@ -70,6 +70,9 @@ a = Analysis(
         "uvicorn.loops.auto", "uvicorn.protocols.http.auto", "uvicorn.protocols.websockets.auto",
         # keyring：frozen 下必须显式收 Windows 后端（依赖 win32ctypes）
         "keyring.backends.Windows", "win32ctypes",
+        # 桌面壳双保险：desktop.py 函数内延迟 import webview/pythonnet/clr_loader，
+        # PyInstaller 6 字节码扫描目前能收到，显式声明防版本升级/扫描变化漏收集
+        "webview", "pythonnet", "clr_loader",
         # 字节码/存档/地图/简繁/机器翻译：nbtlib/deep_translator 顶层 import 已静态收集；
         # anvil 是延迟 import 必须补；opencc 顶层链 + collect_submodules 兜底
         *collect_submodules("jawa"),        # jawa.attributes.* 动态 import_module

@@ -704,6 +704,13 @@ class AutoFlow:
                     if translated_list is None:
                         return   # 用户取消，中断整个流程
                     _batch_err = ""
+                    # 修复（recheck #1）：网络重试成功后用**新鲜失败集**——重试调用成功时引擎
+                    # _batch_failed_texts 已刷新（AI 合法保留原文的条目不在其中），若沿用首次
+                    # 失败的旧 _failed，会把「重试成功后 AI 合法保留原文」误判真失败 → 缺键+假 failed
+                    _meta = None
+                    _failed = (set(getattr(self.engine, "_batch_failed_texts", ())) or None
+                               if self.engine else None)
+                    _kind = getattr(self.engine, "_last_error_kind", "other") if self.engine else "other"
                 else:
                     # 网络连通但翻译请求失败 → 不是网络超时，明确记 failed（服务/配置问题）
                     if translated_list is None:
@@ -1204,6 +1211,56 @@ class AutoFlow:
             return any('가' <= ch <= '힯' for ch in text)
         return True
 
+    async def _prebuild_terms(self, texts: list[str]) -> None:
+        """翻译前预扫描术语表（DocuTranslate 模式，用户诉求「全部优化」）：
+        统计待翻译文本中的高频英文词 → AI 批量统一译名 → 预填 _norm_terms +
+        glossary_prompt。让 AI **一开始**就遵循统一译名，而非翻译中发现才登记
+        （避免第一批错译/多译——Zeno 无论在哪都是泽诺，从头到尾一致）。
+
+        仅 LLM 引擎、高频词 ≥3 个时启用；失败静默（不阻塞翻译）。
+        """
+        from collections import Counter
+        try:
+            cnt: Counter = Counter()
+            for t in texts:
+                if not t:
+                    continue
+                for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,23}", t):
+                    wl = w.lower()
+                    if wl in {"the", "and", "for", "with", "you", "your", "this", "that",
+                              "from", "into", "when", "will", "can", "has", "have", "are",
+                              "was", "not", "but", "all", "any", "per", "via"}:
+                        continue
+                    if w.isupper() and len(w) <= 3:
+                        continue   # 缩写（RF/HP）跳过
+                    # 过滤代码标识：下划线（player_name）/驼峰（ModelViewMat 中部大写）/
+                    # 含数字（iron2）→ 不参与预扫描（防误计代码词）
+                    if "_" in w or re.search(r"[A-Z]", w[1:]) or re.search(r"[0-9]", w):
+                        continue
+                    cnt[w] += 1
+            # 按**频率**排序取前 40（修复：原 list(freq) 是首次出现顺序，长尾词挤掉真高频）
+            top = [w for w in sorted(cnt, key=cnt.get, reverse=True)
+                   if cnt[w] >= 3 and len(w) <= 20][:40]
+            if len(top) < 3:
+                return
+            _r, _m = await self._engine_translate(top, None, forced=False)
+            for w, tr in zip(top, _r):
+                tr = (tr or "").strip()
+                # 已有规范译名（CFPA 人工权威 / 记忆 / 既有登记）→ 不覆盖（AI 单译名不得推翻权威）
+                if w in self._norm_terms:
+                    continue
+                if tr and tr != w and self._is_target_lang(tr, self.req.target_lang) \
+                        and not re.search(r"[A-Za-z]{3,}", tr):
+                    self._norm_terms[w] = tr
+            if self._norm_terms:
+                terms = dict(sorted(self._norm_terms.items(), key=lambda kv: len(kv[0]))[:30])
+                inject = term_inject_prompt(terms)
+                base = self.glossary_prompt or ""
+                self.glossary_prompt = f"{base}\n\n{inject}" if base else inject
+                self.engine.glossary_prompt = self.glossary_prompt
+        except Exception:
+            pass   # 预扫描失败不阻塞翻译
+
     def _apply_name_norm(self, source: str, translated: str) -> str:
         """名称归一化（用户核心方案，审查通过的关键步骤）——「第一定义+后续跟随」：
 
@@ -1289,7 +1346,9 @@ class AutoFlow:
         第一定义权威，兜底绝不推翻它），无规范译名才退化为最高频（次数相同取先出现、
         排除「保留原文」候选）。AI 不听话也能收干净。
 
-        安全边界：仅「同一原文有 ≥2 个不同译文」才触发；单译名 / 全部保留原文不动。
+        安全边界：有规范译名（名称归一化第一定义 / CFPA / 预扫描）时**强制所有译文统一
+        为规范译名**（含单译名——修复：之前仅 ≥2 变体才统一，单译名「Zeno→泽昂」即使
+        _norm_terms 有「泽诺」也不回改）；无规范译名时仅「同一原文有 ≥2 个不同译文」才触发。
         替换按「译文文本 ∈ 旧译名集合」判定（不同原文翻出完全相同译名的撞车概率极低，
         且统一方向是往已确认译名靠，可接受）。
         """
@@ -1298,17 +1357,21 @@ class AutoFlow:
         replaced = 0
         for source, variants in self._consistency_stats.items():
             real = [(v, c) for v, c in variants.items() if v != source]
-            if len(real) < 2:
-                continue    # 单译名 或 全部保留原文 → 无需统一
-            # 主译名：**优先规范译名**（名称归一化的第一定义权威，兜底绝不推翻）；
+            if not real:
+                continue
+            # 主译名：**优先规范译名**（名称归一化第一定义权威，兜底绝不推翻）；
+            # 有规范译名 → 强制所有译文统一为规范译名（即使单译名/变体）；
             # 无规范译名才退化为最高频（次数相同取先出现）。否则 CFPA/硬编码等未走
             # 名称归一化路径写的变体可能凭数量「多数压倒」覆盖掉已确认的规范译名。
             norm_main = self._norm_terms.get(source)
-            if norm_main and norm_main in variants:
+            if norm_main and norm_main != source:
                 main = norm_main
+                old = {v for v in variants if v != main}
             else:
+                if len(real) < 2:
+                    continue    # 无规范译名且单译名 → 无需统一
                 main = max(real, key=lambda x: (x[1], -real.index(x)))[0]
-            old = {v for v in variants if v != main}
+                old = {v for v in variants if v != main}
             for mapping in self._iter_translation_mappings():
                 for k, v in mapping.items():
                     if v in old:
@@ -1497,6 +1560,10 @@ class AutoFlow:
             lang_items.append({"key": job.key, "text": job.source_text,
                                "sink": self.by_mod.setdefault(job.modid, {}),
                                "mod": job.modid})
+        # A: 翻译前预扫描术语表（DocuTranslate 模式）——AI 先统一高频词译名，
+        # 预填 _norm_terms + glossary_prompt，让翻译一开始就遵循统一译名
+        if isinstance(self.engine, LLMClient) and lang_items:
+            await self._prebuild_terms([it["text"] for it in lang_items])
         try:
             if isinstance(self.engine, LLMClient):
                 # 翻译与审查并行（用户诉求）：翻译管道不断翻译入队，审查管道并行审查写回——
@@ -1756,6 +1823,7 @@ class AutoFlow:
                     for text, trans in mapping.items():
                         # 名称归一化：硬编码译文与语言文件同原文时统一为规范译名
                         trans = self._apply_name_norm(text, trans)
+                        mapping[text] = trans   # 修复（recheck #6）：归一化结果回写 hard_mappings（否则产物用未统一译名）
                         self.memory.set(text, self.req.target_lang, trans)
                         self._record_consistency(text, trans)   # 一致性统计（兜底归一化用）
                 # 排除决策写记忆（原文标记）：后续 jar 同文本命中直接跳过，不重复判断

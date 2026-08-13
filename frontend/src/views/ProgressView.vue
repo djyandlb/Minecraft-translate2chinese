@@ -373,7 +373,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section ref="flowPanel" class="panel flow-panel">
+  <section ref="flowPanelRef" class="panel flow-panel">
     <!-- 标题区：进入翻译流程后，「翻译流程 / 队列自动逐个翻译」被当前文件名顶替——
          翻译中显示原名，完成后显示中文名 + 原英文淡化（用户诉求）。
          修复：空态（三折叠）时不显示此标题区，避免「翻译流程 / 队列自动逐个翻译」残留 -->

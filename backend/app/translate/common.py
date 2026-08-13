@@ -48,7 +48,17 @@ def should_translate(text: str, max_len: int = 1000) -> bool:
     # "path.to.model"、"v1.2.3"。句号后跟空格才是句子（"Hello. This is..." → 翻译）。
     if "." in text and _DOTTED_IDENT_RE.search(text) and not _SENTENCE_DOT_RE.search(text):
         return False
-    # 纯字母单词（如 "hi"）→ 保留
+    # 短编码（≤6 全大写+数字，如 BB/B0PB）→ 代码/键码跳过（对照 mc_translator skip_rules）
+    if len(text) <= 6 and re.fullmatch(r"[A-Z0-9]+", text):
+        return False
+    # Base64（≥8 无空格 以 = 结尾）→ 跳过
+    if len(text) >= 8 and " " not in text and text.endswith("="):
+        return False
+    # hex 颜色码（长度 6/8 全十六进制，如 ff00ff）→ 跳过
+    if len(text) in (6, 8) and re.fullmatch(r"[0-9a-fA-F]+", text):
+        return False
+    # 纯字母单词（如 "hi"/"Bombs"/"Plantkillable"）→ 保留（用户可见文本，该翻译；
+    # 代码标识（驼峰类名等）由硬编码 AI 裁判把关，语言文件 value 都是用户可见文本）
     if _PURE_ALPHA_RE.match(text):
         return True
     # 技术标识符（snake_case / 含数字变量名）→ 跳过，如 "iron_ingot"

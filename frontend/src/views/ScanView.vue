@@ -172,7 +172,7 @@ async function onFilePicked(e) {
         </div>
         <span class="job-kind">{{ KIND_TEXT[job.kind] || (job.kind || '未知') }}</span>
         <span class="job-status">{{ STATUS_TEXT[job.status] || job.status }}</span>
-        <button class="btn mini x" :disabled="processing || job.status === 'running'" :title="'移除'" @click.stop="emit('remove-job', i)">✕</button>
+        <button class="btn mini x" :disabled="job.status === 'running'" :title="'移除'" @click.stop="emit('remove-job', i)">✕</button>
       </div>
       <p v-if="failCountTip" class="tip fail-tip">失败项点击可查看原因，也可移除后重新添加</p>
     </div>

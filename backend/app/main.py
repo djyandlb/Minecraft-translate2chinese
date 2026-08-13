@@ -81,6 +81,25 @@ app.add_middleware(CORSMiddleware,
                    allow_methods=["*"], allow_headers=["*"])
 
 
+# 修复（recheck）：本地 API **写请求**校验 Origin——CORS 只防跨源读取，防不了写副作用
+#（恶意网页 fetch 本地 /api/key 可覆盖 keyring 凭据等「简单请求」无需预检直接发出）。
+# 远程网页请求会带其 Origin（https://evil.com），hostname 非 127.0.0.1/localhost → 403；
+# 本地应用同源请求带本地 Origin、curl/非浏览器无 Origin → 放行。
+@app.middleware("http")
+async def _write_origin_guard(request, call_next):
+    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        origin = request.headers.get("origin")
+        if origin:
+            try:
+                from urllib.parse import urlparse
+                if urlparse(origin).hostname not in ("127.0.0.1", "localhost"):
+                    from starlette.responses import JSONResponse
+                    return JSONResponse({"ok": False, "message": "跨源写请求被拒绝"}, status_code=403)
+            except Exception:
+                pass
+    return await call_next(request)
+
+
 def _resolve(path_str: str) -> Path:
     """整合包输入：目录或压缩包。压缩包按 zip 指纹缓存解压（extract_cached）——
     detect 与翻译共用同一解压缓存，相同整合包断点重连不重复解压（用户诉求）。
@@ -343,7 +362,14 @@ def list_projects():
     projects = []
     pdir = WORK_DIR / "progress"
     if pdir.is_dir():
-        for pf in sorted(pdir.glob("*.json"), key=lambda f: -f.stat().st_mtime):
+        # 修复（recheck #2）：排序 key 里 stat 与 delete_project 并发时文件可能已删 →
+        # FileNotFoundError 500；包 try 跳过已删文件（同 _dir_bytes 做法）
+        def _pf_mtime(f):
+            try:
+                return -f.stat().st_mtime
+            except OSError:
+                return float("-inf")
+        for pf in sorted(pdir.glob("*.json"), key=_pf_mtime):
             try:
                 d = json.loads(pf.read_text(encoding="utf-8"))
                 # 已完成项目（done>=total，产物已生成）不算「未完成」→ 不显示续联
@@ -1195,9 +1221,12 @@ async def _github_latest_jar(repo: str, asset_filter) -> tuple[str, bytes] | Non
 
 
 def _internal_data_dir() -> Path:
-    """内置资源目录（源码 backend/app/data；frozen _MEIPASS/app/data）。"""
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    return base / "data"
+    """内置资源目录（源码 backend/app/data；frozen _MEIPASS/app/data）。
+    修复（recheck）：原 frozen 返回 _MEIPASS/data，而 spec 打的是 _MEIPASS/app/data/
+    {cfpa,i18n,vp}——漏 app/ 段导致内置资源版本检测失效（每次「检查更新」重复下载内置 jar）。"""
+    if getattr(sys, "_MEIPASS", None):
+        return Path(sys._MEIPASS) / "app" / "data"
+    return Path(__file__).resolve().parent / "data"
 
 
 def _bundled_resource_version(subdir: str) -> str:
