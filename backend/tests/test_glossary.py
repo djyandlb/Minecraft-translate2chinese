@@ -39,7 +39,7 @@ def test_inject_prompt_limited():
     g = {f"k{i}": f"v{i}" for i in range(50)}
     prompt = term_inject_prompt(g, limit=10)
     assert prompt.count("=>") == 10
-    assert "术语表" in prompt
+    assert "专有名词" in prompt     # v1.1.0：术语注入改为「专名对照（仅提示）」
 
 def test_inject_prompt_empty():
     assert term_inject_prompt({}) == ""

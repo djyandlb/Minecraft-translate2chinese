@@ -68,9 +68,10 @@ async def test_translate_batch_feedback_and_forced_injected():
 
 
 @pytest.mark.asyncio
-async def test_translate_batch_prompt_has_particle_wordorder_rules():
-    """翻译 system prompt 含「的」冗余禁令 + 单词名词化 + 介宾短语固定译法
-    （系统性修复「符文的的宝珠」/「基于的附魔的过滤器」）。"""
+async def test_translate_batch_prompt_has_deterministic_rules():
+    """v1.1.0：翻译 prompt 保留确定性规则（代码标识/占位符/用户可见文本必须翻译/
+    自然语序重组/专名同语境统一），**删除**僵化表达规则（固定搭配表/语序速查/助词
+    禁令等条条框框——用户反馈规则太多反而翻译不好、机械限制 AI 表达）。"""
     captured = {}
 
     def handler(request):
@@ -81,15 +82,17 @@ async def test_translate_batch_prompt_has_particle_wordorder_rules():
     client = _client_with(handler)
     await client.translate_batch(["Reinforced Rune of the Orb"], "zh_cn")
     sys_prompt = captured["body"]["messages"][0]["content"]
-    assert "禁止格助词连用" in sys_prompt and "的的" in sys_prompt
-    assert "禁止助词冗余" in sys_prompt and "基于附魔的过滤器" in sys_prompt
-    assert "based off of" in sys_prompt and "基于" in sys_prompt
-    assert "enchantments" in sys_prompt and "附魔" in sys_prompt
-    # 业界调研补充的硬规则：the 不译 / 后置定语前置 / 固定搭配整体译 / 术语「的」合并
-    assert "the 一律不译" in sys_prompt and "虚空之刃" in sys_prompt
-    assert "液体燃料的最大来源" in sys_prompt
-    assert "被基于" in sys_prompt
-    assert "附魔的的过滤器" in sys_prompt
+    # 确定性规则保留
+    assert "代码标识" in sys_prompt and "minecraft:diamond" in sys_prompt
+    assert "用户可见的英文一律翻译成目标语言" in sys_prompt
+    assert "自然语序重组" in sys_prompt
+    assert "专有名词" in sys_prompt and "常用词" in sys_prompt
+    # 僵化规则删除（不再有固定搭配表/语序速查/助词禁令/名词化）
+    assert "based off of" not in sys_prompt
+    assert "禁止格助词连用" not in sys_prompt
+    assert "虚空之刃" not in sys_prompt
+    assert "液体燃料的最大来源" not in sys_prompt
+    assert "enchantments" not in sys_prompt
     await client._client.aclose()
 
 
@@ -306,8 +309,8 @@ async def test_batch_system_prompt_strict_rules():
     assert "不得添加任何解释" in s
     assert "占位符" in s
     assert r"\n" in s          # 多行原文用字面 \n 表示，不真的换行拆条
-    # P0-3 中英混排约束：译文须像原生中文，禁止把英文硬插进中文短语
-    assert "避免中英混杂" in s and "硬插" in s and "原生中文" in s
+    # 表达要求：自然语序重组 + 禁止把英文硬插进中文短语 + 常用词按语境（v1.1.0 精简）
+    assert "自然语序重组" in s and "硬插" in s and "常用词" in s
     await client._client.aclose()
 
 

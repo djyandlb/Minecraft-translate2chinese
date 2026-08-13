@@ -1249,7 +1249,7 @@ async def test_auto_network_timeout_recovers(tmp_path, monkeypatch):
 # ---------- 术语一致性归一化（Zeno→泽诺/泽昂/zeno 三样并存 → 统一为最高频） ----------
 
 def _make_flow(tmp_path, task_id="t1"):
-    """构造最小 AutoFlow 实例（只跑 _consistency_normalize，不跑完整 run）。"""
+    """构造最小 AutoFlow 实例（只跑归一化/审计相关方法，不跑完整 run）。"""
     from app.auto_flow import AutoFlow
     from app.tasks import TaskState, TaskStore
 
@@ -1260,54 +1260,8 @@ def _make_flow(tmp_path, task_id="t1"):
     return AutoFlow(task_id, req, None, store, tmp_path / "work", tmp_path / "out", None)
 
 
-def test_consistency_normalize_zeno_unified(tmp_path):
-    """同一原文 Zeno 被翻成 泽诺×2 / 泽昂×1 / 保留原文 Zeno×1 → 全部统一为泽诺。"""
-    flow = _make_flow(tmp_path)
-    flow._record_consistency("Zeno", "泽诺")
-    flow._record_consistency("Zeno", "泽诺")
-    flow._record_consistency("Zeno", "泽昂")
-    flow._record_consistency("Zeno", "Zeno")        # 保留原文（漏翻/未处理）
-    flow.by_mod["zenomod"] = {"k1": "泽诺", "k2": "泽昂", "k3": "Zeno"}
-    flow._consistency_normalize()
-    # 主译名 = 最高频「泽诺」，全部产物替换（含保留原文的 zeno 也统一成中文）
-    assert flow.by_mod["zenomod"] == {"k1": "泽诺", "k2": "泽诺", "k3": "泽诺"}
-    # memory 同步：该原文主译名落盘
-    assert flow.memory.get("Zeno", "zh_cn") == "泽诺"
-
-
-def test_consistency_normalize_single_or_all_kept_untouched(tmp_path):
-    """安全边界：单译名不动；全部保留原文不动（合理保留，不强行翻译）。"""
-    flow = _make_flow(tmp_path)
-    # 单译名：只有「石头」一种译法 → 归一化不动
-    flow._record_consistency("stone", "石头")
-    flow.by_mod["m"] = {"a": "石头"}
-    flow._consistency_normalize()
-    assert flow.by_mod["m"] == {"a": "石头"}
-    # 全部保留原文：Youtube 被一致保留 → 不强行翻译
-    flow2 = _make_flow(tmp_path, task_id="t2")
-    flow2._record_consistency("Youtube", "Youtube")
-    flow2.by_mod["m"] = {"b": "Youtube"}
-    flow2._consistency_normalize()
-    assert flow2.by_mod["m"] == {"b": "Youtube"}
-
-
-def test_consistency_normalize_cross_sources(tmp_path):
-    """归一化覆盖全部产物数据源：by_mod / json-lines / pack / hard 硬编码。"""
-    flow = _make_flow(tmp_path)
-    flow._record_consistency("Ender Dragon", "末影龙")
-    flow._record_consistency("Ender Dragon", "末影龙")
-    flow._record_consistency("Ender Dragon", "终界龙")
-    # 分散在四个产物数据源
-    flow.by_mod["a"] = {"k1": "末影龙"}
-    flow.json_lines_translations[__import__("pathlib").Path("x.json")] = [
-        (None, {"k2": "终界龙"})]
-    flow.pack_translations = [(None, {"k3": "末影龙"})]
-    flow.hard_mappings[__import__("pathlib").Path("h.jar")] = {"k4": "终界龙"}
-    flow._consistency_normalize()
-    assert flow.by_mod["a"]["k1"] == "末影龙"
-    assert flow.json_lines_translations[list(flow.json_lines_translations)[0]][0][1]["k2"] == "末影龙"
-    assert flow.pack_translations[0][1]["k3"] == "末影龙"
-    assert flow.hard_mappings[list(flow.hard_mappings)[0]]["k4"] == "末影龙"
+# v1.1.0：test_consistency_normalize_* 已删除（机械归一化移除，语义由
+# _ai_contextual_normalize / _collect_norm_candidates 测试覆盖）
 
 
 @pytest.mark.asyncio
@@ -1351,6 +1305,29 @@ def test_is_roman_valid():
     assert not _is_roman("VX")        # 非法规组合
 
 
+def test_is_proper_noun():
+    """专名形态筛选（AI 语境归一化候选门槛）：专名进候选，常用词（light/right）绝不进。"""
+    from app.auto_flow import _is_proper_noun
+    # 专名/特有名词形态 → 进候选
+    assert _is_proper_noun("Zeno")
+    assert _is_proper_noun("Diamond Sword")
+    assert _is_proper_noun("ZenoSword")
+    assert _is_proper_noun("Iron Ingot")
+    assert _is_proper_noun("No_Minimap")
+    assert _is_proper_noun("Craft-Table")
+    # 常用词/小写短语 → 绝不进（用户核心诉求：right 不能全替换成右面）
+    assert not _is_proper_noun("light")
+    assert not _is_proper_noun("right")
+    assert not _is_proper_noun("iron")
+    assert not _is_proper_noun("stone")
+    assert not _is_proper_noun("of the orb")
+    assert not _is_proper_noun("click")
+    # 边界
+    assert not _is_proper_noun("")
+    assert not _is_proper_noun("a")
+    assert not _is_proper_noun("123")
+
+
 # ---------- 名称归一化（第一定义 + 后续跟随，审查通过的关键步骤） ----------
 
 def test_name_norm_first_define_and_follow(tmp_path):
@@ -1361,12 +1338,12 @@ def test_name_norm_first_define_and_follow(tmp_path):
     flow._write_reviewed({"key": "k1", "source": "Zeno", "modid": "m", "sink": sink1}, "泽诺")
     assert flow._norm_terms["Zeno"] == "泽诺"
     assert sink1["k1"] == "泽诺"
-    # 后续同一原文被 AI 翻成泽昂 → 审查归一化覆盖为规范译名「泽诺」（关键步骤）
+    # 后续同一原文被 AI 翻成泽昂 → v1.1.0 **不机械覆盖**（保留语境译文；多译文冲突
+    # 由 AI 语境归一化审查 _ai_contextual_normalize 判定语境后统一，而非强制替换）
     sink2 = {}
     flow._write_reviewed({"key": "k2", "source": "Zeno", "modid": "m", "sink": sink2}, "泽昂")
-    assert sink2["k2"] == "泽诺"
-    # memory 同步为规范译名 → 后续条目 memory 命中直接用（不重新翻译/不自由发挥）
-    assert flow.memory.get("Zeno", "zh_cn") == "泽诺"
+    assert sink2["k2"] == "泽昂"                     # 不被机械覆盖
+    assert flow._norm_terms["Zeno"] == "泽诺"         # 规范译名仍为第一个登记
 
 
 def test_name_norm_keep_original_not_registered(tmp_path):
@@ -1391,31 +1368,21 @@ def test_name_norm_register_requires_target_lang(tmp_path):
 
 # ---------- 名称归一化修复验证（recheck 回归） ----------
 
-def test_consistency_normalize_respects_norm(tmp_path):
-    """兜底归一化尊重规范译名：即使最高频是别的译名，也不推翻第一定义。"""
+def test_apply_name_norm_proper_noun_only(tmp_path):
+    """v1.1.0：只对**专名形态**原文登记规范译名（Youtube 大写→登记「油管」）；
+    小写常用词（light）绝不登记、绝不干预（用户核心诉求：不用机械统一破坏语境）。"""
     flow = _make_flow(tmp_path)
-    flow._norm_terms["Zeno"] = "泽诺"               # 第一定义规范译名
-    # 统计里泽昂反而更多（CFPA/硬编码等未走归一化路径可能写入变体）
-    flow._record_consistency("Zeno", "泽诺")
-    flow._record_consistency("Zeno", "泽昂")
-    flow._record_consistency("Zeno", "泽昂")
-    flow.by_mod["m"] = {"k1": "泽诺", "k2": "泽昂"}
-    flow._consistency_normalize()
-    # 主译名 = 规范译名泽诺（不选最高频泽昂），变体泽昂被统一
-    assert flow.by_mod["m"] == {"k1": "泽诺", "k2": "泽诺"}
-    assert flow.memory.get("Zeno", "zh_cn") == "泽诺"
-
-
-def test_apply_name_norm_kept_decision_not_override(tmp_path):
-    """规范译名若是「保留原文」决策（extract_terms 重建），不强制覆盖本次 AI 译文，
-    也不被重新登记为译名。"""
-    flow = _make_flow(tmp_path)
-    flow._norm_terms["Youtube"] = "Youtube"          # 历史保留决策（非真译名）
-    # AI 本次翻出中文 → 保留决策不强制覆盖（允许重新翻译）
+    # 专名 → 登记规范译名，但不强制覆盖（原样返回）
     assert flow._apply_name_norm("Youtube", "油管") == "油管"
-    # 但保留决策不被误当译名 → 后续翻译不会强制覆盖成 Youtube
-    assert flow._apply_name_norm("Youtube", "油管") == "油管"
-    assert flow._norm_terms["Youtube"] == "Youtube"  # 仍未登记译名
+    assert flow._norm_terms["Youtube"] == "油管"
+    # 非专名（light 小写）→ 不登记、不干预
+    flow2 = _make_flow(tmp_path, task_id="t2")
+    assert flow2._apply_name_norm("light", "灯") == "灯"
+    assert "light" not in flow2._norm_terms
+    # 保留原文（translated==src）不登记
+    flow3 = _make_flow(tmp_path, task_id="t3")
+    assert flow3._apply_name_norm("Zeno", "Zeno") == "Zeno"
+    assert "Zeno" not in flow3._norm_terms
 
 
 # ---------- 合理保留分流收窄（recheck：该翻的不能误判保留） ----------
@@ -1500,22 +1467,80 @@ async def test_auto_modpack_pack_format_from_mc_version(tmp_path, monkeypatch):
     assert meta["pack"]["pack_format"] == 32, f"1.20.6 应写 pack_format 32，实际 {meta['pack']}"
 
 
-def test_term_protect_unifies_compound_terms(tmp_path):
-    """术语保护（通用词级一致）：已确认英文术语 Zeno 无论出现在哪个条目（组合词/变体）
-    都被保护成占位符 → 还原为规范译名「泽诺」，杜绝 AI 翻成 zero/泽昂 等变体。
-    修复 recheck：名称归一化只认同一原文，词级术语保护补组合词（Zeno Red / Zeno's）。"""
+def test_no_mechanical_protect_for_common_words(tmp_path):
+    """v1.1.0：机械术语保护/词级覆盖（_protect_terms/_apply_term_override）已删除——
+    不再对任何词做占位符机械替换（right→右面 全替换的元凶）；归一化只靠
+    _is_proper_noun 形态筛选进候选 + AI 语境判定（_ai_contextual_normalize）。"""
+    from app.auto_flow import _is_proper_noun
     flow = _make_flow(tmp_path)
-    flow.base_terms = {"Zeno": "泽诺"}
-    flow.project_terms = {}
-    # 组合词：Zeno Red → 占位符 + 保留其余
-    masked, mapping = flow._protect_terms("Zeno Red Armor")
-    assert masked == "%%ZT0%% Red Armor", f"Zeno 应被保护，实际 {masked}"
-    assert mapping["%%ZT0%%"] == "泽诺"
-    # 模拟 AI 保留占位符翻译 → 还原为泽诺
-    assert flow._restore_terms("%%ZT0%% 红 护甲", mapping) == "泽诺 红 护甲"
-    # 变体：Zeno's → Zeno 被保护（' 非字母，词边界匹配）
-    masked2, _ = flow._protect_terms("Zeno's Sword")
-    assert "Zeno" not in masked2, "Zeno's 里的 Zeno 应被保护"
-    # 词边界不误伤：Zenith 不匹配 Zeno
-    masked3, _ = flow._protect_terms("Zenith Peak")
-    assert "Zenith" in masked3, "Zenith 不应被误保护"
+    # 机械函数已删除
+    assert not hasattr(flow, "_protect_terms")
+    assert not hasattr(flow, "_restore_terms")
+    assert not hasattr(flow, "_apply_term_override")
+    # 组合词形态：首字母大写 → 进归一化候选（AI 判定语境）；小写常用词 → 绝不进
+    assert _is_proper_noun("Zeno Red Armor")
+    assert _is_proper_noun("Zeno's Sword")
+    assert not _is_proper_noun("light blue")
+    assert not _is_proper_noun("right click")
+
+
+# ---------- AI 语境归一化（v1.1.0 重构：替代机械 _consistency_normalize） ----------
+
+def test_collect_norm_candidates_only_proper_noun_conflicts(tmp_path):
+    """候选收集：只收「同原文 ≥2 个译文」且**专名形态**；单译名/小写常用词不触发。"""
+    flow = _make_flow(tmp_path)
+    flow._record_consistency("Zeno", "泽诺")
+    flow._record_consistency("Zeno", "泽昂")       # 专名多译文 → 进候选
+    flow._record_consistency("light", "灯")
+    flow._record_consistency("light", "亮")         # 小写常用词多译文 → 绝不进
+    flow._record_consistency("Iron Ingot", "铁锭")  # 单译名 → 不触发
+    cands = flow._collect_norm_candidates()
+    assert len(cands) == 1
+    assert cands[0]["source"] == "Zeno"
+
+
+@pytest.mark.asyncio
+async def test_ai_contextual_normalize_flow(tmp_path, monkeypatch):
+    """AI 语境归一化流程：只对 Zeno（专名多译文）判定统一；light 常用词不触发。"""
+    flow = _make_flow(tmp_path)
+    flow._record_consistency("Zeno", "泽诺")
+    flow._record_consistency("Zeno", "泽昂")
+    flow._record_consistency("light", "灯")
+    flow._record_consistency("light", "亮")
+
+    judged_calls, renormalized = [], []
+
+    async def fake_judge(cands):
+        judged_calls.append(cands)
+        return {0: {"should_unify": True, "canonical": "泽诺"}}
+
+    async def fake_renormalize(cands, judged):
+        renormalized.append((cands, judged))
+
+    monkeypatch.setattr(flow, "_ai_judge_normalization", fake_judge)
+    monkeypatch.setattr(flow, "_ai_renormalize", fake_renormalize)
+    await flow._ai_contextual_normalize()
+    assert len(judged_calls) == 1 and judged_calls[0][0]["source"] == "Zeno"
+    assert len(renormalized) == 1
+
+
+@pytest.mark.asyncio
+async def test_ai_renormalize_only_proper_noun_unify(tmp_path, monkeypatch):
+    """归一化重翻：只对判定统一的专名条目重翻；已是规范译名/非候选不重翻。"""
+    flow = _make_flow(tmp_path)
+    flow.by_mod["m"] = {"k1": "泽诺", "k2": "泽昂", "k3": "灯"}
+    flow.source_by_mod["m"] = {"k1": "Zeno", "k2": "Zeno", "k3": "light"}
+    cands = [{"source": "Zeno", "variants": ["泽诺", "泽昂"]}]
+    judged = {0: {"should_unify": True, "canonical": "泽诺"}}
+
+    collected = []
+
+    async def fake_pipeline(items, fn, batch_size=5, **kw):
+        collected.extend(items)
+
+    monkeypatch.setattr(flow, "_translate_batch_pipeline", fake_pipeline)
+    await flow._ai_renormalize(cands, judged)
+    keys = [i["key"] for i in collected]
+    assert "k2" in keys            # Zeno 的「泽昂」≠ 规范译名 → 重翻
+    assert "k1" not in keys        # 已是「泽诺」→ 不重翻
+    assert "k3" not in keys        # light 非候选 → 不重翻

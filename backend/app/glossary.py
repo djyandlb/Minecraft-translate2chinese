@@ -32,10 +32,12 @@ def load_glossary(path: Path) -> dict[str, str]:
 
 def term_inject_prompt(glossary: dict[str, str], limit: int = 30) -> str:
     """把术语表拼进 AI 提示词，最多取前 limit 条；空表返回空串。
-    译名统一过 strip_particle（剥结尾格助词）——所有术语来源（用户表/记忆提取/
-    动态登记）注入前都净化，杜绝「符文的」这类语境化译名污染 AI。"""
+    译名统一过 strip_particle（剥结尾格助词）。v1.1.0：改「仅提示」语义——术语表
+    只含专有名词/特有名词对照（Zeno→泽诺、物品名），AI **按语境判断**是否遵循；
+    常用词（light/right/iron）不在此表，按各自语境翻译，绝不机械套用同一译名。"""
     items = list(glossary.items())[:limit]
     if not items:
         return ""
     lines = [f"{k} => {strip_particle(v)}" for k, v in items]
-    return "术语表（翻译必须遵守）：\n" + "\n".join(lines)
+    return ("已确认专有名词对照（仅提示，请按语境判断是否遵循；常用词不在此表，"
+            "按各自语境翻译，不要机械套用同一译名）：\n" + "\n".join(lines))

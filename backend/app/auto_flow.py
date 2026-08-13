@@ -87,6 +87,18 @@ _LEGIT_KEEP_RE = re.compile(
     r"专有名词|模组名|命令|代码标识|资源路径|Identifier|变量名|类名|API名|"
     r"玩家名|注册(?:名|ID)|modid|注册ID|本地化键|配方ID", re.I)
 
+# AI 语境归一化判定 system prompt（v1.1.0 重构）：
+# 归一化只针对「专有名词 + 语境相同」，常用词（light/right/iron）绝不机械统一。
+_NORM_JUDGE_SYSTEM = """你是 Minecraft 汉化的「术语归一化判定员」。对每组「同一英文原文出现了多个不同译文」判断：
+1) 该原文是否是**专有名词/特有名词**（物品名/人名/模组名/术语）？light/right/iron 等常用词不是；
+2) 各出现的语境是否**相同**（指同一事物/同一语义）？
+3) 只有「是专有名词 且 语境相同」才应统一；语境不同（如 right 在「右键/正确/权利」）绝不统一。
+对每组输出一行：[i编号] 统一 规范译名   或   [i编号] 不统一
+示例：
+[i0] 统一 泽诺
+[i1] 不统一
+只输出判定行，不要解释。"""
+
 
 def _is_legit_keep(reason: str) -> bool:
     """审查 reason 判定为「合理保留原文」（专有名词/命令/代码标识/路径等）→ 不算漏翻失败。"""
@@ -103,6 +115,31 @@ def _is_roman(s: str) -> bool:
     """验证是否合法罗马数字（1-3999）。修复（Agent 审查）：原字符集校验 `[IVXLCDM]{1,6}`
     把 DVD/CIVIL/LCD 等由 I/V/X/L/C/D/M 组成的真实英文词误判「合理保留」→ 永不翻译。"""
     return bool(s) and bool(_ROMAN_RE.match(s))
+
+
+def _is_proper_noun(text: str) -> bool:
+    """形态启发判断「是否可能是专有名词/特有名词」（AI 语境归一化的**候选筛选**）。
+
+    用户核心诉求：归一化只针对特有名词（Zeno、modid、物品名），**常用词（light/right/
+    iron）绝不归一化**——right 翻成「右面」后所有 right 被硬替换成「右面」、light 翻成
+    「灯」后 light blue 变「灯蓝色」的机械归一化灾难。本函数把「形态上像专名」的
+    （首字母大写/驼峰/命名式）筛选进候选，小写常用词天然返回 False 被挡在门外。
+
+    注意：这是**宽松候选筛选**（宁多勿漏，句首大写单词也会进），最终语境是否相同、
+    是否真专名由 AI 判定（_ai_judge_normalization）把关——AI 说不同语境就不统一。
+    """
+    s = (text or "").strip()
+    if not s:
+        return False
+    if len(s) < 2 or not re.search(r"[A-Za-z]", s):
+        return False                       # 空/单字母/纯数字/纯符号 → 非专名
+    if "_" in s or "-" in s:
+        return True                        # 命名式（No_Minimap、Craft-Table）→ 像标识符/专名
+    if re.search(r"[A-Z]", s[1:]):
+        return True                        # 驼峰/混合大小写（ZenoSword、ModelView）→ 像专名/代码标识
+    if s[0].isupper():
+        return True                        # 首字母大写（Zeno / Iron Ingot 整体）→ 像专名
+    return False                           # 全小写词/短语（light/right/of the orb）→ 常用词，不归一化
 
 
 def _is_legit_keep_by_source(source: str) -> bool:
@@ -301,11 +338,9 @@ class AutoFlow:
         self._legit_kept: set = set()      # 初审过审的「合理保留原文」(modid,key)——漏翻兜底不再重复审查
         self.project_id = ""               # 项目指纹（run() 早期计算；提前初始化防 finally 收尾 AttributeError）
         # 术语统一（用户诉求：专有名词翻译必须统一，否则乱）：
-        # 用户术语表 + 记忆里已确认的短术语对照一起注入 prompt，让 AI 翻译时沿用已确认译名，
-        # 同一专有名词全篇一个译名（防一词多译）。memory 提取的术语是短词条（专有名词/物品名）。
-        # 基础术语表（**历史确认**：用户术语表 + 记忆提取的短术语）——词级术语覆盖
-        #（_apply_term_override）用它，让历史确认的 Zeno→泽诺 对本次「Zeno Red」这类组合词
-        # 也生效（对齐名称统一化：名称归一化只认同一原文，词级覆盖补组合词/变体）。
+        # 用户术语表 + 记忆里已确认的短术语对照一起注入 prompt，作为**专名对照（仅提示）**，
+        # 让 AI 按语境判断是否遵循（v1.1.0：不再机械替换/强制统一；常用词 light/right 等
+        # 绝不统一，多译文冲突由 AI 语境归一化 _ai_contextual_normalize 判定）。
         _gloss = load_glossary(work_dir / "glossary.json")
         self.base_terms: dict[str, str] = dict(_gloss)
         self.glossary_prompt = term_inject_prompt(_gloss)
@@ -331,21 +366,18 @@ class AutoFlow:
         self.pack_sources: list[TextSource] = []
         self.text_sources_by_jar: dict[Path, list[TextSource]] = {}
         self.hard_candidates_by_jar: dict[Path, list[dict]] = {}
-        self._do_hardcode: bool = True       # 所有非 machine 模式都做硬编码（整合包走 VP 补丁）
         # 硬编码「判断不明确选择不翻译」的候选（严格策略：只翻判断准的；账本校验视为已处置）
         self.hard_unresolved_by_jar: dict[Path, list[str]] = {}
         # 项目级专有名词对照表（用户诉求：Zeno→泽诺 这类决策写词汇表，后续同词统一沿用）：
         # {原文: 决策}，决策为译名（Zeno→泽诺）或原文（保留）。随任务动态积累，注入 prompt
         self.project_terms: dict[str, str] = {}
-        # 一致性统计（专有名词统一，收尾兜底）：source -> {译名: 出现次数}——每次写回
-        # 真译文累加。AI 每次调用独立无全局约束，同一专有名词常被翻成多个译名（Zeno→
-        # 泽诺/泽昂/zeno）；build 前 _consistency_normalize 选最高频主译名统一替换产物。
+        # 一致性统计（AI 语境归一化的候选来源）：source -> {译名: 出现次数}——每次写回真译文
+        # 累加。build 前 _ai_contextual_normalize 据此收集「同原文 ≥2 译文」的**专名形态**候选，
+        # AI 判定语境相同才统一（v1.1.0，替代机械 _consistency_normalize）。
         self._consistency_stats: dict[str, dict[str, int]] = {}
-        # 名称归一化（用户核心方案，审查通过的关键步骤）：
-        # 规范译名表 {原文: 规范译名}——第一个条目由 AI 自行翻译（验证是对应语言后）登记为
-        # 规范译名；后续所有同一原文条目**直接沿用规范译名**（不重新翻译/不自由发挥）；
-        # 审查时若译文与规范译名不一致 → 归一化覆盖为规范译名。这是「第一定义+后续跟随」，
-        # 从源头杜绝一词多译（事后 _consistency_normalize 只是兜底）。
+        # 规范译名表 {原文: 规范译名}（v1.1.0）：只对**专名形态**原文登记第一个确认译名，
+        # **不强制覆盖**后续译文（多译文冲突由 AI 语境归一化判定）；供 glossary 提示 +
+        # AI 归一化审查参考。常用词（light/right）不登记。
         self._norm_terms: dict[str, str] = {}
         self.same_script: bool = False
         self.engine = None          # LLMClient / MachineClient / 兜底引擎
@@ -508,56 +540,17 @@ class AutoFlow:
         self.store.save(self.state)
         return g
 
-    def _term_map(self) -> dict[str, str]:
-        """当前生效术语表（历史 base_terms + 本次 project_terms），筛出「英文 → 纯中文」对照，
-        供术语保护用。筛选：term 含英文（≥2 字符）、norm 无英文（纯目标语言译名，如 泽诺）。
-        """
-        terms = {**getattr(self, "base_terms", {}), **self.project_terms}
-        out: dict[str, str] = {}
-        for t, n in terms.items():
-            if not t or not n or t == n:
-                continue
-            if len(t) < 2 or not re.search(r"[A-Za-z]", t):
-                continue
-            if re.search(r"[A-Za-z]", n):
-                continue   # 译名仍含英文（保留原文决策）→ 保护无意义
-            out[t] = strip_particle(n)   # 词级术语剥结尾助词（符文的→符文），防「的」叠加
-        return out
-
-    def _protect_terms(self, text: str) -> tuple[str, dict[str, str]]:
-        """**术语保护**（通用词级一致核心）：把 source 里已确认英文术语替换为占位符，
-        AI 翻译时不碰占位符 → 同一英文词（Zeno）无论出现在哪个条目（Zeno Red / Zeno's）
-        都 100% 还原为规范译名（泽诺），杜绝 AI 翻成 zero/泽昂 等变体。按长度降序组合正则
-        一次扫描（长词优先，防子串冲突）；词边界匹配防误伤（Zeno 不碰 Zenith）。
-        """
-        terms = self._term_map()
-        if not terms:
-            return text, {}
-        pattern = ("(?<![A-Za-z])(?:"
-                   + "|".join(re.escape(t) for t in sorted(terms, key=len, reverse=True))
-                   + ")(?![A-Za-z])")
-        mapping: dict[str, str] = {}
-
-        def _repl(m, _terms=terms, _mapping=mapping):
-            ph = f"%%ZT{len(_mapping)}%%"
-            _mapping[ph] = _terms[m.group(0)]
-            return ph
-
-        return re.sub(pattern, _repl, text), mapping
-
-    def _restore_terms(self, text: str, mapping: dict[str, str]) -> str:
-        """还原占位符为规范译名（AI 保留占位符 → 替换为泽诺）。"""
-        out = text
-        for ph, norm in mapping.items():
-            out = out.replace(ph, norm)
-        return out
+    # v1.1.0：_term_map / _protect_terms / _restore_terms（机械术语占位符保护）已删除——
+    # 它是「right 翻成右面后所有 right 全替换成右面」破坏语境的机械元凶；
+    # 归一化改为 AI 语境判定（glossary 仅提示 + _ai_contextual_normalize 审查）。
 
     async def _engine_translate(self, texts: list[str], reasons=None, **kw) -> tuple[list[str], dict]:
         """引擎批量翻译包装：返回 (results, meta)。
 
-        **术语保护**：翻译前把已确认英文术语替换为占位符（AI 不碰 → 词级一致），翻译后还原
-        规范译名——同一英文词全项目统一译法（用户诉求：所有一样的英文翻译成一样的中文）。
-        保护不影响 it["source"]/memory 映射（只在传给 AI 的文本上做）。
+        v1.1.0：**移除机械术语保护**（_protect_terms 占位符替换——它是「right 被翻译成右面
+        后所有 right 全替换成右面」破坏语境的元凶）。归一化只通过 glossary_prompt 提示 AI
+        （专名对照），AI 按语境自行判断遵循；同原文多译文的语境判定由 AI 语境归一化审查
+        （_ai_contextual_normalize）在 build 前处理，不再翻译时硬替换。
 
         meta 携带本次调用的失败标记/错误类别/致命错误（per-call 隔离）——修复并行管道
         共享同一 engine 实例时实例属性 clear() 互相污染（请求失败被误判「AI 故意保留」
@@ -566,11 +559,8 @@ class AutoFlow:
         """
         meta = {}
         reasons = list(reasons) if reasons else None
-        # 术语保护仅 LLM 引擎生效（修复 recheck）：机翻（Google）可能把 %%ZTn%% 占位符当普通
-        # 文本翻译破坏还原，且机翻场景无术语表意义（一致性靠 memory 命中）
         _is_llm = isinstance(self.engine, LLMClient)
-        protected = [self._protect_terms(t) for t in texts] if _is_llm else [(t, {}) for t in texts]
-        masked = [p[0] for p in protected]
+        masked = list(texts)   # v1.1.0：直接传原文（无占位符保护，AI 按语境自由翻译）
         if _is_llm:
             results = await self.engine.translate_batch(
                 masked, self.req.target_lang, meta=meta, feedback=reasons or None, **kw)
@@ -583,14 +573,7 @@ class AutoFlow:
             meta = {"failed": set(getattr(self.engine, "_batch_failed_texts", ())),
                     "kind": getattr(self.engine, "_last_error_kind", "other"),
                     "fatal": getattr(self.engine, "_fatal_error", None)}
-        results = [self._restore_terms(g, p[1]) for g, p in zip(results, protected)]
-        # 失败集还原（修复 recheck）：保护后 LLMClient/machine 记录的 failed 是 **masked** 文本
-        #（含占位符），上层用原始 source 比对 failed 集会误判成功/失败。还原为原始 source。
-        if meta.get("failed"):
-            orig_by_masked: dict[str, str] = {}
-            for p, t in zip(protected, texts):
-                orig_by_masked.setdefault(p[0], t)
-            meta["failed"] = {orig_by_masked.get(f, f) for f in meta["failed"]}
+        # v1.1.0：无占位符保护，failed 已是原始 source，无需还原
         return results, meta
 
     async def _wait_network_retry(self, translate_fn, texts: list[str],
@@ -1167,9 +1150,8 @@ class AutoFlow:
         # 后续与规范译名不一致的（AI 自由发挥/并发竞态）在此覆盖统一——审查通过
         # 的前提是「译名一致」。归一化后的译名写 memory → 后续条目命中直接沿用。
         translated = self._apply_name_norm(it.get("source") or "", translated)
-        # 修复（recheck）：词级术语覆盖——已确认英文术语（Zeno→泽诺）出现在译文里（AI 保留
-        # 原文/变体）时强制替换为规范译名，管到「Zeno Red」这类组合词（名称归一化只认同一原文）
-        translated = self._apply_term_override(translated)
+        # v1.1.0：移除 _apply_term_override 词级术语覆盖（light→灯 全替换破坏语境的元凶；
+        # 多语境统一交给 AI 语境归一化审查 _ai_contextual_normalize 判定）
         # 修复：sink 用 None 判断（依赖空 dict falsy 脆弱，Agent 审查确认）
         sink = it.get("sink")
         if sink is None:
@@ -1275,7 +1257,11 @@ class AutoFlow:
                 if stripped != tr and len(stripped) < 2:
                     continue
                 tr = stripped
-                if tr and tr != w and self._is_target_lang(tr, self.req.target_lang) \
+                # v1.1.0：只登记**形态像专有名词**的词（_is_proper_noun）——light/right/iron
+                # 等小写常用词即使高频也不登记为规范译名（否则 glossary 注入 light→灯，
+                # light blue 变灯蓝色），杜绝机械统一破坏语境
+                if _is_proper_noun(w) and tr and tr != w \
+                        and self._is_target_lang(tr, self.req.target_lang) \
                         and not re.search(r"[A-Za-z]{3,}", tr):
                     self._norm_terms[w] = tr
             if self._norm_terms:
@@ -1288,60 +1274,30 @@ class AutoFlow:
             pass   # 预扫描失败不阻塞翻译
 
     def _apply_name_norm(self, source: str, translated: str) -> str:
-        """名称归一化（用户核心方案，审查通过的关键步骤）——「第一定义+后续跟随」：
+        """专有名词规范译名登记（v1.1.0 重构）。
 
-        - **已有规范译名**且本次译文不同 → 覆盖为规范译名（后续所有同一原文条目
-          统一沿用第一个确认的译名，AI 自由发挥的变体在审查时被归一化掉）；
-        - **无规范译名**且本次译文是目标语言（非保留原文）→ 登记为规范译名
-          （第一个由 AI 自行翻译并确认是对应语言，成为全项目权威译名）；
-        - 译文是原文（保留）/非目标语言 → 不登记，等后续能翻出目标语言的条目。
-
-        返回归一化后的译文。规范译名同时写 memory → 后续条目 memory 命中直接用
-        规范译名（不重新翻译、不自由发挥），从源头杜绝一词多译。"""
+        **移除「第一定义强制覆盖」**——旧版第一个译文成为规范译名后强制覆盖后续同原文：
+        right 被翻成「右面」后所有 right（正确/权利/右边）全被覆盖成「右面」，破坏语境。
+        改为：
+        - 只对**形态像专有名词**的原文（_is_proper_noun：Zeno/Iron Ingot 等）登记规范译名，
+          供 AI 语境归一化审查（_ai_contextual_normalize）build 前判定语境后参考；
+        - **不强制覆盖**当前译文——AI 按语境自由翻译，多译文冲突由 AI 审查判定是否统一；
+        - 常用词（light/right/iron）形态不像专名 → 不登记、不干预，绝不做机械统一。"""
         src = (source or "").strip()
         if not src:
             return translated
-        norm = self._norm_terms.get(src)
-        if norm and norm != src:
-            # 规范译名存在且是真译名（≠原文）→ 强制统一（第一定义后续跟随）
-            if translated != norm:
-                translated = norm
-        elif norm == src:
-            # 规范译名是「保留原文」决策：不强制覆盖译文（本次 AI 可重新翻），
-            # 但也不登记（保留不是译名）
-            pass
-        elif translated != src and self._is_target_lang(translated, self.req.target_lang):
+        # 非专名形态 → 不干预（用户核心诉求：常用词绝不机械统一）
+        if not _is_proper_noun(src):
+            return translated
+        # 译文是目标语言（真译名）→ **只在无规范译名时**登记（第一个确认的为规范译名，
+        # 后续不覆盖——规范译名保持稳定，多译文冲突由 AI 语境归一化审查判定）。不强制覆盖。
+        if (translated != src and src not in self._norm_terms
+                and self._is_target_lang(translated, self.req.target_lang)):
             self._norm_terms[src] = strip_particle(translated)   # 规范译名剥助词（符文的→符文）
         return translated
 
-    def _apply_term_override(self, translated: str) -> str:
-        """译文**词级**术语覆盖：已确认的英文术语（project_terms 的 Zeno→泽诺）出现在译文里时，
-        替换为规范译名——修「Zeno Red」被 AI 翻成「zero 红 / Zeno 红」而不统一的场景。
-
-        修复（recheck）：名称归一化是「完整原文精确匹配」，只对同一原文生效；「Zeno」登记的
-        规范译名管不到「Zeno Red」这种含该词的条目（AI 把 Zeno 保留原文/翻成音近词）。
-        这里按**词边界**把译文里的已确认英文术语替换为规范译名（\bZeno\b 不匹配 Zenith，
-        长度 ≥3 防误伤单字母；非英文术语如路径/代码不替换）。
-        术语表 = **历史确认**（base_terms：用户术语表 + 记忆提取）+ **本次确认**（project_terms）
-        ——历史 Zeno→泽诺 对本次组合词同样生效。
-        """
-        out = translated
-        terms = {**getattr(self, "base_terms", {}), **self.project_terms}
-        for term, norm in terms.items():
-            if not term or not norm or term == norm:
-                continue                       # 保留原文决策 / 空
-            if len(term) < 3 or not re.search(r"[A-Za-z]", term):
-                continue                       # 太短 / 非英文术语（路径/代码）不替换
-            if re.search(r"[A-Za-z]", norm):
-                continue                       # norm 仍含英文（保留原文决策/未翻出）→ 替换无意义；
-                                               # 只有 norm 是纯目标语言（泽诺）才替换译文里的英文术语
-            # 词边界匹配：Zeno → 泽诺（不匹配 Zenith/Zenithal 的 Zen 前缀）。
-            # 剥结尾助词（符文的→符文）：词级覆盖同样防「X 的的 Y」叠加。
-            norm = strip_particle(norm)
-            if len(norm) < 2:
-                continue
-            out = re.sub(rf"(?<![A-Za-z]){re.escape(term)}(?![A-Za-z])", norm, out)
-        return out
+    # v1.1.0：_apply_term_override（词级术语覆盖）已删除——它是「light 翻成灯后 light blue
+    # 变灯蓝色」的机械元凶；多语境统一改由 AI 语境归一化审查（_ai_contextual_normalize）判定。
 
     def _record_consistency(self, source: str, translated: str) -> None:
         """一致性统计累加：记录「原文→译名」出现次数（收尾归一化选主译名用）。
@@ -1367,62 +1323,146 @@ class AutoFlow:
             yield out
         yield from self.hard_mappings.values()
 
-    def _consistency_normalize(self) -> None:
-        """一致性归一化（build 前收尾兜底）：同一原文多个不同译文 → 统一主译名。
+    # v1.1.0：_consistency_normalize（机械硬统一）已删除——它把「right 翻成右面后所有
+    # right 全替换成右面」，破坏语境；归一化改由 _ai_contextual_normalize（AI 语境判定：
+    # 只对专名 + 同语境的候选，AI 在语境中重翻统一，常用词绝不机械统一）。
 
-        与「名称归一化」（审查时的第一定义+后续跟随）互补：名称归一化在源头保证
-        审查通过的条目译名一致，本兜底把漏网变体（CFPA/硬编码等未走名称归一化路径
-        写入的、或并发竞态残留的）统一掉。主译名**优先规范译名**（名称归一化登记的
-        第一定义权威，兜底绝不推翻它），无规范译名才退化为最高频（次数相同取先出现、
-        排除「保留原文」候选）。AI 不听话也能收干净。
+    def _collect_norm_candidates(self) -> list[dict]:
+        """收集「同原文 ≥2 个不同译文」且形态像专名的候选组（AI 语境归一化候选）。
+        只收 _is_proper_noun 通过（首字母大写/驼峰/命名式）——light/right 小写常用词
+        天然不进，绝不机械统一（用户核心诉求）。"""
+        out = []
+        for source, variants in self._consistency_stats.items():
+            if len(variants) < 2:
+                continue                 # 单译名/无冲突 → 不触发（用户确认：仅多译文冲突时）
+            if not _is_proper_noun(source):
+                continue                 # 小写常用词不进候选
+            out.append({"source": source,
+                        "variants": sorted(variants, key=variants.get, reverse=True)})
+        return out
 
-        安全边界：有规范译名（名称归一化第一定义 / CFPA / 预扫描）时**强制所有译文统一
-        为规范译名**（含单译名——修复：之前仅 ≥2 变体才统一，单译名「Zeno→泽昂」即使
-        _norm_terms 有「泽诺」也不回改）；无规范译名时仅「同一原文有 ≥2 个不同译文」才触发。
-        替换按「译文文本 ∈ 旧译名集合」判定（不同原文翻出完全相同译名的撞车概率极低，
-        且统一方向是往已确认译名靠，可接受）。
-        """
+    async def _ai_judge_normalization(self, cands: list[dict]) -> dict[int, dict]:
+        """AI 批量判定候选组：是否专名、各译文语境是否相同、应统一的给规范译名。
+        返回 {索引: {"should_unify": bool, "canonical": str}}；机翻引擎/请求失败返回空
+        （宁可不统一，不机械破坏语境）。解析兼容「统一 泽诺」「统一：泽诺」等输出
+        （Agent 审查：原正则要求空格才捕获 canonical，冒号/无空格被静默丢弃）。"""
+        if not isinstance(self.engine, LLMClient):
+            return {}
+        lines = "\n".join(
+            f"[i{i}] 原文「{c['source']}」出现译文：{'、'.join(c['variants'])}"
+            for i, c in enumerate(cands))
+        llm = self.engine
+        client = llm._get_client()
+        body = {
+            "model": llm.model,
+            "messages": [
+                {"role": "system", "content": _NORM_JUDGE_SYSTEM},
+                {"role": "user", "content": lines},
+            ],
+            "temperature": 0.0,
+            "max_tokens": 1024,
+        }
+        try:
+            resp = await client.post(f"{llm.base_url}/chat/completions", json=body)
+            resp.raise_for_status()
+            out = resp.json()["choices"][0]["message"]["content"]
+        except Exception:
+            return {}
+        judged: dict[int, dict] = {}
+        for line in out.splitlines():
+            m = re.match(r"\[i(\d+)\]\s*(统一|不统一)\s*[:：]?\s*(\S+)?", line.strip())
+            if m:
+                idx = int(m.group(1))
+                if m.group(2) == "统一":
+                    judged[idx] = {"should_unify": True,
+                                   "canonical": (m.group(3) or "").strip("（）()「」")}
+                else:
+                    judged[idx] = {"should_unify": False}
+        return judged
+
+    async def _ai_renormalize(self, cands: list[dict], judged: dict[int, dict]) -> None:
+        """对 AI 判定「应统一」的分组统一全部产物数据源：
+        - by_mod（有 source 对照）：AI 在语境中重翻（feedback 带规范译名提示），
+          带 modid 收集（修复 Agent 审查：同 key 多 mod 只翻第一个）；重翻后仍 == 旧变体
+          的收敛为 canonical（AI 已判同语境，定向替换安全）。
+        - 其余源（json-lines/pack/硬编码，无 source 对照）：按 AI 判定同语境的旧译名
+          定向替换 canonical（修复 Agent 审查：跨映射不一致漏统一）。"""
+        unified: list[tuple[str, str, list[str]]] = []   # [(source, canonical, old_variants)]
+        for idx, j in judged.items():
+            if idx < 0 or idx >= len(cands):
+                continue                     # 索引越界防崩（Agent 审查：越界 → 全部静默失败）
+            if not j.get("should_unify") or not j.get("canonical"):
+                continue
+            source = cands[idx]["source"]
+            canonical = j["canonical"]
+            old = [v for v in cands[idx]["variants"] if v not in (canonical, source)]
+            if not old:
+                continue
+            unified.append((source, canonical, old))
+        if not unified:
+            return
+        # 1) by_mod：AI 语境重翻（带 modid 收集，不走 _collect_retry_items 的 key 去重/break）
+        retry_items: list[dict] = []
+        for source, canonical, _old in unified:
+            fb = f"「{source}」是专有名词且各出现语境相同，规范译名应为「{canonical}」，请重翻为自然中文"
+            for modid, entries in self.by_mod.items():
+                src = self.source_by_mod.get(modid, {})
+                for key, trans in entries.items():
+                    if src.get(key) == source and trans != canonical:
+                        retry_items.append({"key": key, "text": source, "sink": entries,
+                                            "modid": modid, "reason": fb})
+        if retry_items:
+            await self._translate_batch_pipeline(
+                retry_items,
+                lambda texts, _reasons=None: self._engine_translate(texts, _reasons, forced=True),
+                batch_size=5, skip_fn=lambda t: False,
+                force_engine=True, count_done=False)
+            # 收敛：AI 重翻后仍 == 旧变体（未遵循提示）→ 定向替换 canonical（同语境安全）
+            for source, canonical, old in unified:
+                for modid, entries in self.by_mod.items():
+                    src = self.source_by_mod.get(modid, {})
+                    for key, trans in entries.items():
+                        if src.get(key) == source and trans in old:
+                            entries[key] = canonical
+        # 2) 非 by_mod 源（json-lines/pack/硬编码）：无 source 对照 → 按 AI 判定同语境的
+        #    旧译名定向替换 canonical（修复 Agent 审查：跨映射不一致漏统一）
+        for mapping in self._iter_translation_mappings():
+            if any(mapping is m for m in self.by_mod.values()):
+                continue                      # by_mod 已重翻，跳过
+            for key, v in list(mapping.items()):
+                for _s, canonical, old in unified:
+                    if v in old:
+                        mapping[key] = canonical
+                        break
+
+    async def _ai_contextual_normalize(self) -> None:
+        """AI 语境归一化（v1.1.0 重构，替代 _consistency_normalize 机械硬统一）：
+        收集「同原文 ≥2 个译文」的**专名形态**候选 → AI 判定语境是否相同 → 同语境
+        AI 在语境中重翻统一；不同语境/常用词保留不动。只 LLM 引擎生效（机翻无 AI
+        判定能力 → 跳过不统一）。判定后同步 _norm_terms 与 memory（Agent 审查：
+        旧 _consistency_normalize 统一后写 memory，新流程不能断）。"""
         if not self._consistency_stats:
             return
-        replaced = 0
-        for source, variants in self._consistency_stats.items():
-            real = [(v, c) for v, c in variants.items() if v != source]
-            if not real:
-                continue
-            # 主译名：**优先规范译名**（名称归一化第一定义权威，兜底绝不推翻）；
-            # 有规范译名 → 强制所有译文统一为规范译名（即使单译名/变体）；
-            # 无规范译名才退化为最高频（次数相同取先出现）。否则 CFPA/硬编码等未走
-            # 名称归一化路径写的变体可能凭数量「多数压倒」覆盖掉已确认的规范译名。
-            norm_main = self._norm_terms.get(source)
-            if norm_main and norm_main != source:
-                main = norm_main
-            else:
-                if len(real) < 2:
-                    continue    # 无规范译名且单译名 → 无需统一
-                main = max(real, key=lambda x: (x[1], -real.index(x)))[0]
-            # 主译名剥结尾助词（符文的→符文）：兜底防「X 的的 Y」叠加进产物。
-            # 用**无保护 rstrip**（非 strip_particle）——此处本意就是强制剥助词选主译名，
-            # 单字保护会让「刃的」返回原样、反向把干净的「刃」统一成「刃的」（Agent 审查）。
-            # 剥后空/单字或等于原文（保留原文决策）→ 无统一意义，跳过。
-            main = main.rstrip("的地得之了")
-            if not main or len(main) < 2 or main == source:
-                continue
-            # 注：old 不排除「保留原文」（v==source）——归一化本意是把同原文的漏翻英文也
-            # 统一成主译名（test_consistency_normalize_zeno_unified 明确依赖此行为）。
-            old = {v for v in variants if v != main}
-            for mapping in self._iter_translation_mappings():
-                for k, v in mapping.items():
-                    if v in old:
-                        mapping[k] = main
-                        replaced += 1
-            # memory 同步：该原文统一为主译名（续联命中/后续阶段复用同一译名）
-            self.memory.set(source, self.req.target_lang, main)
-        self.memory.save()
-        if replaced:
-            self.state.progress.append({"status": "done", "key": "术语统一",
-                                        "source": f"统一 {replaced} 处译名",
-                                        "translated": "同一专有名词已统一为规范译名"})
-            self.store.save(self.state)
+        cands = self._collect_norm_candidates()
+        if not cands:
+            return
+        judged = await self._ai_judge_normalization(cands)
+        if not judged:
+            return
+        await self._ai_renormalize(cands, judged)
+        # 同步判定结果：规范译名落 _norm_terms（以 AI 判定为准，修复「首个登记次优」冲突）
+        # + memory（续联/后续阶段复用统一译名）
+        _mem_changed = False
+        for idx, j in judged.items():
+            if 0 <= idx < len(cands) and j.get("should_unify") and j.get("canonical"):
+                src, canonical = cands[idx]["source"], j["canonical"]
+                if self._norm_terms.get(src) != canonical:
+                    self._norm_terms[src] = canonical
+                if self.memory.get(src, self.req.target_lang) != canonical:
+                    self.memory.set(src, self.req.target_lang, canonical)
+                    _mem_changed = True
+        if _mem_changed:
+            self.memory.save()
 
     async def _final_judge_leak(self, it: dict, reason: str = "") -> None:
         """终审（用户诉求：保证覆盖率，不冷酷 failed）——做**最后一次终审翻译**（forced）：
@@ -1587,6 +1627,10 @@ class AutoFlow:
                 if (cfpa_hit != job.source_text
                         and self._is_target_lang(cfpa_hit, self.req.target_lang)):
                     self._norm_terms[job.source_text] = strip_particle(cfpa_hit)   # 剥助词
+                    # 记录一致性（修复 Agent 审查 🔴2）：CFPA 权威译名进 _consistency_stats，
+                    # 否则同 source 走 AI 翻出不同译名时，候选收集 len(variants)<2 跳过，
+                    # CFPA「泽诺」+ AI「泽昂」并存且无兜底
+                    self._record_consistency(job.source_text, cfpa_hit)
                 self.by_mod.setdefault(job.modid, {})[job.key] = cfpa_hit
                 self.memory.set(job.source_text, self.req.target_lang, cfpa_hit)   # 写记忆，json/硬编码阶段同文本复用
                 # 续联：CFPA 命中只推进 stage 明细（全局基准已含）
@@ -2384,7 +2428,7 @@ class AutoFlow:
                 # 老版本未归一化时写的 Zeno→泽昂）被预填成规范后，会强制覆盖本次 AI 翻出的
                 # 更好译名（泽诺），劣译名粘性残留。规范译名由**本次任务第一个 AI 确认的
                 # 对应语言译文**登记（_apply_name_norm），历史译名只作 glossary_prompt 提示
-                # AI 倾向沿用；不一致由 _consistency_normalize 兜底统一（优先规范译名）。
+                # AI 倾向沿用；不一致由 _ai_contextual_normalize（AI 语境判定）兜底统一。
             # 项目记忆已就绪：有词条即断点续联（明确提示，不重复翻译）
             if len(self.memory.data) > 0:
                 self.state.progress.append({"status": "done", "key": "断点续联",
@@ -2596,7 +2640,6 @@ class AutoFlow:
             # 整合包硬编码也要翻译，用 **VP 补丁（Vault Patcher）形式生效**——vault-patcher.jar
             # + 映射模块运行时注入，不碰 mod jar、不产修改版 jar，无二次分发纠纷）。
             # 只有在线机翻（无 AI 判断能力）才跳过硬编码。
-            self._do_hardcode = not self.engine_machine
 
             # 输入名翻译（右栏标题区完成态显示中文名 + 原名淡化）；失败回退原名不中断
             self.state.progress.append({"status": "translating", "count": 0,
@@ -2719,12 +2762,12 @@ class AutoFlow:
             if self.state.cancelled or self._aborted:
                 return    # 取消：直接收尾（finally 清理），不继续 build
 
-            # 一致性归一化（专有名词统一，用户诉求 Zeno→泽诺/泽昂/zeno 三样并存）：
-            # 所有阶段翻译/审查完成、build 写产物前，把「同一原文多个不同译文」统一为
-            # 最高频主译名。后处理硬保证（不依赖 AI 遵守 prompt 术语表软约束）。
+            # v1.1.0：AI 语境归一化（替代机械 _consistency_normalize 硬统一）——只对
+            # 「同原文 ≥2 个译文」的**专名形态**候选，AI 判定语境是否相同；同语境 → AI
+            # 在语境中重翻统一（规范译名提示），不同语境/常用词（light/right）保留不动。
             if not self.state.cancelled:
                 try:
-                    self._consistency_normalize()
+                    await self._ai_contextual_normalize()
                 except Exception:
                     pass    # 归一化失败不阻断流程（产物已可用，只是可能不统一）
 
