@@ -110,6 +110,9 @@ def _is_legit_keep_by_source(source: str) -> bool:
     s = (source or "").strip()
     if not s:
         return True
+    # 纯罗马数字（I/II/III/IV/V/VI/VII/VIII/IX/X…，限 I V X L C D M 组合）→ 保留（用户诉求）
+    if re.fullmatch(r"[IVXLCDM]{1,6}", s):
+        return True
     # 移除 %xx 占位符（%s/%d/%%/%1$s/%n 等）与 Minecraft § 颜色码（§e=黄/§r=重置，
     # 其字母是格式码非实词）后无英文字母 → 纯占位符/格式串（如 (%1$s): %2$s、
     # §e>§r %s §e<§r）→ 保留
@@ -1019,51 +1022,78 @@ class AutoFlow:
                     self._write_reviewed(it, it["translated"])
                 else:
                     force_retrans.append(it)
-        # 强制重翻：审查不合格（bad_items）+ 审查通过但保留原文且规则判定该翻（force_retrans）。
-        # 规则兜底：该翻的纯英文不放行，forced 重翻直到翻出译文；重翻仍原文才终审判定。
+        # 审查后处理闭环（用户诉求）：审查不合格（bad_items）+ 审查通过但纯英文该翻（force_retrans）。
+        # —— 第一轮：**相同 prompt 重跑一遍**（不直接 forced，可能是批量/偶发偷懒或截断）：
+        #    结果不同且全量中文 → 算过采用；仍原文/英文 → 进强制翻译。
         retrans_items = bad_items + force_retrans
         if retrans_items:
-            _net_fail = False
+            _need_forced: list[dict] = []
+            _pass1: list[tuple[dict, str]] = []
+            _r1net = False
             try:
-                texts = [it["source"] for it in retrans_items]
-                reasons = [bad_keys.get(it["key"], "译文仍是原文，必须翻译成目标语言")
-                           for it in retrans_items]
-                _got, _meta = await self._engine_translate(texts, reasons, forced=True)
-                got = _got
-                # 修复：审查重翻也检查 meta——网络/服务失败回原文不是「漏翻」，保留初次好译文
-                #（不丢弃），否则一批 retrans_items 因 API 抖动全被误杀（Agent 审查确认）
-                _m_failed = (_meta or {}).get("failed") or set()
-                _m_kind = (_meta or {}).get("kind") or "other"
-                if (_m_kind in ("timeout", "network", "ratelimit", "server")
-                        or any(t in _m_failed for t in texts)):
-                    _net_fail = True
+                _t1 = [it["source"] for it in retrans_items]
+                _rs1 = [bad_keys.get(it["key"], "") for it in retrans_items]
+                _g1, _m1 = await self._engine_translate(_t1, _rs1, forced=False)
+                _m1f = (_m1 or {}).get("failed") or set()
+                _m1k = (_m1 or {}).get("kind") or "other"
+                _r1net = (_m1k in ("timeout", "network", "ratelimit", "server")
+                          or any(x in _m1f for x in _t1))
             except Exception:
-                got = texts
-                _net_fail = True   # 重翻异常：按网络失败处理（保留初译，不误判漏翻）
-            for it, tr in zip(retrans_items, got):
-                if _net_fail:
-                    # 网络/服务失败：初次有**真译文**（目标语言）则保留写回（不丢弃好译文）；
-                    # 假译文（非目标语言）/原文条目进终审（避免网络抖动把假译文当成功）
-                    if it["translated"] != it["source"] \
-                            and self._is_target_lang(it["translated"], self.req.target_lang):
-                        self._write_reviewed(it, it["translated"])
-                    else:
-                        self._final_judge_leak(it, bad_keys.get(it["key"], "翻译服务异常"))
-                    continue
-                # 多次翻译都是原文（AI 反复翻不出）→ 直接标漏翻进终审
-                if tr == it["translated"] and tr == it["source"]:
-                    self._final_judge_leak(it, bad_keys.get(it["key"], "多次翻译仍原文"))
-                    continue
-                # 修复（recheck）：重翻写回前校验「真的译成了目标语言」——AI 重翻只改
-                # 措辞/大小写（tr≠source 仍是纯英文）或稳定输出审查已判不合格的初译
-                # （tr==translated 中英混杂/截断）都不得当「过」写回，否则纯英文带
-                # reviewed=True 进产物（用户实测「审查算过了但纯英文残留」根因）。
-                if not self._is_target_lang(tr, self.req.target_lang) \
-                        and not _is_legit_keep_by_source(it["source"]):
-                    self._final_judge_leak(it, bad_keys.get(it["key"], "重翻仍非目标语言"))
-                    continue
-                # 重翻与初次相同（有译文的稳定译法）→ 算过写产物；重翻翻出新译文（≠原文）→ 放行
+                _g1 = [it["source"] for it in retrans_items]
+                _r1net = True   # 重跑异常：按网络失败处理，进强制轮
+            for it, tr1 in zip(retrans_items, _g1):
+                if _r1net:
+                    _need_forced.append(it)
+                elif tr1 != it["source"] and self._is_target_lang(tr1, self.req.target_lang):
+                    _pass1.append((it, tr1))   # 不同且全量中文 → 算过
+                else:
+                    _need_forced.append(it)    # 相同/仍原文/英文 → 进强制
+            for it, tr in _pass1:
                 self._write_reviewed(it, tr)
+            # —— 第二轮：强制翻译（forced）→ 再审查一次：过 → 输出；不过 → 终审（终审也尽力输出）
+            if _need_forced:
+                _net2 = False
+                try:
+                    _t2 = [it["source"] for it in _need_forced]
+                    _rs2 = [bad_keys.get(it["key"], "译文仍是原文，必须翻译成目标语言")
+                            for it in _need_forced]
+                    _g2, _m2 = await self._engine_translate(_t2, _rs2, forced=True)
+                    _m2f = (_m2 or {}).get("failed") or set()
+                    _m2k = (_m2 or {}).get("kind") or "other"
+                    _net2 = (_m2k in ("timeout", "network", "ratelimit", "server")
+                             or any(x in _m2f for x in _t2))
+                except Exception:
+                    _g2 = [it["source"] for it in _need_forced]
+                    _net2 = True
+                # forced 结果再审查（对翻出译文的条目）
+                _f2pairs = [{"key": it["key"], "source": it["source"], "translated": tr2}
+                            for it, tr2 in zip(_need_forced, _g2) if tr2 != it["source"]]
+                _f2issues = {}
+                if _f2pairs:
+                    try:
+                        _f2issues = {iss["key"]: iss.get("reason", "") for iss in await
+                                     review_translations(self.engine, _f2pairs, self.req.target_lang)}
+                    except Exception:
+                        _f2issues = {}
+                for it, tr2 in zip(_need_forced, _g2):
+                    if _net2:
+                        # 网络/服务失败：初次有真译文（目标语言）保留写回；否则终审
+                        if it["translated"] != it["source"] \
+                                and self._is_target_lang(it["translated"], self.req.target_lang):
+                            self._write_reviewed(it, it["translated"])
+                        else:
+                            await self._final_judge_leak(it, bad_keys.get(it["key"], "翻译服务异常"))
+                        continue
+                    # 多次翻译都是原文 → 终审
+                    if tr2 == it["source"]:
+                        await self._final_judge_leak(it, bad_keys.get(it["key"], "多次翻译仍原文"))
+                        continue
+                    # forced 翻出译文：全量中文且审查过 → 输出；否则 → 终审（终审尽力输出）
+                    if self._is_target_lang(tr2, self.req.target_lang) \
+                            and it["key"] not in _f2issues:
+                        self._write_reviewed(it, tr2)
+                    else:
+                        await self._final_judge_leak(it, bad_keys.get(it["key"], "强制翻译仍审查不过"))
         self.memory.save()
         self.store.save(self.state)
 
@@ -1274,19 +1304,29 @@ class AutoFlow:
                                         "translated": "同一专有名词已统一为规范译名"})
             self.store.save(self.state)
 
-    def _final_judge_leak(self, it: dict, reason: str = "") -> None:
-        """终审：重翻仍漏翻（译文仍 == 原文）——合理保留提示不 failed（并记录「保留」对照
-        统一沿用），该翻的记 failed。
-
-        修复：终审判死/保留都**写回原文到 sink**（by_mod 有该 key）——否则后续
-        _record_residual_failures 的 audit_invariants 对「source 有 key 但 target 缺」误报
-        「缺少中文译文」→ 同一漏翻 failed 双计、合理保留被误计 failed（Agent 审查确认）。"""
+    async def _final_judge_leak(self, it: dict, reason: str = "") -> None:
+        """终审（用户诉求：保证覆盖率，不冷酷 failed）——做**最后一次终审翻译**（forced）：
+        只要翻出非原文的目标语言译文就**输出写回**（人类对语言即使略生硬也能读懂）；
+        真翻不出（仍原文/纯英文）才按合理保留 / 漏翻处理。
+        合理保留仍写回原文到 sink（防 audit_invariants 误报「缺译文」双计 failed）。"""
         src_full = (it.get("source") or "")
         src = src_full[:50]
         reason = (reason or "").strip() or "译文质量不合格"
         sink = it.get("sink")
         if sink is None:
             sink = it["sink"] = self.by_mod.setdefault(it.get("modid", ""), {})
+        # 终审翻译：forced 再试一次，翻出非原文的目标语言译文 → 输出写回（覆盖率优先）
+        final_tr = ""
+        try:
+            _r, _m = await self._engine_translate([src_full], [reason], forced=True)
+            _rt = _r[0] if _r else ""
+            if _rt and _rt != src_full and self._is_target_lang(_rt, self.req.target_lang):
+                final_tr = _rt
+        except Exception:
+            final_tr = ""
+        if final_tr:
+            self._write_reviewed(it, final_tr)
+            return
         sink[it["key"]] = src_full
         # 修复（recheck）：终审合理保留也要过**规则关**——`_is_legit_keep_by_source`（纯占位符/
         # 无字母/代码标识等确定翻不动）优先判定；AI 的 reason 只作补充。否则 AI 把「该翻的

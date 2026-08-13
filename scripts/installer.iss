@@ -2,12 +2,12 @@
 ; 像素译站 安装版 —— Inno Setup 6 脚本（中文注释）
 ; 用法：ISCC.exe scripts\installer.iss
 ; 源目录：dist\安装版\像素译站\（PyInstaller onedir，由 M6-2 / build_all.ps1 产出）
-; 产物：dist\安装版\release-v1.0.2-setup.exe
+; 产物：dist\安装版\release-v1.0.3-setup.exe
 ; 注意：本文件以 UTF-8（带 BOM）保存，请勿改成无 BOM 以免中文乱码
 ; ============================================================
 
 #define MyAppName "像素译站"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.3"
 #define MyAppPublisher "像素译站"
 #define MyAppExeName "像素译站.exe"
 
@@ -28,7 +28,7 @@ DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=..\dist\安装版
-OutputBaseFilename=release-v1.0.2-setup
+OutputBaseFilename=release-v1.0.3-setup
 ; 安装包图标取自 exe 自身（PyInstaller 内嵌图标）；日后有专用 .ico 可替换该行
 SetupIconFile=..\assets\app-icon.ico
 ; 卸载器也显示应用图标

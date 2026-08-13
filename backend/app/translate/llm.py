@@ -36,8 +36,10 @@ _SILLY_NOTE = ("【胡言乱语模式】本条翻译用搞笑、玩梗、网络�
 
 
 def build_tagged_texts(texts: list[str]) -> str:
-    """N 条文本拼一条 prompt，每行带 [i索引] 前缀，便于切回。"""
-    return "\n".join(f"[i{i}] {t}" for i, t in enumerate(texts))
+    """N 条文本拼一条 prompt，每行带 [i索引] 前缀，便于切回。
+    原文真实换行必须转义为字面 \\n——否则换行会打断 [iN] 行式结构，
+    后续裸行无编号，AI 只译 [i0] 首行就截断（用户实测长文本只出「（祭」）。"""
+    return "\n".join(f"[i{i}] {t.replace(chr(10), '\\n')}" for i, t in enumerate(texts))
 
 
 def _index_from_match(m: re.Match) -> int:
@@ -309,7 +311,7 @@ class LLMClient:
         # 逐行构造：带审查原因的条目标注「上次审查不合格：[原因]」，让 AI 针对修正
         prompt_lines = []
         for i, ((orig_idx, _), m) in enumerate(zip(todo, masked)):
-            line = f"[i{i}] {m}"
+            line = f"[i{i}] {m.replace(chr(10), '\\n')}"   # 原文真实换行 → 字面 \n，防破坏 [iN] 行式
             if orig_idx in fb_by_idx:
                 line += f"  ← 上次审查不合格：{fb_by_idx[orig_idx]}，请据此修正译文"
             prompt_lines.append(line)
@@ -330,10 +332,12 @@ class LLMClient:
                     (self.glossary_prompt + "\n" if self.glossary_prompt else "") +
                     forced_note +
                     f"把 Minecraft 游戏文本翻译成 {target_lang}。输入每行以 [i数字] 开头，"
-                    f"你必须严格按输入行数逐行输出译文，一行对应一条，不得遗漏、不得合并、"
-                    f"不得截断——每条必须译完整句，长句也须完整译出，禁止只译前半句；"
-                    f"不得添加任何解释/前缀/编号说明。译文须能作为游戏内显示文本，"
-                    f"保留 %s/%d/%n 等占位符原样；原文含换行时用 \\n 表示，不要真的换行拆条。"
+                    f"你必须严格按输入行数逐行输出译文，一行对应一条，不得遗漏、不得合并、不得截断——"
+                    f"每条必须**完整翻译整段**：长句、多行文本（用 \\n 表示的换行）必须整段翻完，"
+                    f"禁止只译开头就停止、禁止英文原文残留；译文**只允许目标语言**（专有名词/命令/"
+                    f"占位符等前述豁免除外），不得把英文原文原样输出；多行原文的译文用 \\n 保持同样"
+                    f"换行结构；不得添加任何解释/前缀/编号说明。译文须能作为游戏内显示文本，"
+                    f"保留 %s/%d/%n 等占位符原样。"
                     f"**核心原则：用户可见的英文一律翻译成目标语言**——按钮、选项、设置项、"
                     f"提示、描述、物品、技能、状态效果等，无论一个英文单词还是整句都必须翻译；"
                     f"单个普通英文单词（Sprint、Enabled、Sneak、Options）同样必须翻译，"
@@ -341,7 +345,8 @@ class LLMClient:
                     f"仅以下确定性情况允许保留英文：真实的游戏/模组专有名词（Minecraft、JEI、"
                     f"Xaero、Balm 等模组名）、命令（/give @p diamond）、资源路径/文件名"
                     f"（config/jei/jei.toml）、纯代码标识（类名/变量名/注册 ID/本地化键，"
-                    f"如 com.example.Mod、minecraft:diamond）。"
+                    f"如 com.example.Mod、minecraft:diamond）。罗马数字（I、II、III、IV、V、"
+                    f"VI、VII、VIII、IX、X 等）保持原样不翻译。"
                     f"下划线连接词按语境判断：明显是 ID/变量（zi_min、player_name）保留；"
                     f"若下划线词是真实显示短语（No_Minimap、Craft_Table）则必须翻译"
                     f"（→ 无小地图、工作台）。"
@@ -353,9 +358,26 @@ class LLMClient:
                     f"会致游戏崩溃。请你判断每条 effect 名：若可能被用于资源定位，保留英文原样"
                     f"逐字输出原文（不加任何说明/括号）；纯显示的效果名翻译成目标语言。"
                     f"译文必须贴合 {target_lang} 母语者的自然表达习惯，**按目标语言的自然语序重组"
-                    f"词序与句法**（不限于中文——日文/韩文等同样按各自母语语序，修饰语前置、中心词"
-                    f"置后，禁止机械照搬英文词序；示例·中文目标：Blue Cyber Lamp → 「蓝色赛博灯」，"
-                    f"不是「赛博灯蓝色」）；"
+                    f"词序与句法**。"
+                    f"【中文目标语序速查·严格遵循，禁止照搬英文语序】"
+                    f"①「X of Y」所属/描述 → 倒置为「Y 的 X」，中文常省略「的」更自然："
+                    f"Sigil of Suppression → 「抑制的印记」（禁止「印记的抑制」）、"
+                    f"Blade of the Void → 「虚空之刃」；"
+                    f"② 后置介词短语/用途修饰 → 前置到名词前：A tool for mining → 「挖矿工具」、"
+                    f"weapon of the gods → 「众神之武器」；"
+                    f"③ 时间/地点/方式状语 → 放主语后、动词前：Sleep at night → 「在夜晚入睡」"
+                    f"（禁止「入睡在夜晚」）；"
+                    f"④ 副词修饰动词 → 放动词前：Move Forward → 「向前移动」、Speed Up → 「加速」；"
+                    f"⑤ 多层修饰词 → 按中文习惯顺序（范围/描写 → 来源/时代 → 材质 → 中心词）："
+                    f"Ancient Dwarven Battle Axe → 「古老矮人战斧」、Blue Cyber Lamp → 「蓝色赛博灯」"
+                    f"（禁止「赛博灯蓝色」）；"
+                    f"⑥ 名词补量词：3 Blocks → 「3 个方块」；"
+                    f"⑦ 英文被动态 → 中文习惯主动化或用「用于/可」：is used to → 「用于」；"
+                    f"⑧ 并列选项 A/B → 中文并列词，顺序保持：Raining/Snowing → 「下雨/下雪」；"
+                    f"⑨ 复合名词（材质+物）→ 顺序与中文一致：Iron Ingot → 「铁锭」、"
+                    f"Diamond Sword → 「钻石剑」；"
+                    f"⑩ 名称先被修饰词再中心词，中心词置后：Eternal Flame → 「永恒之焰」。"
+                    f"（目标语言非中文时，同样按该语言母语的自然语序重组，不机械照搬英文。）"
                     f"结合游戏界面语境（按钮/选项/提示/描述）意译，不要逐词直译、不要书面翻译腔——"
                     f"该口语就口语、该正式就正式，读起来像原生中文；禁止把英文单词硬插进中文短语，"
                     f"能意译的英文一律意译，避免中英混杂；若原文本身是技术名词则保留英文。"
