@@ -52,8 +52,8 @@ from app.scanner import scan_jar
 from app.tasks import TaskStore
 from app.text_sources import (TextSource, discover_pack_text_sources,
                               discover_text_sources, render_jar_source,
-                              render_pack_source, write_lang_into_jar,
-                              write_translated)
+                              render_jar_sources_batch, render_pack_source,
+                              write_lang_into_jar, write_translated)
 from app.translate.engine import create_engine
 from app.verify import verify_translated_jar
 from app.vp import bundled_vp_jar, build_vp_module, download_vault_patcher, infer_modpack_runtime
@@ -2193,16 +2193,18 @@ class AutoFlow:
                     self.state.progress.append({"status": "translating", "count": 0,
                                                 "note": f"正在写入 {jar.name} 教程/进度文本…（{_ji + 1}/{len(_jar_list)}）"})
                     self.store.save(self.state)
-                for src, trans in json_updates:
-                    try:
-                        content = await asyncio.to_thread(render_jar_source, jar, src, trans)
-                    except Exception as e:
-                        self.state.failed += 1
-                        self.state.progress.append({"status": "warn", "key": src.source_path,
-                                                    "error": f"渲染 jar 文本失败：{e}"})
-                        continue
+                # 修复（recheck，用户实测卡住）：一次解压 jar 批量渲染全部文本源——
+                # 原 render_jar_source 逐源全量解压+删除 jar → O(n²)，大 jar（AdvancedPeripherals
+                # 教程书几十个文本源）卡在「正在写入…(1/N)」长时间不动
+                try:
+                    rendered = await asyncio.to_thread(render_jar_sources_batch, jar, json_updates)
+                except Exception as e:
+                    self.state.failed += len(json_updates)
+                    self.state.progress.append({"status": "warn", "key": jar.name,
+                                                "error": f"渲染 jar 文本失败：{e}"})
+                    continue
+                for rel, content in rendered:
                     # 落盘用 target_path（译文目标路径，lines 的 zh_cn/），非 source_path
-                    rel = src.target_path
                     f = (build_dir / "resourcepacks" / "模组汉化资源包" / rel
                          if rel.startswith("assets/") else build_dir / rel)
                     f.parent.mkdir(parents=True, exist_ok=True)
@@ -2210,7 +2212,7 @@ class AutoFlow:
                         f.write_bytes(content.encode("utf-8"))
                     except OSError as e:
                         self.state.failed += 1
-                        self.state.progress.append({"status": "warn", "key": src.source_path,
+                        self.state.progress.append({"status": "warn", "key": rel,
                                                     "error": f"写补丁失败：{e}"})
                     else:
                         _jar_patched = True

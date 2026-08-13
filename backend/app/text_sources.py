@@ -543,6 +543,34 @@ def render_jar_source(jar: Path, source: TextSource, translations: dict[str, str
         shutil.rmtree(work, ignore_errors=True)
 
 
+def render_jar_sources_batch(jar: Path, updates: list[tuple[TextSource, dict[str, str]]]) -> list[tuple[str, str]]:
+    """批量渲染 jar 内文本源译文内容（**一次解压 jar**，渲染全部 sources，返回
+    [(target_path, content)]）。
+
+    修复（recheck，用户实测卡住）：原 render_jar_source 逐个 source 调用时**每次全量解压
+    + 删除整个 jar** → O(n²)。大 jar（AdvancedPeripherals 教程书等几十个文本源）卡在
+    进度「正在写入 jar 教程/进度文本…(1/N)」长时间不动。这里解压一次，批量渲染后删。"""
+    if not updates:
+        return []
+    work = jar.parent / f".{jar.stem}_rs"
+    out: list[tuple[str, str]] = []
+    try:
+        _extract_jar(jar, work)
+        for source, translations in updates:
+            if not translations:
+                continue
+            if source.kind == "lines":
+                content = _render_lines(work, source, translations)
+            elif source.kind == "json":
+                content = _render_json(work, source, translations)
+            else:
+                content = _render_lang(work, source, translations)
+            out.append((source.target_path, content))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return out
+
+
 # ---------- 语言文件写回（modjar 单一汉化 jar 用） ----------
 
 # modid 不可信：白名单 [A-Za-z0-9_-]，不含 "."，杜绝 ".."、"/" 等路径穿越（与资源包一致）。

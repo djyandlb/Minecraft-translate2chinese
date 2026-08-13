@@ -410,6 +410,33 @@ def test_discover_pack_does_not_modify_original(tmp_path):
     assert (pack / "config/a.json").read_bytes() == before
 
 
+def test_render_jar_sources_batch(tmp_path):
+    """批量渲染一次解压 jar（修复 O(n²) 卡住：原 render_jar_source 逐源全量解压+删除 jar，
+    大 jar 教程书几十个文本源卡在「正在写入…(1/N)」）。"""
+    import zipfile
+    import json as _json
+    from app.text_sources import render_jar_sources_batch, TextSource
+    jar = tmp_path / "mod.jar"
+    with zipfile.ZipFile(jar, "w") as zf:
+        zf.writestr("assets/mymod/patchouli_books/guide/en_us/entries/a.json",
+                    _json.dumps({"name": "Hello", "text": "Welcome"}))
+        zf.writestr("assets/mymod/lang/en_us.json",
+                    _json.dumps({"key.a": "Alpha"}))
+    src1 = TextSource(kind="json", modid="mymod",
+                      source_path="assets/mymod/patchouli_books/guide/en_us/entries/a.json",
+                      target_path="assets/mymod/patchouli_books/guide/zh_cn/entries/a.json",
+                      entries={"name": "Hello"})
+    src2 = TextSource(kind="lang", modid="mymod",
+                      source_path="assets/mymod/lang/en_us.json",
+                      target_path="assets/mymod/lang/zh_cn.json",
+                      entries={"key.a": "Alpha"})
+    out = render_jar_sources_batch(jar, [(src1, {"name": "你好"}), (src2, {"key.a": "阿尔法"})])
+    assert len(out) == 2, f"应渲染 2 个文本源，实际 {len(out)}"
+    by_path = dict(out)
+    assert "你好" in by_path["assets/mymod/patchouli_books/guide/zh_cn/entries/a.json"]
+    assert "阿尔法" in by_path["assets/mymod/lang/zh_cn.json"]
+
+
 def test_render_pack_json_keeps_structure(tmp_path):
     """目录 json 渲染：按 key_path 覆写译文，技术串与结构保留。"""
     pack = _make_pack(tmp_path, {
