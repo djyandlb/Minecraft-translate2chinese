@@ -743,7 +743,10 @@ def _snbt_array_body(raw: str, start: int) -> int:
 
 # JS 字符串字面量：单/双引号，含转义（\' \" \\ 等）；反引号模板字符串（含 ${} 插值=代码）不收
 _JS_STR_RE = re.compile(r"""(['"])((?:\\.|(?!\1).)*)\1""")
-# 文本字段名白名单：这些字段的值是用户可见文本（GUI 文案/tooltip/任务标题/物品名）
+# 文本字段名白名单：这些字段的值是用户可见文本（GUI 文案/tooltip/任务标题/物品名）。
+# 比较前先归一化（_js_norm_field）：KubeJS API 是驼峰（displayName），配置文件常为
+# 下划线/短横线（display_name、display-name），归一化后统一命中白名单（修复 recheck：
+# displayName 漏出白名单 → KubeJS 物品显示名整个脚本不进翻译流程，用户实测未汉化）。
 _JS_TEXT_FIELDS = {"text", "title", "name", "subtitle", "description",
                    "tooltip", "line", "lines", "message", "display_name"}
 # 数组字段（tooltip: ['a','b'] / lines: [...]）：进入数组后本行及后续行的字符串都收，直到 ]
@@ -766,6 +769,14 @@ def _js_field_before(before: str) -> str | None:
     if m:
         return m.group(1)
     return None
+
+
+def _js_norm_field(field: str) -> str:
+    """KubeJS 字段名归一化：驼峰/短横线/空格 → 下划线小写（displayName → display_name、
+    DisplayName → display_name、display-name → display_name），统一命中白名单。"""
+    s = re.sub(r"[-\s]", "_", field)
+    s = re.sub(r"(?<!^)(?=[A-Z])", "_", s).lower()
+    return s
 
 
 def _js_value_ok(text: str) -> bool:
@@ -804,7 +815,8 @@ def _pack_js_source(root: Path, p: Path, rel: str) -> TextSource | None:
             content = _js_unescape(m.group(2))
             before = line[pos:m.start()]
             field = _js_field_before(before)
-            if in_array or (field and field in _JS_TEXT_FIELDS):
+            norm_field = _js_norm_field(field) if field else None
+            if in_array or (norm_field and norm_field in _JS_TEXT_FIELDS):
                 if _js_value_ok(content):
                     key = f"k{idx}"
                     entries[key] = content
@@ -812,7 +824,7 @@ def _pack_js_source(root: Path, p: Path, rel: str) -> TextSource | None:
                     spans[key] = (li, m.end(1), m.end(2), q)
                 idx += 1
             # 数组上下文：字段是数组字段且字段名与字符串之间出现 [（同数组首元素）
-            if field in _ARRAY_FIELDS and "[" in before:
+            if norm_field in _ARRAY_FIELDS and "[" in before:
                 in_array = True
             pos = m.end(1)
         if in_array and closes >= opens:

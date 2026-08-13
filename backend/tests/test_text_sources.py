@@ -530,9 +530,11 @@ def test_pack_js_source_extracts_text_fields(tmp_path):
     assert "'3x minecraft:stone'" in out
 
 
-def test_pack_js_source_skips_code_heavy_scripts(tmp_path):
-    """代码密集脚本（无文本字段）→ 不产出文本源（不误收注册/命令参数）。"""
-    from app.text_sources import discover_pack_text_sources
+def test_pack_js_source_skips_register_names(tmp_path):
+    """KubeJS 注册脚本：物品**显示名** displayName('My Ingot') 是用户可见文本必须提取
+    （修复 recheck：displayName 驼峰漏出白名单 → 整个脚本不进翻译，KubeJS 物品名未汉化），
+    注册名 'my_ingot'（create 字段，代码标识）不提取。"""
+    from app.text_sources import discover_pack_text_sources, render_pack_source
     js = tmp_path / "kubejs" / "startup_scripts" / "registry.js"
     js.parent.mkdir(parents=True)
     js.write_text(
@@ -542,8 +544,44 @@ def test_pack_js_source_skips_code_heavy_scripts(tmp_path):
         encoding="utf-8")
     srcs = discover_pack_text_sources(tmp_path)
     js_srcs = [s for s in srcs if "registry.js" in s.source_path]
-    # displayName('My Ingot') 的字段 displayName 不在白名单 → 不提取（'my_ingot' 是注册名）
-    assert not js_srcs or not any(v == "My Ingot" for s in js_srcs for v in s.entries.values())
+    assert js_srcs, "displayName 是文本字段，脚本应产出文本源"
+    vals = list(js_srcs[0].entries.values())
+    assert "My Ingot" in vals          # 物品显示名 → 提取待翻译
+    assert "my_ingot" not in vals      # 注册名（代码标识）→ 跳过
+    # 行内替换：只改 displayName 的值，create 注册名与脚本结构原样
+    out = render_pack_source(js_srcs[0], {k: "我的锭" for k in js_srcs[0].entries}, tmp_path)
+    assert "event.create('my_ingot').displayName('我的锭')" in out
+
+
+def test_pack_js_displayname_and_tooltip_extracted(tmp_path):
+    """KubeJS 1.20.1 物品注册链式调用：displayName 驼峰 + tooltip 数组都提取，
+    引用原版纹理等代码串（minecraft:item/...、tier、texture）跳过。"""
+    from app.text_sources import discover_pack_text_sources, render_pack_source
+    js = tmp_path / "kubejs" / "startup_scripts" / "test_items.js"
+    js.parent.mkdir(parents=True)
+    js.write_text(
+        "StartupEvents.registry('item', event => {\n"
+        "  event.create('zeno_sword', 'sword').displayName('Zeno Sword').tier('diamond')\n"
+        "    .texture('minecraft:item/diamond_sword').maxStackSize(1)\n"
+        "  event.create('obsidian_blade').displayName('Obsidian Blade')\n"
+        "    .tooltip(['A sharp blade', 'Of obsidian'])\n"
+        "})\n",
+        encoding="utf-8")
+    srcs = [s for s in discover_pack_text_sources(tmp_path)
+            if "test_items.js" in s.source_path]
+    assert srcs, "应发现 KubeJS 物品注册脚本文本源"
+    vals = list(srcs[0].entries.values())
+    assert "Zeno Sword" in vals and "Obsidian Blade" in vals
+    assert "A sharp blade" in vals and "Of obsidian" in vals
+    # 代码串 / 注册名 / 非文本字段不收集
+    assert "zeno_sword" not in vals and "obsidian_blade" not in vals
+    assert "diamond" not in vals                                  # tier 非文本字段
+    assert "minecraft:item/diamond_sword" not in vals             # texture 有 / 拦截
+    # 行内替换保留链式结构
+    out = render_pack_source(srcs[0], {k: "中文" for k in srcs[0].entries}, tmp_path)
+    assert ".displayName('中文')" in out and ".tier('diamond')" in out
+    assert ".texture('minecraft:item/diamond_sword')" in out
+    assert "tooltip(['中文', '中文'])" in out
 
 
 def test_pack_snbt_multiline_description_array(tmp_path):
