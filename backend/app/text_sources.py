@@ -111,19 +111,20 @@ def _is_text_carrier_json(path: str) -> bool:
 
 
 def _is_pack_text_carrier(rel: str) -> bool:
-    """整合包目录 json 白名单（回归标准）：只翻明确文本载体——任务书/进度/补语言。
-    其余 config/data 的 json 是配置/数据（参数/坐标/路径），翻译必坏且噪音大。"""
+    """整合包目录 json 白名单（回归标准）：只翻明确文本载体——任务书/进度/语言文件。
+    其余 config/data 的 json 是配置/数据（参数/坐标/路径），翻译必坏且噪音大。
+    修复（recheck，用户实测）：放开**任意 assets/<mod>/lang/**（非只 kubejs/assets）——
+    整合包自定义资源包/自带 lang（含 FTBQ 翻译键 ftbquestlocalizer、Create ponder 键等）
+    全收，否则这些用户可见文本漏翻。"""
     p = PurePosixPath(rel)
+    if "assets" in p.parts and "lang" in p.parts:
+        return True    # 语言文件 assets/<mod>/lang/en_us.*（含 kubejs/assets、自定义资源包）
+    if "patchouli_books" in p.parts and "en_us" in p.parts:
+        return True    # Patchouli 教程书
     if rel.startswith("config/ftbquests/") or rel.startswith("config/betterquesting/"):
         return True    # FTB Quests / Better Questing 任务书（剧情主线）
     if bool(p.parts) and p.parts[0] == "data" and "advancements" in p.parts:
         return True    # advancements 进度（title/description）
-    if rel.startswith("kubejs/assets/"):
-        # kubejs 补语言文件（kubejs/assets/*/lang/*.json）或 patchouli 教程书
-        if "lang" in p.parts:
-            return True
-        if "patchouli_books" in p.parts and "en_us" in p.parts:
-            return True
     return False
 
 
@@ -146,6 +147,25 @@ def _zh_cn_path(path: str, target_lang: str = "zh_cn") -> str:
         for p in parts
     )
     return str(PurePosixPath(*replaced))
+
+
+def _is_guide_md(path: str) -> bool:
+    """GuideME 类指南 markdown：assets/<mod>/{ae2guide,guidebook,guide}/...（AE2 指南等）。
+    无 en_us 路径段（_has_en_us_segment 判不过），但指南页面是用户可见文本——需汉化，
+    产物走 `_<locale>` 镜像目录（GuideME 按 _<locale> 加载多语言）。"""
+    return path.endswith((".md", ".txt")) and any(
+        s in ("ae2guide", "guidebook", "guide") for s in PurePosixPath(path).parts)
+
+
+def _guide_mirror_path(path: str, target_lang: str = "zh_cn") -> str:
+    """GuideME 指南镜像路径：assets/<mod>/ae2guide/<f>.md → assets/<mod>/ae2guide/_<lang>/<f>.md。
+    GuideME 按 `_<locale>` 子目录加载多语言（AE2 指南），资源包覆盖该镜像即可生效。"""
+    parts = list(PurePosixPath(path).parts)
+    for i, seg in enumerate(parts):
+        if seg in ("ae2guide", "guidebook", "guide") and i + 1 < len(parts):
+            parts.insert(i + 1, f"_{target_lang}")
+            return str(PurePosixPath(*parts))
+    return path
 
 
 # ---------- 行快照（lines 文本源） ----------
@@ -334,11 +354,16 @@ def discover_text_sources(jar: Path, target_lang: str = "zh_cn") -> list[TextSou
                     entries=entries,
                 ))
 
-            # 3) en_us 路径 txt/md：逐行提取（非空行），行快照保留结构
+            # 3) txt/md：逐行提取（非空行），行快照保留结构。收两类：
+            #    a) 含 en_us 路径段（Patchouli 书等）→ _zh_cn_path 替换
+            #    b) GuideME 指南目录（ae2guide/guidebook/guide，无 en_us 段，AE2 指南等）
+            #       → _guide_mirror_path 生成 _<lang> 镜像（修复 recheck：AE2 指南 md 未汉化）
             for name in names:
                 if not name.endswith((".txt", ".md")):
                     continue
-                if not _has_en_us_segment(name):
+                is_en_us = _has_en_us_segment(name)
+                is_guide = _is_guide_md(name)
+                if not is_en_us and not is_guide:
                     continue
                 try:
                     # lines 保留 utf-8（不剥 BOM）——_split_lines 检测 ﻿ 记入快照，
@@ -350,8 +375,10 @@ def discover_text_sources(jar: Path, target_lang: str = "zh_cn") -> list[TextSou
                 entries = _lines_entries(lines)
                 if not entries:
                     continue
-                # 修复（recheck）：同 json——已有目标语言版本（zh_cn/ 目录）跳过，不重翻自带中文 mod
-                _target = _zh_cn_path(name, target_lang)
+                # 已有目标语言版本（zh_cn/ 或 _zh_cn/ 镜像）跳过，不重翻自带中文 mod。
+                # guide（无 en_us 段）走 _<lang> 镜像目录（GuideME 约定）
+                _target = (_zh_cn_path(name, target_lang) if is_en_us
+                           else _guide_mirror_path(name, target_lang))
                 if _target != name and _target in names:
                     continue
                 result.append(TextSource(
@@ -695,8 +722,11 @@ def _pack_modid(rel: str) -> str:
     return parts[0]
 
 
-def _pack_json_source(root: Path, p: Path, rel: str) -> TextSource | None:
-    """config/data 下 json：递归字符串值，key_path 定位；技术串/开关值过滤。"""
+def _pack_json_source(root: Path, p: Path, rel: str, target_lang: str = "zh_cn") -> TextSource | None:
+    """config/data 下 json：递归字符串值，key_path 定位；技术串/开关值过滤。
+    target_path 用 _zh_cn_path（en_us → 目标语言）——修复（v1.2.0）：原用 rel（==source）
+    导致整合包目录 json（kubejs/assets/*/lang、advancements）译文写回 en_us 原路径，
+    游戏按目标语言读 zh_cn 永远看不到（用户实测 KubeJS 物品 + FTB 任务翻译键未汉化）。"""
     data = json.loads(p.read_bytes().decode("utf-8-sig"))
     entries: dict[str, str] = {}
     # advancements 只收 display.title/description 文本，不收 criteria 触发条件（代码逻辑）
@@ -705,7 +735,7 @@ def _pack_json_source(root: Path, p: Path, rel: str) -> TextSource | None:
     if not entries:
         return None
     return TextSource(kind="json", modid=_pack_modid(rel),
-                      source_path=rel, target_path=rel, entries=entries)
+                      source_path=rel, target_path=_zh_cn_path(rel, target_lang), entries=entries)
 
 
 # 转义辅助：snbt/js 字符串字面量处理（snbt 提取反转义 + render 写回转义）。
@@ -923,7 +953,7 @@ def _pack_snbt_source(root: Path, p: Path, rel: str) -> TextSource | None:
                       entries=entries, line_snapshot=snapshot, spans=spans)
 
 
-def discover_pack_text_sources(pack_dir: Path) -> list[TextSource]:
+def discover_pack_text_sources(pack_dir: Path, target_lang: str = "zh_cn") -> list[TextSource]:
     """发现整合包目录（非 jar）文本源，复用 TextSource，source_path=整合包相对路径。
 
     回归 Minecraft 汉化标准（用户确认）：**只翻明确文本载体**——
@@ -949,7 +979,7 @@ def discover_pack_text_sources(pack_dir: Path) -> list[TextSource]:
         suffix = p.suffix.lower()
         try:
             if suffix == ".json" and _is_pack_text_carrier(rel):
-                src = _pack_json_source(root, p, rel)
+                src = _pack_json_source(root, p, rel, target_lang)
             elif suffix == ".snbt" and rel.startswith(("config/ftbquests/", "data/ftbquests/")):
                 # FTB Quests / Better Questing 任务书（剧情主线）
                 src = _pack_snbt_source(root, p, rel)

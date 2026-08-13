@@ -33,8 +33,8 @@ Minecraft 整合包 / Mod / 地图 / 光影的 AI 一键汉化工具。
 
 | 安装包 | 说明 |
 |--------|------|
-| `release-v1.1.1-portable.exe` | 便携版：双击即用，无需安装，随身携带 |
-| `release-v1.1.1-setup.exe` | 安装版：安装向导，正式部署 |
+| `release-v1.2.0-portable.exe` | 便携版：双击即用，无需安装，随身携带 |
+| `release-v1.2.0-setup.exe` | 安装版：安装向导，正式部署 |
 
 ### 2. 使用步骤
 

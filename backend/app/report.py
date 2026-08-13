@@ -13,20 +13,24 @@ from pathlib import Path
 
 def build_report(input_name: str, target_lang: str, total: int, done: int, failed: int,
                  stages: list[dict], products: list[dict], failures: list[dict],
-                 created_ts: float | None = None) -> dict:
+                 created_ts: float | None = None, skipped: int = 0) -> dict:
     """构造翻译报告数据（通用所有模式）。
 
     total/done/failed：任务统计；stages：分阶段 [{name,total,done}]；
-    products：生成产物 [{name,desc,size_mb}]；failures：全部未翻译 [{text,reason,where?}]。
+    products：生成产物 [{name,desc,size_mb}]；failures：全部未翻译 [{text,reason,where?}]；
+    skipped：不算 failed 但**跳过翻译**的量（技术串 skip + 硬编码 AI 判定非用户可见）。
     """
     done_n = int(done or 0)
     failed_n = int(failed or 0)
     total_n = max(int(total or 0), done_n)
-    # 修复（recheck）：之前 total 被撑到 done+failed、translated=total-failed → 失败条目也计入
-    #「已翻译」，覆盖率虚高（全部处理完但 failed>0 时 coverage 仍接近 100%）。改为：
-    # translated = 真实成功数 = done - failed（done 是处理计数，含失败条目），覆盖率为成功/总预估。
-    translated = max(0, done_n - failed_n)
-    coverage = round(translated / max(total_n, 1) * 100, 2)
+    skipped_n = max(int(skipped or 0), 0)
+    # 修复（recheck，用户诉求）：覆盖率 = 成功 / **可翻译量**（总文本 - 不算 failed 但跳过
+    # 翻译的量）。跳过翻译（技术串/硬编码 AI 判定非用户可见）本来就不该翻，算进分母会虚低
+    # 覆盖率（用户例：total=10000 含 2000 硬编码跳过 → 应算 8000 可翻译量）。done 含跳过
+    #（skip/排除都推进 done）→ 成功 = done - 跳过；失败（该翻没翻）算进分母、不算成功。
+    denom = max(total_n - skipped_n, 1)
+    translated = max(0, done_n - skipped_n)
+    coverage = round(translated / denom * 100, 2)
     return {
         "input": input_name or "",
         "target_lang": target_lang or "",

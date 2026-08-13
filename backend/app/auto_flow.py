@@ -375,6 +375,10 @@ class AutoFlow:
         # 累加。build 前 _ai_contextual_normalize 据此收集「同原文 ≥2 译文」的**专名形态**候选，
         # AI 判定语境相同才统一（v1.1.0，替代机械 _consistency_normalize）。
         self._consistency_stats: dict[str, dict[str, int]] = {}
+        # 跳过翻译计数（覆盖率分母扣减：可翻译量 = 总文本 - 跳过翻译量）。
+        # 跳过 = 技术串 skip（pipeline 判定不需要翻译）+ 硬编码 AI 排除（非用户可见）。
+        # 用户诉求：这些本来就不该翻，算进分母会虚低覆盖率。
+        self._skipped_n: int = 0
         # 规范译名表 {原文: 规范译名}（v1.1.0）：只对**专名形态**原文登记第一个确认译名，
         # **不强制覆盖**后续译文（多译文冲突由 AI 语境归一化判定）；供 glossary 提示 +
         # AI 归一化审查参考。常用词（light/right）不登记。
@@ -819,6 +823,7 @@ class AutoFlow:
             if not force_engine and not self.same_script and not skip_fn(text, self.req.target_lang):
                 # 已汉化（含 CJK）/ 技术串：跳过翻译，计 done，不入产物。
                 # 注意：same_script（简繁互转）时中文源文本必须保留翻译，跳过会漏转繁体。
+                self._skipped_n += 1   # 跳过翻译计数（覆盖率分母扣：可翻译量 = 总文本 - 跳过）
                 if count_done:
                     # 续联：skip 只推进 stage 明细（全局基准已含，防翻倍）
                     self._bump_stage() if not self._resume else self._bump_stage_only()
@@ -1532,6 +1537,8 @@ class AutoFlow:
             input_name=self.state.display_name,
             target_lang=self.req.target_lang,
             total=self.state.total, done=self.state.done, failed=self.state.failed,
+            # 覆盖率分母扣减：跳过翻译量（技术串 skip + 硬编码 AI 判定非用户可见）
+            skipped=self._skipped_n + sum(len(v) for v in self.hard_excluded_by_jar.values()),
             stages=[{"name": s.get("name", ""), "total": s.get("total", 0),
                      "done": s.get("done", 0)} for s in self.state.stages],
             products=products,
@@ -2023,9 +2030,12 @@ class AutoFlow:
         # 材质包描述（pack.mcmeta description）：{整合包名}全量{语言}化 · 覆盖率{xx}%。
         # 之前固定 "MC Auto Translator"（用户实测资源包列表显示 auto translate 英文），
         # 改为项目名 + 全量{对应语言}化（zh_cn→简体中文化、zh_tw→繁体中文化、ja→日文化，
-        # 跟随目标语言）+ 覆盖率；覆盖率 = 成功翻译 /（成功+失败）。
-        _cov_denom = self.state.done + self.state.failed
-        _cov = round(self.state.done / _cov_denom * 100, 1) if _cov_denom else 100.0
+        # 跟随目标语言）+ 覆盖率；覆盖率 = 成功 / **可翻译量**（总文本 - 不算 failed 但跳过
+        # 翻译的量：技术串 skip + 硬编码 AI 判定非用户可见）。用户诉求：跳过翻译本来就不该
+        # 翻，算进分母虚低覆盖率（如 total=10000 含 2000 硬编码跳过 → 可翻译量 8000）。
+        _skipped = self._skipped_n + sum(len(v) for v in self.hard_excluded_by_jar.values())
+        _cov_denom = max(self.state.total - _skipped, 1)
+        _cov = round(max(self.state.done - _skipped, 0) / _cov_denom * 100, 1)
         pack_desc = (f"{self.state.display_name or '整合包'}全量"
                      f"{lang_display_name(self.req.target_lang)}化 · 覆盖率{_cov}%")
         # 组装区：modpack 用 temp（散装组织后打包进 zip、cleanup 清理——产物文件夹只留
@@ -2121,7 +2131,11 @@ class AutoFlow:
             # 不覆盖 en_us.snbt；其余源覆盖原路径。
             patch_entries: list[tuple[str, str | bytes]] = []
             for src, trans in self.pack_translations:
-                rel = src.source_path
+                # 修复（用户实测 FTB 任务/KubeJS 物品未汉化）：用 **target_path**（en_us → zh_cn）
+                # 而非 source_path——原逻辑把译文写回 en_us 原路径，游戏按目标语言读 zh_cn
+                # 永远看不到译文（KubeJS 物品 lang、FTB 任务翻译键 ftbquestlocalizer lang 全失效）。
+                # snbt 无 en_us 段 target==source → 覆盖原 snbt（正文汉化），不受影响。
+                rel = src.target_path
                 if "/quests/lang/" in rel and rel.endswith(".snbt"):
                     rel = rel.rsplit("/", 1)[0] + f"/{self.req.target_lang}.snbt"
                 patch_entries.append((rel, render_pack_source(src, trans, self.path)))
@@ -2586,7 +2600,10 @@ class AutoFlow:
             if self.kind == "modpack":
                 try:
                     # 目录文本源扫描（config/kubejs/data 可能几百文件）也 to_thread，防阻塞事件循环
-                    self.pack_sources = await asyncio.to_thread(discover_pack_text_sources, self.path)
+                    # target_lang 透传：整合包目录 json（kubejs/assets/lang 等）target_path
+                    # 按目标语言替换（en_us → zh_cn），否则译文写回 en_us 游戏看不到
+                    self.pack_sources = await asyncio.to_thread(
+                        discover_pack_text_sources, self.path, self.req.target_lang)
                 except Exception as e:
                     self.state.progress.append({"status": "warn",
                                                 "error": f"扫描整合包目录文本源失败：{e}"})

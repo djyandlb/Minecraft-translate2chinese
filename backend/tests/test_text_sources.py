@@ -437,6 +437,51 @@ def test_render_jar_sources_batch(tmp_path):
     assert "阿尔法" in by_path["assets/mymod/lang/zh_cn.json"]
 
 
+def test_discover_pack_kubejs_lang_target_zh_cn(tmp_path):
+    """KubeJS 补语言文件（kubejs/assets/*/lang/en_us.json）target_path 应替换为 zh_cn——
+    v1.2.0 修复：整合包目录文本源产物写入用 target_path，否则译文覆盖 en_us 原文件、
+    游戏按目标语言读 zh_cn 永远看不到（用户实测 KubeJS 物品 + FTB 任务翻译键未汉化）。
+    注意 kubejs/assets 的 lang 走 _is_pack_text_carrier（json 源），非 _pack_js_source。"""
+    from app.text_sources import discover_pack_text_sources
+    js = tmp_path / "kubejs" / "assets" / "kubejs" / "lang" / "en_us.json"
+    js.parent.mkdir(parents=True)
+    js.write_text('{"item.kubejs.zahraanite": "Zahraanite", '
+                  '"item.kubejs.zeno_sword": "Zeno Sword"}', encoding="utf-8")
+    srcs = discover_pack_text_sources(tmp_path)
+    lang_srcs = [s for s in srcs if "kubejs/assets/kubejs/lang" in s.source_path]
+    assert lang_srcs, "应发现 kubejs 补语言文件"
+    src = lang_srcs[0]
+    assert src.target_path == "kubejs/assets/kubejs/lang/zh_cn.json", \
+        f"target 应为 zh_cn，实际 {src.target_path}"
+    assert "item.kubejs.zahraanite" in src.entries
+
+
+def test_pack_text_carrier_accepts_plain_assets_lang():
+    """v1.2.0 全量覆盖：普通目录 assets/<mod>/lang（非只 kubejs）也收为文本载体——
+    （用户实测：整合包自定义资源包 lang、FTBQ 翻译键 ftbquestlocalizer 等漏翻）。"""
+    from app.text_sources import _is_pack_text_carrier
+    assert _is_pack_text_carrier("assets/mymod/lang/en_us.json")
+    assert _is_pack_text_carrier("assets/kubejs/lang/en_us.json")
+    assert _is_pack_text_carrier("assets/ftbquestlocalizer/lang/en_us.json")
+    assert not _is_pack_text_carrier("config/mymod/settings.json")
+    assert not _is_pack_text_carrier("data/mymod/recipes/x.json")
+
+
+def test_guide_md_mirror_target():
+    """AE2 指南 md（assets/ae2/ae2guide/*.md，无 en_us 段）识别 + target 走 _zh_cn 镜像
+    （修复 recheck：GuideME 指南 md 无 en_us 路径段被 _has_en_us_segment 跳过 → 未汉化）。"""
+    from app.text_sources import _is_guide_md, _guide_mirror_path
+    assert _is_guide_md("assets/ae2/ae2guide/getting-started.md")
+    assert _is_guide_md("assets/ae2/ae2guide/mechanics/import-export.md")
+    assert not _is_guide_md("assets/mymod/lang/en_us.json")
+    assert not _is_guide_md("assets/ae2/ae2guide/foo.png")
+    assert not _is_guide_md("data/mymod/recipes/x.json")
+    assert _guide_mirror_path("assets/ae2/ae2guide/getting-started.md", "zh_cn") == \
+        "assets/ae2/ae2guide/_zh_cn/getting-started.md"
+    assert _guide_mirror_path("assets/ae2/ae2guide/mechanics/x.md", "zh_tw") == \
+        "assets/ae2/ae2guide/_zh_tw/mechanics/x.md"
+
+
 def test_render_pack_json_keeps_structure(tmp_path):
     """目录 json 渲染：按 key_path 覆写译文，技术串与结构保留。"""
     pack = _make_pack(tmp_path, {
