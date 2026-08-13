@@ -373,9 +373,13 @@ def list_projects():
         for pf in sorted(pdir.glob("*.json"), key=_pf_mtime):
             try:
                 d = json.loads(pf.read_text(encoding="utf-8"))
-                # 已完成项目（done>=total，产物已生成）不算「未完成」→ 不显示续联
+                # 未完成判断（修复用户实测）：build 阶段卡住取消时翻译已完成（done==total）
+                # 但**产物未生成**——旧逻辑 done<total 误判「已完成」→ 项目列表跳过 → 无续联
+                # 按钮。新格式存 status：非 done 状态（cancelled/failed/running）即使 done==total
+                # 也算未完成可续联；旧格式（无 status）仍按 done<total 兼容。
+                _st = (d.get("status") or "")
                 if (d.get("done", 0) > 0 and d.get("total", 0) > 0
-                        and d.get("done", 0) < d.get("total", 0)):
+                        and (_st not in ("", "done") or d.get("done", 0) < d.get("total", 0))):
                     done, total = d["done"], d["total"]
                     # 修复：name 为空/哈希（旧版遗留 progress 没存名，或中断在取名前）→
                     # 从任务快照找回真实名，不再显示 5a818a7428e7 这类指纹（用户实测）
@@ -405,8 +409,20 @@ def list_projects():
                 except Exception:
                     cnt = 0
                 if cnt > 0:
-                    projects.append({"project_id": pid, "name": pid, "done": 0,
-                                     "total": 0, "failed": 0, "stage": "", "pct": 0})
+                    # 修复（用户实测）：从 progress 找回真实名 + 原始路径——否则 memory 兜底
+                    # 只给 pid（哈希 5a818a7428e7）+ 无 path → 前端显示哈希名、续联按钮被
+                    # v-if="p.path" 隐藏（想续联却只能拖入整合包）
+                    _name, _path = pid, ""
+                    try:
+                        _pd = json.loads((WORK_DIR / "progress" / f"{pid}.json")
+                                         .read_text(encoding="utf-8"))
+                        _name = (_pd.get("name") or "").strip() or _name
+                        _path = _pd.get("path") or ""
+                    except Exception:
+                        pass
+                    projects.append({"project_id": pid, "name": _name, "done": 0,
+                                     "total": 0, "failed": 0, "stage": "", "pct": 0,
+                                     "path": _path})
     return projects
 
 

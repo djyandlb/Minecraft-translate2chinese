@@ -1563,13 +1563,21 @@ class AutoFlow:
         # done<total（漏翻/合理保留占计数），产物已交付即视为完成，关闭重开不再显示
         # 「可断点续联」；只有真正中断（cancelled/failed 未出产物）才保留实际进度续联。
         _done = self.state.total if self.state.status == "done" else self.state.done
+        # 修复：display_name 为空（中断在取名步骤前）→ 用原始输入文件名，
+        # 续联列表显示真实文件名而非 5a818a7428e7 哈希指纹（用户实测）
+        _name = self.state.display_name or Path(str(self.req.path or "")).name or ""
         p.write_text(json.dumps({
-            "name": self.state.display_name or "",
+            "name": _name,
             # 原始输入路径（续联用：项目列表点「续联」→ autoTranslate(path) 重算指纹匹配）
             "path": str(self.req.path or ""),
             "done": _done, "total": self.state.total,
             "failed": self.state.failed,
-            "stage": self.state.stage, "updated": time.time(),
+            "stage": self.state.stage,
+            # 修复（用户实测）：build 阶段卡住取消时翻译已完成（done==total）但产物未生成——
+            # 列表误判「已完成」不算未完成 → 无续联按钮。存 status，list_projects 用
+            # status 判断「未完成」（非 done 状态即使 done==total 也可续联）
+            "status": self.state.status,
+            "updated": time.time(),
         }, ensure_ascii=False), encoding="utf-8")
 
     # ---------- 阶段 1：语言文件 + 审计闭环 ----------
