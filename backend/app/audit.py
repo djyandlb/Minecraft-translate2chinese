@@ -98,7 +98,7 @@ def _audit_with_source(key: str, english: str, chinese: str,
     if (re.search(r"\b(?:Log|Timber|Wood)\b", english, re.I)
             and not re.search(r"\b(?:Journal|Logbook|Research Log|Data Log|Debug Log|Chat Log|"
                               r"Console Log|Log File|Log Output|Server Log|Error Log|Game Log|"
-                              r"Logs?)\b", english, re.I)
+                              r"Logs)\b", english, re.I)
             and "原木" not in chinese):
         errors.append(_err(key, "原文含 Log/Timber/Wood 材料语义，译名必须保留「原木」"))
 
@@ -167,6 +167,13 @@ def audit_translation(by_mod: dict[str, dict[str, str]], target: str,
             if english is not None:
                 _audit_with_source(key, english, chinese, errors, warnings)
             _audit_key_semantics(key, chinese, errors, warnings)
+            # 助词冗余机械检查（系统性修复「符文的的宝珠」）：连续重复格助词 → warning。
+            # 先移除白名单成语（的的确确/了了分明/地地道道）避免误报合法文本；
+            # 字符集不含「得」——「得得」多是拟声词（马蹄声得得）合法（Agent 审查）。
+            _chk = (chinese.replace("的的确确", "").replace("了了分明", "")
+                    .replace("地地道道", ""))
+            if re.search(r"([的地之了])\1", _chk):
+                warnings.append(_warn(key, "译文含连续重复格助词（如「的的」），应合并为一个助词"))
 
     # 重复译法：相同英文原文出现多种译法 → warning（除非 open/close 成对动作键）
     if source_by_mod:

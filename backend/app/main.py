@@ -90,13 +90,14 @@ async def _write_origin_guard(request, call_next):
     if request.method in ("POST", "PUT", "DELETE", "PATCH"):
         origin = request.headers.get("origin")
         if origin:
+            from urllib.parse import urlparse
+            from starlette.responses import JSONResponse
             try:
-                from urllib.parse import urlparse
-                if urlparse(origin).hostname not in ("127.0.0.1", "localhost"):
-                    from starlette.responses import JSONResponse
-                    return JSONResponse({"ok": False, "message": "跨源写请求被拒绝"}, status_code=403)
+                host = urlparse(origin).hostname
             except Exception:
-                pass
+                host = None   # 解析失败 fail-closed：无 hostname → 拒绝（防 urlparse 异常绕过守卫）
+            if host not in ("127.0.0.1", "localhost"):
+                return JSONResponse({"ok": False, "message": "跨源写请求被拒绝"}, status_code=403)
     return await call_next(request)
 
 

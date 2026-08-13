@@ -10,6 +10,18 @@ def test_tagged_roundtrip():
     parsed = parse_tagged("[i0] 甲\n[i1] 乙\n[i2] 丙")
     assert parsed == {0: "甲", 1: "乙", 2: "丙"}
 
+def test_clean_translation_particle_dedup():
+    """译后安全清理：连续重复格助词（的的/了了）去重为单助词（防「符文的的宝珠」）。"""
+    from app.translate.llm import clean_translation
+    assert clean_translation("符文的的宝珠") == "符文的宝珠"
+    assert clean_translation("普通的的剑") == "普通的剑"
+    assert clean_translation("好了了") == "好了"             # 了了→了
+    assert clean_translation("虚空之之刃") == "虚空之刃"
+    assert clean_translation("正常的文本") == "正常的文本"    # 正常单个「的」不动
+    assert clean_translation("跑的快快的") == "跑的快快的"    # 「快」非助词，不误清
+    assert clean_translation("Zeno's Sword") == "Zeno's Sword"
+
+
 def test_clean_translation():
     assert clean_translation("```\n翻译：铁锭\n```") == "铁锭"
     assert clean_translation('"铁块"') == "铁块"
@@ -52,6 +64,32 @@ async def test_translate_batch_feedback_and_forced_injected():
     # feedback：user prompt 对带原因条目标注「上次审查不合格」，让 AI 针对修正
     assert "上次审查不合格" in user_prompt
     assert "这是界面文本，必须翻译成中文" in user_prompt
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_translate_batch_prompt_has_particle_wordorder_rules():
+    """翻译 system prompt 含「的」冗余禁令 + 单词名词化 + 介宾短语固定译法
+    （系统性修复「符文的的宝珠」/「基于的附魔的过滤器」）。"""
+    captured = {}
+
+    def handler(request):
+        import json
+        captured["body"] = json.loads(request.content)
+        return Response(200, json={"choices": [{"message": {"content": "[i0] 强化宝珠符文"}}]})
+
+    client = _client_with(handler)
+    await client.translate_batch(["Reinforced Rune of the Orb"], "zh_cn")
+    sys_prompt = captured["body"]["messages"][0]["content"]
+    assert "禁止格助词连用" in sys_prompt and "的的" in sys_prompt
+    assert "禁止助词冗余" in sys_prompt and "基于附魔的过滤器" in sys_prompt
+    assert "based off of" in sys_prompt and "基于" in sys_prompt
+    assert "enchantments" in sys_prompt and "附魔" in sys_prompt
+    # 业界调研补充的硬规则：the 不译 / 后置定语前置 / 固定搭配整体译 / 术语「的」合并
+    assert "the 一律不译" in sys_prompt and "虚空之刃" in sys_prompt
+    assert "液体燃料的最大来源" in sys_prompt
+    assert "被基于" in sys_prompt
+    assert "附魔的的过滤器" in sys_prompt
     await client._client.aclose()
 
 

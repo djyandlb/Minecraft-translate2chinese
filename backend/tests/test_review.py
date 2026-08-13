@@ -34,3 +34,4 @@ def test_review_prompt_contains_rules_and_pairs():
     assert "[i0] Hello World ||| 你好世界" in p
     assert "[i1] Welcome ||| 欢迎" in p
     assert "截断" in p and "中英混杂" in p        # 审查标准在
+    assert "助词冗余" in p and "的的" in p        # 助词冗余检查（防「符文的的宝珠」/「基于的」）

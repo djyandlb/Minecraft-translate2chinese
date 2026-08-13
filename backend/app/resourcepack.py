@@ -6,8 +6,10 @@ import zipfile
 from pathlib import Path
 from app.version import pack_format_to_lang_ext
 
-# modid 与 target_lang 均为不可信外部输入：白名单 [a-z0-9_-]，不含 "."，杜绝 ".."、"/" 等路径穿越
-_IDENT_RE = re.compile(r"[a-z0-9_-]+")
+# modid 与 target_lang 均为不可信外部输入：白名单 [A-Za-z0-9_-]（允许大写——修复 recheck：
+# 大写 modid 之前被全小写正则跳过 → 该 mod 资源包产物缺失，与 text_sources._MODID_RE 不一致），
+# 不含 "."，杜绝 ".."、"/" 等路径穿越
+_IDENT_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 def pack_mcmeta(pack_format: int | list[int], description: str = "MC Auto Translator") -> dict:
     """pack.mcmeta 的 pack 对象。

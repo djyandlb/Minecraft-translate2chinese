@@ -23,6 +23,8 @@ from typing import Callable
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
+from app.glossary import strip_particle   # 已确认术语注入前净化结尾助词（防「符文的」污染硬编码 AI 判断）
+
 logger = logging.getLogger(__name__)
 
 from jawa.classloader import ClassLoader
@@ -889,7 +891,7 @@ def _ai_judge_user_content(payload: list[dict], known_translations: dict[str, st
     """拼 ai_judge user prompt：候选 JSON + 已确认术语（P0-3 强制沿用已确认译名）。"""
     content = json.dumps(payload, ensure_ascii=False)
     if known_translations:
-        terms = "\n".join(f"{k} => {v}" for k, v in known_translations.items())
+        terms = "\n".join(f"{k} => {strip_particle(v)}" for k, v in known_translations.items())
         content += "\n\n已确认术语（译文中必须沿用对应的中文译名）：\n" + terms
     return content
 

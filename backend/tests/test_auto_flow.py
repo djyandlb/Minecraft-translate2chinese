@@ -1310,6 +1310,47 @@ def test_consistency_normalize_cross_sources(tmp_path):
     assert flow.hard_mappings[list(flow.hard_mappings)[0]]["k4"] == "末影龙"
 
 
+@pytest.mark.asyncio
+async def test_prebuild_terms_strips_particle_suffix(tmp_path, monkeypatch):
+    """预扫描单词术语译名以格助词结尾（Rune→符文的）→ 剥离为「符文」再登记。
+    修复用户实测「Reinforced Rune of the Orb→强化符文的的宝珠」：带「的」的单词译名
+    作词级术语注入 glossary，会让 AI 在「X of the Y」结构里再叠一个「的」→「的的」。
+    剥离后为空/单字丢弃（词级术语须有独立名词义）；保留原文不登记。"""
+    from app.auto_flow import AutoFlow
+    flow = _make_flow(tmp_path)
+    flow.engine = SimpleNamespace(glossary_prompt="")   # engine 原为 None，让 glossary 注入可赋值
+
+    async def fake_engine_translate(texts, reasons=None, **kw):
+        table = {"Rune": "符文的", "Orb": "宝珠的", "Reinforced": "强化",
+                 "Power": "Power", "Light": "Light", "Blade": "Blade"}
+        return [table.get(t, t) for t in texts], {}
+
+    monkeypatch.setattr(flow, "_engine_translate", fake_engine_translate)
+    # Rune/Orb/Reinforced 各 ≥3 次触发预扫描；Power 等保留原文 → 不登记
+    texts = (["Rune of Power"] * 3 + ["Orb of Light"] * 3 + ["Reinforced Blade"] * 3)
+    await flow._prebuild_terms(texts)
+    assert flow._norm_terms.get("Rune") == "符文"         # 助词「的」被剥离
+    assert flow._norm_terms.get("Orb") == "宝珠"
+    assert flow._norm_terms.get("Reinforced") == "强化"   # 无助词原样
+    assert "符文的" not in flow._norm_terms.values()      # 不存在带「的」的单词译名
+    assert "Power" not in flow._norm_terms                # 保留原文不登记
+    assert "符文" in flow.glossary_prompt                 # glossary 注入剥离后译名
+
+
+def test_is_roman_valid():
+    """合法罗马数字判定（修复 Agent 审查：原字符集校验把 DVD/CIVIL 等英文词误判保留）。"""
+    from app.auto_flow import _is_roman
+    assert _is_roman("I") and _is_roman("IV") and _is_roman("IX")
+    assert _is_roman("X") and _is_roman("XL") and _is_roman("XC")
+    assert _is_roman("CM") and _is_roman("MCMXCIX") and _is_roman("VIII")
+    assert not _is_roman("DVD")       # 真实英文词，不再误判为罗马数字
+    assert not _is_roman("CIVIL")
+    assert not _is_roman("LCD")
+    assert not _is_roman("")          # 空串
+    assert not _is_roman("IIII")      # 4 个 I 非法（应为 IV）
+    assert not _is_roman("VX")        # 非法规组合
+
+
 # ---------- 名称归一化（第一定义 + 后续跟随，审查通过的关键步骤） ----------
 
 def test_name_norm_first_define_and_follow(tmp_path):

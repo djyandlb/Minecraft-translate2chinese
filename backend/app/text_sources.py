@@ -809,6 +809,16 @@ def _pack_js_source(root: Path, p: Path, rel: str) -> TextSource | None:
     for li, line in enumerate(lines):
         opens = line.count("[")
         closes = line.count("]")
+        # 数组头检测（修复 recheck）：`tooltip: [` 单独成行（Prettier 常用折行）时本行
+        # 没有字符串字面量，原状态机只在「字符串匹配行」置位 in_array → 首元素及后续
+        # 元素全漏收（整段 tooltip 漏翻）。这里对每行先扫数组字段头（.tooltip([ /
+        # tooltip: [），命中即进入数组状态；同行数组（['a','b']）opens==closes 不提前置位，
+        # 仍走字符串匹配逻辑，互不冲突。
+        if not in_array and opens > closes:
+            for _f in _ARRAY_FIELDS:
+                if re.search(rf"(?:\.{re.escape(_f)}\s*\(|{re.escape(_f)}\s*:)\s*\[", line):
+                    in_array = True
+                    break
         pos = 0
         for m in _JS_STR_RE.finditer(line):
             q = m.group(1)
@@ -923,8 +933,8 @@ def discover_pack_text_sources(pack_dir: Path) -> list[TextSource]:
                 src = None
             if src:
                 result.append(src)
-        except (UnicodeDecodeError, ValueError, json.JSONDecodeError, OSError):
-            continue   # 单个文件坏编码/坏 json：跳过该文件
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError, OSError, RecursionError):
+            continue   # 单个文件坏编码/坏 json/深嵌套递归超限：跳过该文件，不中断整包
     result.sort(key=lambda s: (s.kind, s.source_path))
     return result
 

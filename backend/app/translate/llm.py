@@ -34,6 +34,9 @@ _SILLY_NOTE = ("【胡言乱语模式】本条翻译用搞笑、玩梗、网络�
                "夸张，但**必须忠实传达原文语义**——每条译文都要一一对应回原文的意思，禁止跑题、"
                "禁止只玩梗不带原意、禁止错译。占位符/ID/路径/专有名词保护规则不变。")
 
+# 助词折叠白名单：含连续重复格助词的合法成语（折叠前先保护，避免误伤）
+_PARTICLE_IDIOMS = ("的的确确", "了了分明", "地地道道")
+
 
 def build_tagged_texts(texts: list[str]) -> str:
     """N 条文本拼一条 prompt，每行带 [i索引] 前缀，便于切回。
@@ -97,7 +100,7 @@ def parse_tagged(translated: str) -> dict[int, str]:
 
 
 def clean_translation(raw: str) -> str:
-    """清洗 LLM 输出：剥代码块 / 翻译前缀 / 首尾引号。"""
+    """清洗 LLM 输出：剥代码块 / 翻译前缀 / 首尾引号 + 助词冗余安全清理。"""
     s = raw.strip()
     if s.startswith("```"):
         s = re.sub(r"^```[a-zA-Z]*\n", "", s)
@@ -105,6 +108,14 @@ def clean_translation(raw: str) -> str:
     s = re.sub(r"^(翻译|译文|结果|Translation)\s*[:：]\s*", "", s)
     if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'“”":
         s = s[1:-1]
+    # 助词冗余安全清理（系统性修复「符文的的宝珠」）：连续重复格助词（的的/了了/地地/
+    # 之之）→ 单助词。先保护白名单成语（的的确确/了了分明/地地道道）再折叠；
+    # 字符集不含「得」——「得得」多是拟声词（马蹄声得得）合法（Agent 审查）。
+    for _i, _ph in enumerate(_PARTICLE_IDIOMS):
+        s = s.replace(_ph, f"\x00P{_i}\x00")
+    s = re.sub(r"([的地之了])\1+", r"\1", s)
+    for _i, _ph in enumerate(_PARTICLE_IDIOMS):
+        s = s.replace(f"\x00P{_i}\x00", _ph)
     return s.strip()
 
 
@@ -164,6 +175,55 @@ class LLMClient:
     def _silly_note(self) -> str:
         """胡言乱语模式提示段：开启时拼进 system prompt（搞笑/热梗但保义）。"""
         return _SILLY_NOTE if self.silly_mode else ""
+
+    def _zh_language_rules(self, target_lang: str) -> str:
+        """目标语言翻译规则段：zh 前缀注入中文语序速查 + 助词/介宾/名词化特例规则；
+        非中文目标只注入通用自然语序说明（Agent 审查：中文特例对非中文目标浪费 token，
+        且「禁止助词冗余」等规则只对中文有意义）。"""
+        if not target_lang.startswith("zh"):
+            return "按该语言母语的自然语序重组词序与句法，不机械照搬英文语序。"
+        return (
+            "【中文目标语序速查·严格遵循，禁止照搬英文语序】"
+            "①「X of Y」所属/描述 → 倒置为「Y 的 X」，中文常省略「的」更自然："
+            "Sigil of Suppression → 「抑制的印记」（禁止「印记的抑制」）、"
+            "Blade of the Void → 「虚空之刃」；"
+            "② 后置介词短语/用途修饰 → 前置到名词前：A tool for mining → 「挖矿工具」、"
+            "weapon of the gods → 「众神之武器」；"
+            "③ 时间/地点/方式状语 → 放主语后、动词前：Sleep at night → 「在夜晚入睡」"
+            "（禁止「入睡在夜晚」）；"
+            "④ 副词修饰动词 → 放动词前：Move Forward → 「向前移动」、Speed Up → 「加速」；"
+            "⑤ 多层修饰词 → 按中文习惯顺序（范围/描写 → 来源/时代 → 材质 → 中心词）："
+            "Ancient Dwarven Battle Axe → 「古老矮人战斧」、Blue Cyber Lamp → 「蓝色赛博灯」"
+            "（禁止「赛博灯蓝色」）；"
+            "⑥ 名词补量词：3 Blocks → 「3 个方块」；"
+            "⑦ 英文被动态 → 中文习惯主动化或用「用于/可」：is used to → 「用于」；"
+            "⑧ 并列选项 A/B → 中文并列词，顺序保持：Raining/Snowing → 「下雨/下雪」；"
+            "⑨ 复合名词（材质+物）→ 顺序与中文一致：Iron Ingot → 「铁锭」、"
+            "Diamond Sword → 「钻石剑」；"
+            "⑩ 名称先被修饰词再中心词，中心词置后：Eternal Flame → 「永恒之焰」。"
+            "（目标语言非中文时，同样按该语言母语的自然语序重组，不机械照搬英文。）"
+            "禁止格助词连用：译文中不得出现连续重复的「的的/了了/地地/得得/之之」"
+            "（Reinforced Rune of the Orb → 「强化宝珠符文」或「宝珠的强化符文」，"
+            "禁止「符文的的宝珠」）；若术语表给定的译名以「的」结尾，其后再接「的」时"
+            "合并为一个助词。"
+            "禁止助词冗余：「的」只用于必要所属/修饰（飞行的野兽），动词短语/介词短语"
+            "不得附加「的」——based off of → 「基于」不是「基于的」；Filters based off "
+            "of enchantments → 「基于附魔的过滤器」不是「基于的附魔的过滤器」。"
+            "单个英文名词/形容词 → 中文名词性词：enchantments → 「附魔」不是「附魔的」、"
+            "Rune → 「符文」不是「符文的」。介宾动词短语整体译一个动词："
+            "based on / based off / based off of → 「基于」、out of → 「出自/来自」、"
+            "consist of → 「由…组成」。修饰链控制「的」数量：多重修饰优先用复合词或"
+            "「之」，一个短语至多保留一个「的」。"
+            "「X of the Y」倒置为「Y 的 X」且 the 一律不译（Blade of the Void → "
+            "「虚空之刃」）；后置定语须放在前置定语之前（the largest source of liquid "
+            "fuel → 「液体燃料的最大来源」，禁止「最大液体燃料的来源」错挂修饰）。"
+            "固定搭配整体译不顺译：a lot of → 「大量」、a variety of → 「多种」、"
+            "a series of → 「一系列」。被动语态按中文习惯主动化（be based on 主语为物"
+            "→ 「基于」、主语为人 → 「以…为基础」，禁止「被基于」）。"
+            "术语表译名视作不可拆分的整体名词：术语以「的」结尾时，其后不另加「的」"
+            "（术语「附魔的」+ 中心词「过滤器」→ 「附魔过滤器」或「附魔之过滤器」，"
+            "禁止「附魔的的过滤器」）。"
+        )
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -388,6 +448,27 @@ class LLMClient:
                     f"结合游戏界面语境（按钮/选项/提示/描述）意译，不要逐词直译、不要书面翻译腔——"
                     f"该口语就口语、该正式就正式，读起来像原生中文；禁止把英文单词硬插进中文短语，"
                     f"能意译的英文一律意译，避免中英混杂；若原文本身是技术名词则保留英文。"
+                    f"禁止格助词连用：译文中不得出现连续重复的「的的/了了/地地/得得/之之」"
+                    f"（Reinforced Rune of the Orb → 「强化宝珠符文」或「宝珠的强化符文」，"
+                    f"禁止「符文的的宝珠」）；若术语表给定的译名以「的」结尾，其后再接「的」时"
+                    f"合并为一个助词。"
+                    f"禁止助词冗余：「的」只用于必要所属/修饰（飞行的野兽），动词短语/介词短语"
+                    f"不得附加「的」——based off of → 「基于」不是「基于的」；Filters based off "
+                    f"of enchantments → 「基于附魔的过滤器」不是「基于的附魔的过滤器」。"
+                    f"单个英文名词/形容词 → 中文名词性词：enchantments → 「附魔」不是「附魔的」、"
+                    f"Rune → 「符文」不是「符文的」。介宾动词短语整体译一个动词："
+                    f"based on / based off / based off of → 「基于」、out of → 「出自/来自」、"
+                    f"consist of → 「由…组成」。修饰链控制「的」数量：多重修饰优先用复合词或"
+                    f"「之」，一个短语至多保留一个「的」。"
+                    f"「X of the Y」倒置为「Y 的 X」且 the 一律不译（Blade of the Void → "
+                    f"「虚空之刃」）；后置定语须放在前置定语之前（the largest source of liquid "
+                    f"fuel → 「液体燃料的最大来源」，禁止「最大液体燃料的来源」错挂修饰）。"
+                    f"固定搭配整体译不顺译：a lot of → 「大量」、a variety of → 「多种」、"
+                    f"a series of → 「一系列」。被动语态按中文习惯主动化（be based on 主语为物"
+                    f"→ 「基于」、主语为人 → 「以…为基础」，禁止「被基于」）。"
+                    f"术语表译名视作不可拆分的整体名词：术语以「的」结尾时，其后不另加「的」"
+                    f"（术语「附魔的」+ 中心词「过滤器」→ 「附魔过滤器」或「附魔之过滤器」，"
+                    f"禁止「附魔的的过滤器」）。"
                     f"术语翻译必须全篇统一：同一个英文专有名词/物品名/术语全文只能有一个目标语言译名，"
                     f"禁止一词多译（如 Iron Ingot 全文只能「铁锭」，不能时而「铁锭」时而「铁条」）；"
                     f"若 prompt 提供了「已确认术语」对照，对应当前原文必须严格沿用其中译名。"

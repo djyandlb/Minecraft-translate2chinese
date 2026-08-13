@@ -1,6 +1,31 @@
 import json
 from pathlib import Path
-from app.glossary import load_glossary, term_inject_prompt
+from app.glossary import load_glossary, strip_particle, term_inject_prompt
+
+def test_strip_particle():
+    """词级术语译名剥离结尾格助词（防「符文的的宝珠」）：只剥结尾、多词短语不动、
+    剥空/单字保护、连续助词全剥。"""
+    assert strip_particle("符文的") == "符文"
+    assert strip_particle("宝珠的") == "宝珠"
+    assert strip_particle("狂乱的") == "狂乱"
+    assert strip_particle("宝珠的符文") == "宝珠的符文"      # 多词短语结尾是名词 → 不动
+    assert strip_particle("虚空之刃") == "虚空之刃"
+    assert strip_particle("泽诺") == "泽诺"                  # 无助词不变
+    assert strip_particle("刃的") == "刃的"                  # 剥成单字 → 保护原样
+    assert strip_particle("的") == "的"                      # 纯助词 → 保护
+    assert strip_particle("符文的的") == "符文"              # 连续助词全剥
+    assert strip_particle("Zeno") == "Zeno"                  # 英文不变
+
+
+def test_inject_prompt_strips_particle():
+    """term_inject_prompt 注入前统一剥离结尾助词：记忆/用户表里的「符文的」不污染 AI。"""
+    g = {"Rune": "符文的", "Zeno": "泽诺", "Blade": "刃的"}
+    prompt = term_inject_prompt(g)
+    assert "Rune => 符文" in prompt
+    assert "Zeno => 泽诺" in prompt
+    assert "Blade => 刃的" in prompt       # 单字剥离保护
+    assert "Rune => 符文的" not in prompt
+
 
 def test_load(tmp_path: Path):
     p = tmp_path / "g.json"

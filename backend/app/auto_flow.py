@@ -36,7 +36,7 @@ from app.detect import (_HARDCODE_MAX_BYTES, detect_input_type, detect_mc_versio
                         needs_translation, unwrap_bare_wrapper)
 from app.diff import build_jobs
 from app.langfile import lang_value_ok, parse_properties, write_properties
-from app.glossary import load_glossary, term_inject_prompt
+from app.glossary import load_glossary, strip_particle, term_inject_prompt
 from app.hardcode import (ai_judge_translate, replace_hardcoded_strings,
                           scan_hardcoded_candidates)
 from app.maps.flow import run_map_translation
@@ -85,12 +85,24 @@ _LANG_NAMES = {
 # _is_legit_keep_by_source 按原文规则兜底，不靠 reason 词汇。保留词只收**确定性技术类别**。
 _LEGIT_KEEP_RE = re.compile(
     r"专有名词|模组名|命令|代码标识|资源路径|Identifier|变量名|类名|API名|"
-    r"玩家名|注册(?:名|ID)|modid|注册ID|本地化键|配方ID|占位符|换行", re.I)
+    r"玩家名|注册(?:名|ID)|modid|注册ID|本地化键|配方ID", re.I)
 
 
 def _is_legit_keep(reason: str) -> bool:
     """审查 reason 判定为「合理保留原文」（专有名词/命令/代码标识/路径等）→ 不算漏翻失败。"""
     return bool(_LEGIT_KEEP_RE.search(reason or ""))
+
+
+# 合法罗马数字文法（千/百/十/个位组合，1-3999）：贪心数值算法会把 DVD 判成 D+V+D=995，
+# 故用文法严格匹配（D V 不能相邻）。
+_ROMAN_RE = re.compile(
+    r"^(?:M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3}))$")
+
+
+def _is_roman(s: str) -> bool:
+    """验证是否合法罗马数字（1-3999）。修复（Agent 审查）：原字符集校验 `[IVXLCDM]{1,6}`
+    把 DVD/CIVIL/LCD 等由 I/V/X/L/C/D/M 组成的真实英文词误判「合理保留」→ 永不翻译。"""
+    return bool(s) and bool(_ROMAN_RE.match(s))
 
 
 def _is_legit_keep_by_source(source: str) -> bool:
@@ -110,8 +122,8 @@ def _is_legit_keep_by_source(source: str) -> bool:
     s = (source or "").strip()
     if not s:
         return True
-    # 纯罗马数字（I/II/III/IV/V/VI/VII/VIII/IX/X…，限 I V X L C D M 组合）→ 保留（用户诉求）
-    if re.fullmatch(r"[IVXLCDM]{1,6}", s):
+    # 纯罗马数字（I/II/III/IV/V/VI/VII/VIII/IX/X…）→ 保留（用户诉求；_is_roman 校验合法序列）
+    if _is_roman(s):
         return True
     # 移除 %xx 占位符（%s/%d/%%/%1$s/%n 等）与 Minecraft § 颜色码（§e=黄/§r=重置，
     # 其字母是格式码非实词）后无英文字母 → 纯占位符/格式串（如 (%1$s): %2$s、
@@ -300,7 +312,7 @@ class AutoFlow:
         _mem_terms = extract_terms(self.memory.data, req.target_lang, max_terms=150)
         self.base_terms.update(_mem_terms)
         if _mem_terms:
-            _terms_str = "\n".join(f"{k} => {v}" for k, v in _mem_terms.items())
+            _terms_str = "\n".join(f"{k} => {strip_particle(v)}" for k, v in _mem_terms.items())
             self.glossary_prompt = (self.glossary_prompt + "\n\n"
                                     "已确认术语（翻译时对应当前原文必须严格沿用对应译名，禁止一词多译）：\n"
                                     + _terms_str)
@@ -509,7 +521,7 @@ class AutoFlow:
                 continue
             if re.search(r"[A-Za-z]", n):
                 continue   # 译名仍含英文（保留原文决策）→ 保护无意义
-            out[t] = n
+            out[t] = strip_particle(n)   # 词级术语剥结尾助词（符文的→符文），防「的」叠加
         return out
 
     def _protect_terms(self, text: str) -> tuple[str, dict[str, str]]:
@@ -563,7 +575,11 @@ class AutoFlow:
             results = await self.engine.translate_batch(
                 masked, self.req.target_lang, meta=meta, feedback=reasons or None, **kw)
         else:
-            results = await self.engine.translate_batch(masked, self.req.target_lang, **kw)
+            # 非 LLM 引擎（machine/兜底）不接 LLM 专用参数（forced/feedback——修复 Agent 审查：
+            # 漏翻专项重翻传 forced=True → MachineClient.translate_batch 签名不含该参抛
+            # TypeError，机翻漏翻重翻静默报废、漏翻无法修复）
+            _llm_kw = {k: v for k, v in kw.items() if k not in ("forced", "feedback")}
+            results = await self.engine.translate_batch(masked, self.req.target_lang, **_llm_kw)
             meta = {"failed": set(getattr(self.engine, "_batch_failed_texts", ())),
                     "kind": getattr(self.engine, "_last_error_kind", "other"),
                     "fatal": getattr(self.engine, "_fatal_error", None)}
@@ -769,7 +785,9 @@ class AutoFlow:
                         # 不覆盖好译文——审查重翻失败时旧译文还在，不被击穿成漏翻）
                         if count_done:
                             self.state.failed += 1
-                        self.failures.append({"text": text[:50],
+                        # 记录 key（修复 Agent 审查）：_record_residual_failures 据此跳过已计
+                        # failed 的 key，消除「流水线真失败 + 审计缺译文」双计
+                        self.failures.append({"key": key, "text": text[:50],
                                               "reason": _batch_err or ("翻译服务失败" if _real_fail else "LLM 未返回译文")})
                 else:
                     # 真译文：名称归一化（第一定义/后续跟随）→ 写 sink + 写记忆。
@@ -1249,6 +1267,14 @@ class AutoFlow:
                 # 已有规范译名（CFPA 人工权威 / 记忆 / 既有登记）→ 不覆盖（AI 单译名不得推翻权威）
                 if w in self._norm_terms:
                     continue
+                # 单词级术语译名以格助词结尾（Rune→「符文的」）→ 剥掉助词（→符文）再登记。
+                # 修复：带「的」的译名只适合完整句子语境，作词级术语会让 AI 在「X of the Y」
+                # 结构里再叠一个「的」→「强化符文的的宝珠」（用户实测 Reinforced Rune of the
+                # Orb→强化符文的的宝珠）。剥成空/单字（刃的→刃）→ 无独立名词义，丢弃不登记。
+                stripped = tr.rstrip("的地得之了")
+                if stripped != tr and len(stripped) < 2:
+                    continue
+                tr = stripped
                 if tr and tr != w and self._is_target_lang(tr, self.req.target_lang) \
                         and not re.search(r"[A-Za-z]{3,}", tr):
                     self._norm_terms[w] = tr
@@ -1285,7 +1311,7 @@ class AutoFlow:
             # 但也不登记（保留不是译名）
             pass
         elif translated != src and self._is_target_lang(translated, self.req.target_lang):
-            self._norm_terms[src] = translated
+            self._norm_terms[src] = strip_particle(translated)   # 规范译名剥助词（符文的→符文）
         return translated
 
     def _apply_term_override(self, translated: str) -> str:
@@ -1309,7 +1335,11 @@ class AutoFlow:
             if re.search(r"[A-Za-z]", norm):
                 continue                       # norm 仍含英文（保留原文决策/未翻出）→ 替换无意义；
                                                # 只有 norm 是纯目标语言（泽诺）才替换译文里的英文术语
-            # 词边界匹配：Zeno → 泽诺（不匹配 Zenith/Zenithal 的 Zen 前缀）
+            # 词边界匹配：Zeno → 泽诺（不匹配 Zenith/Zenithal 的 Zen 前缀）。
+            # 剥结尾助词（符文的→符文）：词级覆盖同样防「X 的的 Y」叠加。
+            norm = strip_particle(norm)
+            if len(norm) < 2:
+                continue
             out = re.sub(rf"(?<![A-Za-z]){re.escape(term)}(?![A-Za-z])", norm, out)
         return out
 
@@ -1366,12 +1396,20 @@ class AutoFlow:
             norm_main = self._norm_terms.get(source)
             if norm_main and norm_main != source:
                 main = norm_main
-                old = {v for v in variants if v != main}
             else:
                 if len(real) < 2:
                     continue    # 无规范译名且单译名 → 无需统一
                 main = max(real, key=lambda x: (x[1], -real.index(x)))[0]
-                old = {v for v in variants if v != main}
+            # 主译名剥结尾助词（符文的→符文）：兜底防「X 的的 Y」叠加进产物。
+            # 用**无保护 rstrip**（非 strip_particle）——此处本意就是强制剥助词选主译名，
+            # 单字保护会让「刃的」返回原样、反向把干净的「刃」统一成「刃的」（Agent 审查）。
+            # 剥后空/单字或等于原文（保留原文决策）→ 无统一意义，跳过。
+            main = main.rstrip("的地得之了")
+            if not main or len(main) < 2 or main == source:
+                continue
+            # 注：old 不排除「保留原文」（v==source）——归一化本意是把同原文的漏翻英文也
+            # 统一成主译名（test_consistency_normalize_zeno_unified 明确依赖此行为）。
+            old = {v for v in variants if v != main}
             for mapping in self._iter_translation_mappings():
                 for k, v in mapping.items():
                     if v in old:
@@ -1548,7 +1586,7 @@ class AutoFlow:
                 # 走 AI 的条目（其他 mod/文件）审查时统一跟随 CFPA 译名，不自由发挥。
                 if (cfpa_hit != job.source_text
                         and self._is_target_lang(cfpa_hit, self.req.target_lang)):
-                    self._norm_terms[job.source_text] = cfpa_hit
+                    self._norm_terms[job.source_text] = strip_particle(cfpa_hit)   # 剥助词
                 self.by_mod.setdefault(job.modid, {})[job.key] = cfpa_hit
                 self.memory.set(job.source_text, self.req.target_lang, cfpa_hit)   # 写记忆，json/硬编码阶段同文本复用
                 # 续联：CFPA 命中只推进 stage 明细（全局基准已含）
@@ -1667,11 +1705,14 @@ class AutoFlow:
 
     async def _record_residual_failures(self) -> None:
         """终审规则兜底：AI 判定已由审查管道三级终审（_final_judge_leak）完成，
-        这里只做规则审计——审计不变量 error（缺译文/占位符）→ 记 failed。"""
+        这里只做规则审计——审计不变量 error（缺译文/占位符）→ 记 failed。
+        修复（Agent 审查）：流水线真失败条目（failures 已含 key）因未写 sink 被审计
+        「缺少中文译文」再计一次 → failed 虚高；跳过已记录 key 消除双计。"""
+        _failed_keys = {f.get("key") for f in self.failures if f.get("key")}
         for modid, entries in self.by_mod.items():
             src = self.source_by_mod.get(modid, {})
             for issue in audit_invariants(src, entries):
-                if issue["severity"] == "error":
+                if issue["severity"] == "error" and issue["key"] not in _failed_keys:
                     self.state.failed += 1
                     self.failures.append({"text": src.get(issue["key"], "")[:50],
                                           "reason": f"审计不通过：{issue['message']}"})
@@ -2335,7 +2376,7 @@ class AutoFlow:
             _proj_terms = extract_terms(self.memory.data, self.req.target_lang, max_terms=150)
             self.base_terms.update(_proj_terms)
             if _proj_terms:
-                _terms_str = "\n".join(f"{k} => {v}" for k, v in _proj_terms.items())
+                _terms_str = "\n".join(f"{k} => {strip_particle(v)}" for k, v in _proj_terms.items())
                 self.glossary_prompt = (self.glossary_prompt + "\n\n"
                                         "已确认术语（翻译时对应当前原文必须严格沿用对应译名，禁止一词多译）：\n"
                                         + _terms_str)
