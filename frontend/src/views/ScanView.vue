@@ -89,6 +89,12 @@ function onZoneClick() {
   if (isDesktop) pickLocal('file')
   else onClickDrop()
 }
+// M1 修复：任务行点击——有 taskId（进入过翻译）→ 查看右栏明细；
+// 无 taskId 的失败任务（detect 失败/启动失败）→ 直接弹出具体原因（不再点击无反应）
+function onJobClick(job) {
+  if (job.taskId) { emit('select-job', job.taskId); return }
+  if (job.error) alert(job.error)
+}
 async function onFilePicked(e) {
   const files = Array.from(e.target.files || [])
   e.target.value = ''                    // 允许连续选择同一批文件
@@ -143,8 +149,8 @@ async function onFilePicked(e) {
       </div>
       <div v-for="(job, i) in jobs" :key="job.path + '-' + i" class="job-row"
            :class="['st-' + job.status, { viewing: job.taskId && job.taskId === props.viewedTaskId }]"
-           :title="job.taskId ? '点击查看该任务汉化明细' : ''"
-           @click="job.taskId && emit('select-job', job.taskId)">
+           :title="job.taskId ? '点击查看该任务汉化明细' : (job.error ? '点击查看失败原因' : '')"
+           @click="onJobClick(job)">
         <span class="job-icon">{{ STATUS_ICON[job.status] || '•' }}</span>
         <div class="job-copy">
           <span class="job-name" :title="job.path">{{ job.name }}</span>
@@ -168,7 +174,7 @@ async function onFilePicked(e) {
         <span class="job-status">{{ STATUS_TEXT[job.status] || job.status }}</span>
         <button class="btn mini x" :disabled="processing || job.status === 'running'" :title="'移除'" @click.stop="emit('remove-job', i)">✕</button>
       </div>
-      <p v-if="failCountTip" class="tip fail-tip">失败项可在右侧查看原因，也可移除后重新添加</p>
+      <p v-if="failCountTip" class="tip fail-tip">失败项点击可查看原因，也可移除后重新添加</p>
     </div>
     <p v-else class="tip empty-tip">还没有任务，拖入文件开始</p>
 

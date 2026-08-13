@@ -10,6 +10,10 @@ import ProgressView from './views/ProgressView.vue'
 const configured = ref(false)
 const showSetup = ref(false)                    // getConfig 返回后：未配置才弹（已配置用户不闪窗）
 const config = ref({ target_lang: 'zh_cn' })    // 前端只保留目标语言（源语言/版本后端自动识别）
+// 后端就绪时是否已完成「开屏配置判断」（S2 修复：后端未就绪时不弹窗死锁，ping 恢复后补判）
+const configChecked = ref(false)
+// 未完成项目列表是否成功拉取过（M4 修复：启动竞态失败后 ping 恢复时补拉）
+const projectsLoaded = ref(false)
 
 // —— 后端连接状态：O1 逻辑，/api/config 定时 ping ——
 const backendStatus = ref('checking')           // checking(检测中…) / ok(已连接) / fail(未连接)
@@ -18,6 +22,17 @@ async function pingBackend() {
   try {
     await getConfig()
     backendStatus.value = 'ok'
+    // 后端刚就绪：补上启动时因未就绪跳过的开屏判断（S2）+ 未完成项目列表（M4）
+    if (!configChecked.value) {
+      try {
+        const cfg = await getConfig()
+        config.value = { ...config.value, target_lang: cfg.target_lang || 'zh_cn' }
+        if (cfg.configured) configured.value = true
+        else showSetup.value = true
+        configChecked.value = true
+      } catch (e) { /* 仍不可用则下轮再试 */ }
+    }
+    if (!projectsLoaded.value) loadProjects()
   } catch (e) {
     backendStatus.value = 'fail'
   }
@@ -32,16 +47,17 @@ onMounted(async () => {
   window.addEventListener('dragover', preventDropDefault)
   window.addEventListener('drop', preventDropDefault)
   loadProjects()   // 断点续联：扫描临时文件直接显示未完成项目
-  // 开屏判断：后端 config 已保存过（configured 标记）→ 直接主界面；否则首次开屏弹配置
+  // 开屏判断：后端 config 已保存过（configured 标记）→ 直接主界面；否则首次开屏弹配置。
+  // S2 修复：后端未就绪（getConfig 失败）时**不弹窗**——否则设置窗不可关+保存必败死锁；
+  // 等 pingBackend 检测到后端 ok 后再补判（configChecked 标记）。
   try {
     const cfg = await getConfig()
-    // 修复：目标语言必须从后端读回（用户设置里选过日文等），否则前端 config 恒为初始化
-    // 值 zh_cn——重启/已配置用户不弹设置窗时，请求始终带 zh_cn，AI 就汉化成中文（用户反馈）
     config.value = { ...config.value, target_lang: cfg.target_lang || 'zh_cn' }
     if (cfg.configured) configured.value = true
     else showSetup.value = true
+    configChecked.value = true
   } catch (e) {
-    showSetup.value = true           // 后端不可用/无配置依据 → 弹配置
+    configChecked.value = false      // 后端未就绪：标记待 ping 后重判，不弹窗
   }
 })
 onUnmounted(() => {
@@ -62,7 +78,13 @@ const detectingCount = ref(0)      // 正在识别中的文件数（>0 时禁用
 // 未完成项目列表（断点续联，用户诉求）：启动扫描临时文件直接显示，不用拖入
 const projects = ref([])
 async function loadProjects() {
-  try { projects.value = await listProjects() } catch { projects.value = [] }
+  try {
+    projects.value = await listProjects()
+    projectsLoaded.value = true
+  } catch {
+    projects.value = []
+    projectsLoaded.value = false   // 失败：ping 恢复后补拉
+  }
 }
 async function removeProject(pid) {
   // 修复（recheck）：删除失败时明确提示具体原因（之前静默吞掉，后端 500 时用户
@@ -78,7 +100,12 @@ async function removeProject(pid) {
 // 后端 _check_resume / run() 按内容指纹匹配项目记忆/进度，命中跳过已翻条目。
 async function resumeProject(p) {
   if (!p || !p.path) return
-  // 续联前移除同路径的旧任务（用户从任务行「可断点续联」点击触发时，
+  // S1 修复：有同路径任务正在翻译 → 不移除（防失去对运行中任务的控制/浪费额度），明确提示
+  if (jobs.value.some(j => j.path === p.path && j.status === 'running')) {
+    window.alert('该文件正在翻译中，请先等待完成或取消当前任务再续联')
+    return
+  }
+  // 续联前移除同路径的非运行中旧任务（用户从任务行「可断点续联」点击触发时，
   // 该任务还停在队列里，不移除会重复翻译同一文件）
   jobs.value = jobs.value.filter(j => j.path !== p.path)
   try {

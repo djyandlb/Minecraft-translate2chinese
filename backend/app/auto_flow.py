@@ -735,7 +735,10 @@ class AutoFlow:
                     # 修复：enqueue 分支也判定「请求失败回原文」——审查请求失败（issues=[]）时
                     # 真失败会被当「AI 保留」放行不 failed（Agent 审查确认），带标记让审查计失败
                     _real_fail = (text in _failed) if _failed is not None else False
-                    _req_fail = bool(_batch_err) or _real_fail
+                    # 修复（recheck #1）：请求失败判定必须**逐条**——_batch_err 是整批级标记，
+                    # 批内部分失败时成功译文会被误标 request_failed → 审查写回原文 + failed（好译文丢失）。
+                    # 该条失败 = 真失败（failed 集合命中）或「返回原文且批有错误」；翻出译文的条目标成功。
+                    _req_fail = _real_fail or (translated == text and bool(_batch_err))
                     # sink：审查管道写回目标（lang=by_mod[modid]，json/pack=该文本源 out dict）
                     await enqueue_fn({"key": key, "modid": p.get("mod", ""),
                                       "source": text, "translated": translated,
@@ -985,7 +988,9 @@ class AutoFlow:
         # 初审：不合格 key → 重审；其余 → 写最终产物
         bad_keys = {iss["key"]: iss.get("reason", "") for iss in issues}
         ok_items = [it for it in batch if it["key"] not in bad_keys and not it.get("request_failed")]
-        bad_items = [it for it in batch if it["key"] in bad_keys]
+        # 修复（recheck #2）：request_failed 条目已在上方计 failed + 写回原文，
+        # 必须排除出 bad_items——否则审查判「漏翻」（translated==source）进重翻闭环 → 终审再计 failed（双计）。
+        bad_items = [it for it in batch if it["key"] in bad_keys and not it.get("request_failed")]
         # 修复：请求失败回原文的条目，不因审查 issues=[] 放行假成功——直接计 failed 写回原文
         for it in batch:
             if it.get("request_failed"):
@@ -1041,13 +1046,27 @@ class AutoFlow:
             except Exception:
                 _g1 = [it["source"] for it in retrans_items]
                 _r1net = True   # 重跑异常：按网络失败处理，进强制轮
+            # 重跑翻出译文的条目（tr1 != source）**再送审查**（用户诉求「全量中文且审查算过才算过」）：
+            # 否则截断译文（如「（祭」）含汉字会被 _is_target_lang 误判 pass（用户实测长文本截断）
+            _cand1 = [(it, tr1) for it, tr1 in zip(retrans_items, _g1)
+                      if not _r1net and tr1 != it["source"]]
+            _c1issues = {}
+            if _cand1:
+                _c1pairs = [{"key": it["key"], "source": it["source"], "translated": tr1}
+                            for it, tr1 in _cand1]
+                try:
+                    _c1issues = {iss["key"]: iss.get("reason", "") for iss in await
+                                 review_translations(self.engine, _c1pairs, self.req.target_lang)}
+                except Exception:
+                    _c1issues = {}
             for it, tr1 in zip(retrans_items, _g1):
                 if _r1net:
                     _need_forced.append(it)
-                elif tr1 != it["source"] and self._is_target_lang(tr1, self.req.target_lang):
-                    _pass1.append((it, tr1))   # 不同且全量中文 → 算过
+                elif tr1 != it["source"] and self._is_target_lang(tr1, self.req.target_lang) \
+                        and it["key"] not in _c1issues:
+                    _pass1.append((it, tr1))   # 不同、含中文、审查过 → 算过
                 else:
-                    _need_forced.append(it)    # 相同/仍原文/英文 → 进强制
+                    _need_forced.append(it)    # 相同/仍原文/英文/审查不过 → 进强制
             for it, tr in _pass1:
                 self._write_reviewed(it, tr)
             # —— 第二轮：强制翻译（forced）→ 再审查一次：过 → 输出；不过 → 终审（终审也尽力输出）
@@ -1394,10 +1413,9 @@ class AutoFlow:
         # 标记「消费式」删除：这是最后一次保存机会（finally 只调一次），消费掉标记防残留
         marker = p.parent / f"{self.project_id}.deleted"
         if marker.exists():
-            try:
-                marker.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # 修复（recheck #3）：标记改**非消费式**——_save_progress 现被批末节流（≥2s）调用，
+            # 消费式 unlink 会让下一次节流调用正常写 progress → 已删除项目的缓存「复活」。
+            # 标记保留：存在即跳过写；重新翻译同项目时 run() 会清除该标记。
             return
         p.parent.mkdir(parents=True, exist_ok=True)
         # 用户诉求：**任务完成（产物已生成）→ done 写满 total（100%）**——即使实际

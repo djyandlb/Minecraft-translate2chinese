@@ -345,13 +345,19 @@ async function saveAndClose() {
       try {
         await saveKey(apiKey.value)
       } catch (e) {
-        // keyring 写失败（如 Windows 凭据库异常）不阻塞其余配置保存——用户反馈「配置保存不完全」
-        error.value = `API Key 保存失败（${e.message}），其余配置已保存`
+        // M5 修复：keyring 写失败（如 Windows 凭据库异常）→ 明确提示 + **不关窗**
+        //（否则用户看不到错误，误以为 key 已保存）；config 仍保存不浪费
+        error.value = `API Key 保存失败（${e.message}），其余配置仍会保存`
       }
     }
     const body = buildConfigBody()
     await saveConfig(body)
     props.onDone?.(body)
+    if (error.value) {
+      // 有关键错误（如 key 保存失败）：不关窗，让用户看到并处理
+      saving.value = false
+      return
+    }
     props.onClose?.()
   } catch (e) {
     if (!error.value) error.value = `保存失败：${e.message}`
