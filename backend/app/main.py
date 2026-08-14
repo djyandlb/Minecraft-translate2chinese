@@ -675,16 +675,17 @@ async def test_throughput(payload: dict = None):
 
     async def _measure_w() -> tuple[float, bool]:
         """低并发测平均单批耗时 W（秒）。全失败返回 (30, False)。"""
-        req = _probe_base[:BASE_BATCH]
+        req = _probe_base[:8]              # 慢 API（mimo 等）用 8 条短批：单批快、超时风险低
         eng = LLMClient(base_url, api_key, model, concurrency=BASE_CONC,
-                        batch_size=BASE_BATCH, rpm=rpm_eff)
+                        batch_size=8, rpm=rpm_eff)
         times: list[float] = []
         try:
-            for _ in range(SAMPLE_ROUNDS):
+            # 只跑 2 批：慢 API 跑 1 批就能算出 W，别让 3 批拖到像卡死（mimo 慢测不出的根因）
+            for _ in range(2):
                 _t0 = _t.time()
                 _m: dict = {}
                 try:
-                    await asyncio.wait_for(eng.translate_batch(req, "zh_cn", meta=_m), timeout=180)
+                    await asyncio.wait_for(eng.translate_batch(req, "zh_cn", meta=_m), timeout=60)
                 except Exception:
                     continue
                 times.append(_t.time() - _t0)
@@ -712,8 +713,15 @@ async def test_throughput(payload: dict = None):
         t0 = _t.time()
         deadline = t0 + 65
         eng = LLMClient(base_url, api_key, model, concurrency=6, batch_size=8, rpm=100000)
-        try:
-            while _t.time() < deadline:
+
+        async def _worker() -> None:
+            """真正并发的灌满 worker：6 个同时发，直到硬顶或 429 现形提前收。
+            （旧版是顺序循环 = 实际并发 1，mimo 慢时 60s 只发 30 个测出 rpm≈25 的 bug）"""
+            while True:
+                if len(stamps_429) >= 5 and (_t.time() - t0) > 8:
+                    return                # 配额封顶已现形，提前收
+                if _t.time() >= deadline:
+                    return
                 _tx = _t.time()
                 _m: dict = {}
                 try:
@@ -725,9 +733,9 @@ async def test_throughput(payload: dict = None):
                         stamps_429.append(_tx)
                     else:
                         stamps_ok.append(_tx)
-                # 提前退出：连续 429 已够多且跑过一段 → 配额封顶已现形
-                if len(stamps_429) >= 8 and (_t.time() - t0) > 10:
-                    break
+
+        try:
+            await asyncio.gather(*(_worker() for _ in range(6)))
         finally:
             try:
                 await eng.aclose()
