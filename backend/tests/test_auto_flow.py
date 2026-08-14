@@ -1548,3 +1548,20 @@ async def test_ai_renormalize_only_proper_noun_unify(tmp_path, monkeypatch):
     assert "k2" in keys            # Zeno 的「泽昂」≠ 规范译名 → 重翻
     assert "k1" not in keys        # 已是「泽诺」→ 不重翻
     assert "k3" not in keys        # light 非候选 → 不重翻
+
+
+def test_has_english_leak_rules():
+    """v1.2.7+ 英文残留规则：≥3 个英文词（非代码/路径/命令）判残留；单/双专名不误伤。"""
+    from app.auto_flow import AutoFlow
+    flow = object.__new__(AutoFlow)
+    # 纯代码/路径/命令 → 合法保留，不算残留
+    assert flow._has_english_leak("config/jei/jei.toml") is False
+    assert flow._has_english_leak("/give @p minecraft:diamond") is False
+    # 单/双专名 → 不误伤
+    assert flow._has_english_leak("Xaero Minimap") is False
+    assert flow._has_english_leak("AE2 网络") is False
+    # 中英混杂 / 整段英文 → 残留
+    assert flow._has_english_leak("这是一个物品 This is a very long english sentence") is True
+    assert flow._has_english_leak("Press the key to toggle the minimap visibility") is True
+    # 纯中文 → 不残留
+    assert flow._has_english_leak("这是一个纯中文的翻译结果") is False

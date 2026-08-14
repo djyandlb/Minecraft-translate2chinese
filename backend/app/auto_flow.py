@@ -1171,14 +1171,15 @@ class AutoFlow:
                         _final.append(it)
             else:
                 # v1.2.7 轻量化：forced 重翻后**不再 AI 再审**（省 1 次 API 往返，对慢 API
-                # 每批审查省掉整轮请求）——规则终验分流：翻出译文且是目标语言 → 写回；
-                # 仍原文/纯英文 → 交由 _final_judge_batch 做最后一次 forced + 规则分流
-                # （合理保留 or 记失败）。占位符完整性由 _write_reviewed 校验兜底。
+                # 每批审查省掉整轮请求）——规则终验分流：翻出译文且是目标语言且无英文残留
+                # → 写回；仍原文/纯英文/中英混杂 → 交由 _final_judge_batch 终审。
+                # 英文残留用 _has_english_leak 兜底（原 AI 再审抓中英混杂，裁剪后规则补上）。
                 for it, tr in zip(retrans_items, _g):
-                    if tr != it["source"] and self._is_target_lang(tr, self.req.target_lang):
+                    if tr != it["source"] and self._is_target_lang(tr, self.req.target_lang) \
+                            and not self._has_english_leak(tr):
                         self._write_reviewed(it, tr)
                     else:
-                        _final.append(it)                 # 仍原文/英文 → 终审（规则终验）
+                        _final.append(it)                 # 仍原文/英文/混杂 → 终审（规则终验）
             # 终审批量（v1.2.3）：一次 forced 批量终审（替代原逐条 _final_judge_leak 的 N 次单发）
             if _final:
                 await self._final_judge_batch(_final, bad_keys)
@@ -1271,6 +1272,20 @@ class AutoFlow:
         if lang == "ko_kr":
             return any('가' <= ch <= '힯' for ch in text)
         return True
+
+    def _has_english_leak(self, text: str) -> bool:
+        """英文残留检测（v1.2.7+ 审查裁剪补防线）：译文含 ≥3 个英文单词（非纯代码/路径/
+        命令/占位符保留形态）→ 判为英文残留（整段 / 中英混杂）。
+
+        原 AI 再审会抓「中英混杂」，裁剪后由本规则兜底——命中则不写回产物，
+        交 _final_judge_batch 再翻 / 合理保留 / 记失败，杜绝「大段英文写进汉化产物」。
+        单个/两个专名（Xaero、AE2）不误伤（<3 个英文词）。
+        """
+        if not text or _is_legit_keep_by_source(text):
+            return False
+        if re.search(r"[/\\:]", text):      # 路径/命令/命名空间 → 非界面文本，豁免
+            return False
+        return len(re.findall(r"\b[A-Za-z]{3,}\b", text)) >= 3
 
     async def _prebuild_terms(self, texts: list[str]) -> None:
         """翻译前预扫描术语表（DocuTranslate 模式，用户诉求「全部优化」）：
@@ -1554,9 +1569,11 @@ class AutoFlow:
             sink = it.get("sink")
             if sink is None:
                 sink = it["sink"] = self.by_mod.setdefault(it.get("modid", ""), {})
-            # 尽力输出：翻出非原文的目标语言译文 → 输出写回（覆盖率优先）
+            # 尽力输出：翻出非原文、目标语言、且无英文残留的译文 → 输出写回（覆盖率优先）。
+            # _has_english_leak 拦截中英混杂/整段英文残留（原 AI 再审防线，裁剪后规则兜底）
             if (not _net) and tr and tr != src_full \
-                    and self._is_target_lang(tr, self.req.target_lang):
+                    and self._is_target_lang(tr, self.req.target_lang) \
+                    and not self._has_english_leak(tr):
                 self._write_reviewed(it, tr)
                 continue
             sink[it["key"]] = src_full
