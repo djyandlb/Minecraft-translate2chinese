@@ -670,7 +670,7 @@ async def test_throughput(payload: dict = None):
     probe = list(_probe_base) * 6
     SAMPLE_ROUNDS = 3      # 测单批耗时发几批
     BASE_CONC, BASE_BATCH = 2, 16
-    MAX_CONC = 8           # 并发封顶（保守）
+    MAX_CONC = 16          # 并发封顶 = 滑块上限：方程给理论值(Little's Law)，verify 真打降档到稳定
     MAX_BATCH = 40         # 批封顶（输出 token 预算保守）
 
     async def _measure_w() -> tuple[float, bool]:
@@ -757,10 +757,13 @@ async def test_throughput(payload: dict = None):
 
 
     async def _verify(cc: int, bs: int) -> bool:
-        """并发 cc 发 2 批短样本确认稳定（无异常且 failed==0）。
+        """并发 cc 发 2 批短样本确认稳定。
 
         v1.2.6：用 16 条短批而非满批——慢 API（mimo 批 40 可能要 1 分钟+）会让整组
-        动态测试拖到超时。判定「该并发能跑」用轻负载足够，最终设置仍是 batch=MAX_BATCH。
+        动态测试拖到超时。判定「该并发能跑」用轻负载足够。
+        v1.2.7+：**429/限流不算不稳**——RPM 校准刚把 60s 窗口配额撞满，紧接 verify
+        的请求会被限流拒（误判并发过载 → 一路降到 1）。限流由运行时预算闸处理，不是
+        并发问题；只有网络异常/5xx 才算真不稳。
         """
         _vb = min(bs, 16)
         req = (probe * ((_vb // len(probe)) + 1))[:_vb]
@@ -775,8 +778,8 @@ async def test_throughput(payload: dict = None):
                 except Exception:
                     ok = False
                     break
-                if _m.get("failed"):
-                    ok = False
+                if _m.get("failed") and _m.get("kind") != "ratelimit":
+                    ok = False     # 非限流失败 → 真不稳；ratelimit 忽略（窗口满，运行时闸处理）
                     break
         finally:
             try:
@@ -794,16 +797,18 @@ async def test_throughput(payload: dict = None):
     rpm_hit = False
     if rpm_auto:
         rpm_eff, rpm_secs, rpm_hit = await _find_auto_rpm()   # 60s 滑窗灌满校准（10-65s）
-    # ===== 方程（Little's Law）：并发 = 每分钟配额 × 单批耗时 / 60，封顶保守 =====
+    # ===== 方程（Little's Law）：并发 = 每分钟配额 × 单批耗时 / 60，封顶滑块上限 =====
     conc = min(MAX_CONC, max(1, round((max(1, rpm_eff) / 60.0) * w)))
     batch = MAX_BATCH
-    # ===== 保底验证：负载拉满确认稳定，不稳降并发重验 =====
+    # ===== 保底验证：方程给理论值，verify 确认该并发可跑（v1.2.7+ 仅单级降档——
+# 429/限流不算不稳，只有真网络/5xx 才降一档；不再连降到 1 误伤）=====
     _final_c = conc
-    for _try in range(4):
-        if await _verify(_final_c, batch):
-            break
-        _final_c = max(1, _final_c // 2)   # 仍撞限流：降并发再试
-    scan_ok = min(6, max(1, round(_final_c * 0.6)))
+    if not await _verify(_final_c, batch):
+        _final_c = max(1, _final_c // 2)   # 真不稳 → 降一档
+    # v1.2.7+ 自动调：批/扫描**随并发**（不再是固定 40/5）——快 API 高并发吃大批，
+    # 慢 API 降档后小批（防超时）；扫描 = round(并发×0.6) 封顶 8（滑块上限）。
+    batch = min(MAX_BATCH, 12 + _final_c * 4)   # 并发 1→16、4→28、8→40（封顶 40）
+    scan_ok = min(8, max(1, round(_final_c * 0.6)))
     if rpm_auto and rpm_hit:
         _auto_note = f"（实测撞限流：RPM≈{rpm_eff}，×{rpm_secs}s 窗口校准）"
     elif rpm_auto:
