@@ -116,6 +116,10 @@ async def _review_batch(engine, client, batch: list[dict], target_lang: str,
         "temperature": 0.0,      # 审查要稳定一致，低温
         "max_tokens": 4096,
     }
+    # v1.2.4 请求前 RPM 预算闸：审查与翻译共享同一配额（避免各类请求合计超配额）
+    _gate = getattr(engine, "rate_gate", None)
+    if _gate is not None:
+        await _gate.acquire()
     try:
         resp = await client.post(f"{engine.base_url}/chat/completions", json=body)
         resp.raise_for_status()

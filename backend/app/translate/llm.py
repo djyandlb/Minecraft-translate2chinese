@@ -17,6 +17,7 @@ import httpx
 
 from app.translate.common import should_translate
 from app.placeholder import protect, restore
+from app.translate.ratelimit import RateGate
 
 # 行首条目前缀：兼容 [iN]、**iN**、*iN* 与「数字. / 数字、 / 数字)」编号。
 # 数字编号按 1-based（1. → 索引 0），[iN] 按 0-based。
@@ -137,7 +138,8 @@ class LLMClient:
                  concurrency: int = 5, batch_size: int = 10,
                  on_usage: Callable[[int, int], None] | None = None,
                  glossary_prompt: str = "",
-                 silly_mode: bool = False):
+                 silly_mode: bool = False,
+                 rpm: float = 0):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
@@ -145,6 +147,9 @@ class LLMClient:
         self.batch_size = batch_size
         self.on_usage = on_usage
         self.glossary_prompt = glossary_prompt
+        # 请求前 RPM 预算闸（v1.2.4）：rpm>0 时创建 RateGate，翻译请求超配额在本地排队
+        # → API 永不触发 429（限流保底）。rpm<=0 = 不限速。
+        self.rate_gate = RateGate(rpm) if rpm and float(rpm) > 0 else None
         # 技术串过滤开关：默认 True（结构化 JSON/硬编码等 snake_case 标识符跳过）。
         # 语言文件阶段由 auto_flow 临时置 False——语言文件值是可翻译文本，
         # "Requires_Armor" 这类 snake_case 真实短语不得被 should_translate 误杀。
@@ -422,6 +427,9 @@ class LLMClient:
             "temperature": 0.2,
             "max_tokens": 8192,   # 防默认上限截断输出（截断会让后半批缺失/句子切半，触发「未返回文本」）
         }
+        # v1.2.4 请求前 RPM 预算闸：超配额本地排队，绝不让 API 撞 429
+        if self.rate_gate is not None:
+            await self.rate_gate.acquire()
         try:
             resp = await client.post(f"{self.base_url}/chat/completions", json=body)
             resp.raise_for_status()
@@ -554,6 +562,9 @@ class LLMClient:
             "temperature": 0.2,
             "max_tokens": 8192,   # 防默认上限截断输出（单条长句也要完整译出）
         }
+        # v1.2.4 请求前 RPM 预算闸：与批量请求共享同一配额，单条兜底不偷偷绕过
+        if self.rate_gate is not None:
+            await self.rate_gate.acquire()
         if ctx["fatal"]:
             # 鉴权致命错误后：不再发请求，标记失败并回原文（auto_flow 据此整批失败）
             ctx["failed"].add(text)

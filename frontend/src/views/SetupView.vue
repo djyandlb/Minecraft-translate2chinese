@@ -29,7 +29,7 @@ const LANGUAGES = [
 // keyring 已配置时的回显占位符：避免用户每次误以为要重输（保存时跳过该占位值）
 const API_KEY_PLACEHOLDER = '已配置（••••）'
 // 应用版本号：打包时同步更新（设置页「配置」标题右侧淡灰小字展示）
-const APP_VERSION = '1.2.3'
+const APP_VERSION = '1.2.4'
 
 const engine = ref('llm')            // llm(用户 API) | free(免费 API) | machine(机翻)，三选项互斥
 const provider = ref('DeepSeek')
@@ -51,6 +51,7 @@ const displayBatch = computed({
   get: () => batchSize.value ?? 20,
   set: (v) => { batchSize.value = v },
 })
+const rpm = ref(60)              // 每分钟请求预算（RPM，v1.2.4 预算闸）：0 = 不限速
 const sillyMode = ref(false)     // 胡言乱语模式：搞笑/热梗翻译但忠实原意（设置页开关）
 const cacheDir = ref('')         // 缓存/工作目录（可改到其他盘省 C 盘；空 = 系统默认；重启生效）
 async function pickCacheDir() {
@@ -181,12 +182,14 @@ async function runThroughputTest() {
       ? { engine: 'machine' }
       : { engine: engine.value, provider: provider.value,
           llm: { base_url: baseUrl.value.trim(), model: model.value.trim() },
-          api_key: (apiKey.value && apiKey.value !== API_KEY_PLACEHOLDER) ? apiKey.value : undefined }
+          api_key: (apiKey.value && apiKey.value !== API_KEY_PLACEHOLDER) ? apiKey.value : undefined,
+          rpm: Number(rpm.value) || 0 }
     const r = await testThroughput(body)
     if (r.ok) {
       concurrency.value = r.concurrency
       batchSize.value = r.batch_size
       scanConcurrency.value = r.scan_concurrency
+      if (r.rpm != null) rpm.value = r.rpm
       tpOk.value = true
       tpResult.value = r.message
       autoSave()   // 新档位即时保存
@@ -234,6 +237,7 @@ function buildConfigBody() {
     target_lang: targetLang.value, concurrency: concurrency.value,
     scan_concurrency: scanConcurrency.value,
     batch_size: batchSize.value ? Number(batchSize.value) : null,
+    rpm: Number(rpm.value) || 0,
     silly_mode: sillyMode.value,
     cache_dir: cacheDir.value,
     llm: { base_url: baseUrl.value.trim(), model: model.value.trim() },
@@ -251,7 +255,7 @@ async function autoSave() {
     } catch (e) { /* 自动保存失败静默：用户点「保存」按钮时再显式报错 */ }
   }, 800)
 }
-watch([engine, provider, baseUrl, model, targetLang, concurrency, scanConcurrency, batchSize, sillyMode, cacheDir], autoSave)
+watch([engine, provider, baseUrl, model, targetLang, concurrency, scanConcurrency, batchSize, rpm, sillyMode, cacheDir], autoSave)
 // 组件卸载（关窗/销毁）时立即保存当前值，防防抖窗口期内的改动丢失（webview 关窗会丢弃 pending setTimeout）
 onUnmounted(() => {
   clearTimeout(saveTimer)
@@ -288,6 +292,8 @@ onMounted(async () => {
     if (cfg.silly_mode != null) sillyMode.value = !!cfg.silly_mode
     // 缓存目录回填：未配置保持空（系统默认）
     if (cfg.cache_dir) cacheDir.value = cfg.cache_dir
+    // 每分钟请求预算（RPM）：未配置默认 60（预算闸）
+    if (cfg.rpm != null) rpm.value = Number(cfg.rpm) || 0
     // O2：本地未存 key 时，问后端 keyring 是否已配置过——已配置则回显占位符，不空白
     if (!apiKey.value) {
       try {
@@ -414,7 +420,12 @@ async function saveAndClose() {
           <input type="range" v-model.number="scanConcurrency" min="1" max="8" step="1" class="slider">
           <span class="slider-val">{{ scanConcurrency }}</span>
         </div>
-        <small class="sub">拖动调节并发/批次/扫描；点下方「动态测试吞吐」按当前 API 实际能力自动探测最优组合（真实文本样本 · 约需 1 分钟），测完滑动条自动定位——测出的档位即可满速运行</small>
+        <div class="slider-row">
+          <span class="slider-name">每分钟预算</span>
+          <input type="number" v-model.number="rpm" min="0" max="100000" step="10" class="rpm-input">
+          <span class="slider-val">RPM</span>
+        </div>
+        <small class="sub">每分钟请求预算（RPM，0=不限速）：预算闸在请求**发送前**按此配额放行，超配额的本地排队——API 永不触发 429/限流，任何 API 都能稳跑；「动态测试吞吐」按 RPM + 单批耗时用方程算出最优并发并定位滑块</small>
       </div>
       <div class="field">
         <label>胡言乱语模式</label>
@@ -572,6 +583,9 @@ async function saveAndClose() {
 .slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; background: var(--accent); border: 2px solid var(--accent); box-shadow: 2px 2px 0 rgba(47,80,56,.45); cursor: pointer; border-radius: 0; }
 .slider::-moz-range-thumb { width: 14px; height: 14px; background: var(--accent); border: 2px solid var(--accent); cursor: pointer; border-radius: 0; }
 .slider-val { flex: 0 0 30px; text-align: right; font-size: 14px; font-weight: 700; color: var(--accent); }
+/* 每分钟请求预算（RPM）数字输入：方块风，窄 */
+.rpm-input { width: 86px; padding: 4px 8px; border: 1.5px solid #d5cdb8; background: var(--bg); font-size: 13px; color: var(--text); border-radius: 0; outline: none; }
+.rpm-input:focus { border-color: var(--accent); }
 /* 测试连接：按钮 + 结果横排，结果绿=成功 / 红=失败 */
 .test-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .test-result { font-size: 13px; }

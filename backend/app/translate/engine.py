@@ -57,6 +57,8 @@ def create_engine(cfg: AppConfig):
             concurrency=_clamp_int(cfg.get("concurrency"), d["concurrency"], 1, 64),
             batch_size=_clamp_int(cfg.get("batch_size"), d["batch_size"], 1, 200),
             silly_mode=bool(cfg.get("silly_mode")),   # 胡言乱语模式（搞笑/热梗翻译但保义）
+            # 请求前 RPM 预算闸（v1.2.4）：0 = 不限速；>0 按配额放行，API 永不 429
+            rpm=float(_clamp_int(cfg.get("rpm"), 60, 0, 100000)),   # 默认 60/分，可调
         )
     return MachineClient(cfg.get("machine", {}).get("provider", "google"),
                          concurrency=_clamp_int(cfg.get("concurrency"), 5, 1, 5))

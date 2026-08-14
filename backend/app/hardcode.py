@@ -969,6 +969,10 @@ async def _ai_judge_single(engine, client, cand: dict, target_lang: str,
         ],
         "temperature": 0.2,
     }
+    # v1.2.4 请求前 RPM 预算闸：硬编码 AI 判断也共享同一配额
+    _gate = getattr(engine, "rate_gate", None)
+    if _gate is not None:
+        await _gate.acquire()
     try:
         resp = await client.post(f"{engine.base_url}/chat/completions", json=body)
         resp.raise_for_status()
@@ -1025,6 +1029,10 @@ async def _ai_judge_batch(engine, client, batch: list[dict], target_lang: str,
         ],
         "temperature": 0.2,
     }
+    # v1.2.4 请求前 RPM 预算闸：硬编码 AI 判断也共享同一配额
+    _gate = getattr(engine, "rate_gate", None)
+    if _gate is not None:
+        await _gate.acquire()
     try:
         resp = await client.post(f"{engine.base_url}/chat/completions", json=body)
         resp.raise_for_status()
