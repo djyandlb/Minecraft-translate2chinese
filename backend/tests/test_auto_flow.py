@@ -267,7 +267,7 @@ async def test_auto_ai_review_retry_loop(tmp_path, monkeypatch):
     st = store.load(state.id)
     assert st.status == "done"
     assert st.failed == 0                       # 重翻后终审合格，不误记 failed
-    assert review_calls["n"] >= 2               # 至少审了初轮 + 重翻后
+    assert review_calls["n"] >= 1               # v1.2.7 轻量化：只初审一次，重翻后不再 AI 再审
     data = json.loads(_pack_zip(outputs / state.id)["resourcepacks/模组汉化资源包/assets/mymod/lang/zh_cn.json"])
     assert data["gui.a"] == "你好世界！"          # 劣质译文被重翻覆盖
     assert data["gui.b"] == "欢迎回家"

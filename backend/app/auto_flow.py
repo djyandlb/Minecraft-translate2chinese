@@ -1170,24 +1170,15 @@ class AutoFlow:
                     else:
                         _final.append(it)
             else:
-                # forced 翻出译文的条目**再送审查**（用户诉求「全量中文且审查算过才算过」）：
-                # 否则截断译文（如「（祭」）含汉字会被 _is_target_lang 误判 pass（长文本截断）
-                _cand = [(it, tr) for it, tr in zip(retrans_items, _g) if tr != it["source"]]
-                _cissues = {}
-                if _cand:
-                    _cpairs = [{"key": it["key"], "source": it["source"], "translated": tr}
-                               for it, tr in _cand]
-                    try:
-                        _cissues = {iss["key"]: iss.get("reason", "") for iss in await
-                                    review_translations(self.engine, _cpairs, self.req.target_lang)}
-                    except Exception:
-                        _cissues = {}
+                # v1.2.7 轻量化：forced 重翻后**不再 AI 再审**（省 1 次 API 往返，对慢 API
+                # 每批审查省掉整轮请求）——规则终验分流：翻出译文且是目标语言 → 写回；
+                # 仍原文/纯英文 → 交由 _final_judge_batch 做最后一次 forced + 规则分流
+                # （合理保留 or 记失败）。占位符完整性由 _write_reviewed 校验兜底。
                 for it, tr in zip(retrans_items, _g):
-                    if tr != it["source"] and self._is_target_lang(tr, self.req.target_lang) \
-                            and it["key"] not in _cissues:
-                        self._write_reviewed(it, tr)      # 翻出译文且审查过 → 输出
+                    if tr != it["source"] and self._is_target_lang(tr, self.req.target_lang):
+                        self._write_reviewed(it, tr)
                     else:
-                        _final.append(it)                 # 仍原文/英文/审查不过 → 终审
+                        _final.append(it)                 # 仍原文/英文 → 终审（规则终验）
             # 终审批量（v1.2.3）：一次 forced 批量终审（替代原逐条 _final_judge_leak 的 N 次单发）
             if _final:
                 await self._final_judge_batch(_final, bad_keys)
