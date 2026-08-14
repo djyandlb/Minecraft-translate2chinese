@@ -752,8 +752,13 @@ async def test_throughput(payload: dict = None):
 
 
     async def _verify(cc: int, bs: int) -> bool:
-        """并发 cc/批 bs 发 2 批确认稳定（无异常且 failed==0）。"""
-        req = (probe * ((bs // len(probe)) + 1))[:bs]
+        """并发 cc 发 2 批短样本确认稳定（无异常且 failed==0）。
+
+        v1.2.6：用 16 条短批而非满批——慢 API（mimo 批 40 可能要 1 分钟+）会让整组
+        动态测试拖到超时。判定「该并发能跑」用轻负载足够，最终设置仍是 batch=MAX_BATCH。
+        """
+        _vb = min(bs, 16)
+        req = (probe * ((_vb // len(probe)) + 1))[:_vb]
         eng = LLMClient(base_url, api_key, model, concurrency=max(1, cc),
                         batch_size=max(1, bs), rpm=rpm_eff)
         ok = True

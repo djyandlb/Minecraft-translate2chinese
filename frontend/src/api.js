@@ -4,11 +4,13 @@ const BASE = '/api'
 async function req(path, options = {}) {
   // 超时兜底（AbortController）：fetch 无默认超时，若后端不响应/连接悬挂会永远 pending——
   // 点击「开始翻译」后 autoTranslate 一直不返回，右栏就卡在「正在启动」/空态出不来。
-  // 60s 对识别/翻译启动足够（后端 create_task 毫秒级返回），超时报错让前端走到失败分支而非无限等。
+  // 60s 对识别/翻译启动足够（后端 create_task 毫秒级返回），超时报错让前端走到失败分支而非无限等；
+  // 需要更长的调用（如动态测试吞吐，mimo 慢要跑几十秒）可传 options.timeout 覆盖（v1.2.6）。
   // 修复：fetch 响应头到达后 clearTimeout 会让 res.json() 失去超时保护（body 挂起无限等）——
   // 把整个 fetch+json 放同一个 timer 内。
+  const timeout = (typeof options.timeout === 'number' && options.timeout > 0) ? options.timeout : 60000
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 60000)
+  const timer = setTimeout(() => controller.abort(), timeout)
   try {
     const res = await fetch(BASE + path, {
       headers: { 'Content-Type': 'application/json' },
@@ -34,7 +36,7 @@ async function req(path, options = {}) {
       throw err
     }
   } catch (e) {
-    if (e.name === 'AbortError') throw new Error('请求超时（60 秒），请重试')
+    if (e.name === 'AbortError') throw new Error(`请求超时（${Math.round(timeout / 1000)} 秒），请重试`)
     // 修复：HTTP 错误（res.ok=false，带真实 detail/状态）保留原因，不再一律显示
     // 「无法连接后端」误导（用户反馈清除失败只看到「无法连接后端」）
     if (e && e.httpError) throw e
@@ -126,7 +128,7 @@ export const downloadCfpa = (mcVersion) => req('/cfpa/download', { method: 'POST
 export const testConnection = (body = {}) => req('/test-connection', { method: 'POST', body: JSON.stringify(body) })
 
 // 测试吞吐档位：后端逐档探测并发/批大小，返回建议档位（{ ok, preset, concurrency, batch_size, scan_concurrency, message }）
-export const testThroughput = (body = {}) => req('/test-throughput', { method: 'POST', body: JSON.stringify(body) })
+export const testThroughput = (body = {}) => req('/test-throughput', { method: 'POST', body: JSON.stringify(body), timeout: 180000 })
 
 // 检查更新内置资源（kind: cfpa/i18n/vp）：有更新下载到应用目录，返回 { ok, status, message, version }
 export const checkUpdate = (body = {}) => req('/check-update', { method: 'POST', body: JSON.stringify(body) })
