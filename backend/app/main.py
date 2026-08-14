@@ -519,6 +519,32 @@ def _read_api_key(cfg: AppConfig) -> str:
         return ""
 
 
+def _extract_api_error(resp) -> str:
+    """从平台响应体尽量提取真实错误信息（MiniMax 的 status_msg / status_code、OpenAI 的 error.message 等）。
+
+    修复（v1.2.2）：之前测试连接失败统一甩「地址或接口格式不对」，把模型名错、参数不合规、
+    MiniMax 业务错误码等全部误导成「去改地址」。改为透传平台死因，让用户看到真相。"""
+    try:
+        data = resp.json()
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    err = data.get("error")
+    if isinstance(err, dict):
+        m = err.get("message") or err.get("status_msg") or err.get("code")
+        if m:
+            return str(m)
+        if err:
+            return str(err)
+    m = data.get("message") or data.get("status_msg") or data.get("status_message")
+    if m:
+        return str(m)
+    if data.get("status_code") is not None:
+        return f"status_code={data.get('status_code')}"
+    return ""
+
+
 @app.post("/api/test-connection")
 def test_connection(payload: dict = None):
     """用当前配置验证翻译引擎连通性（任务 O1）。
@@ -567,11 +593,28 @@ def test_connection(payload: dict = None):
     if resp.status_code == 200:
         return {"ok": True, "message": "连接成功"}
     if resp.status_code in (401, 403):
-        return {"ok": False, "message": "API Key 无效或无权限"}
+        detail = _extract_api_error(resp)
+        msg = f"API Key 无效或无权限（HTTP {resp.status_code}）"
+        if detail:
+            msg += f"：{detail}"
+        return {"ok": False, "message": msg}
     if resp.status_code in (400, 404, 422):
-        # 用户反馈：填 /anthropic、platform.deepseek.com 等连不上——给明确地址诊断
-        return {"ok": False, "message": "地址或接口格式不对：OpenAI 兼容 base_url 应为 https://api.deepseek.com 这类（不要带 /anthropic、/v1 等后缀，也不要填网页平台地址）"}
-    return {"ok": False, "message": f"HTTP {resp.status_code}"}
+        # 修复（v1.2.2）：不再一刀切归为「地址格式不对」。模型名错/参数不合规/MiniMax 等平台
+        # 的业务错误码都会返回这些状态——透传真实错误。并修正旧版误导文案：旧版说
+        # 「不要带 /v1」纯属错误，Kimi/MiniMax/通义官方 OpenAI 兼容端点都带 /v1。
+        detail = _extract_api_error(resp)
+        msg = f"接口返回 HTTP {resp.status_code}"
+        if detail:
+            msg += f"：{detail}"
+        msg += ("。请检查：① base_url 填官方 API 端点（如 DeepSeek=https://api.deepseek.com；"
+                "Kimi/MiniMax/通义等平台需保留官方 /v1 后缀）；② 模型名拼写与平台一致；"
+                "③ 不要填网页控制台地址")
+        return {"ok": False, "message": msg}
+    detail = _extract_api_error(resp)
+    msg = f"HTTP {resp.status_code}"
+    if detail:
+        msg += f"：{detail}"
+    return {"ok": False, "message": msg}
 
 
 @app.post("/api/test-throughput")
