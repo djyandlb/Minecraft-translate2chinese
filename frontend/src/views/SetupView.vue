@@ -29,7 +29,7 @@ const LANGUAGES = [
 // keyring 已配置时的回显占位符：避免用户每次误以为要重输（保存时跳过该占位值）
 const API_KEY_PLACEHOLDER = '已配置（••••）'
 // 应用版本号：打包时同步更新（设置页「配置」标题右侧淡灰小字展示）
-const APP_VERSION = '1.2.2'
+const APP_VERSION = '1.2.3'
 
 const engine = ref('llm')            // llm(用户 API) | free(免费 API) | machine(机翻)，三选项互斥
 const provider = ref('DeepSeek')
@@ -44,26 +44,13 @@ const apiKey = ref('')
 const concurrency = ref(5)   // 并发数：同时进行的 AI 请求数（1-16，默认 5）
 const scanConcurrency = ref(4)   // 扫描并发数：同时解压/解析的 jar 数（1-16，默认 4）
 const batchSize = ref(null)      // 批量大小：一次请求翻译 N 条（5-60，空 = 厂商默认 25）
-// 吞吐档位（用户诉求：并发 + 批次合并成一个调整项，同时调两个方便）。
-// 档位同时设 concurrency（并发请求数）+ batch_size（每次翻译条数）——高吞吐更快，
-// 但更吃 API 额度/易限流；网络或 API 慢时用低档更稳。
-// 三档吞吐（用户诉求：删「极高」档——12 并发超 DeepSeek 默认 8 易限流，batch 过大
-// 易超 max_tokens 截断反而慢）。高=新的最高档：批次 40（配合 max_tokens 8192 不截断）
-// + 扫描 8（原极高能力），并发锁 8 卡在 DeepSeek 上限内——最快且不触发限流。
-// 修复：high 回到 8/35/6——40 批 + max_tokens 8192 长文本易截断降级（同极高不可用根因），
-// 且用户旧保存值 8/35/6 匹配不上 40 会导致档位回退「中」
-const THROUGHPUT_PRESETS = {
-  low:     { concurrency: 2, batch_size: 12, scan_concurrency: 2 },
-  medium:  { concurrency: 5, batch_size: 25, scan_concurrency: 4 },
-  high:    { concurrency: 8, batch_size: 35, scan_concurrency: 6 },
-}
-const throughput = ref('medium')
-function applyThroughput() {
-  const p = THROUGHPUT_PRESETS[throughput.value] || THROUGHPUT_PRESETS.medium
-  concurrency.value = p.concurrency
-  batchSize.value = p.batch_size
-  scanConcurrency.value = p.scan_concurrency   // 扫描并发并入档位（用户诉求）
-}
+// 吞吐控制（v1.2.3）：预设三档改为**可拖动滑动条**（并发/批次/扫描独立调节）——
+// 点「动态测试吞吐」按当前 API 实际能力探测最优组合，测完滑动条自动定位到准确值。
+// batchSize 保持 null = 厂商默认：滑动条显示兜底 20，未拖动时不写 config（displayBatch）。
+const displayBatch = computed({
+  get: () => batchSize.value ?? 20,
+  set: (v) => { batchSize.value = v },
+})
 const sillyMode = ref(false)     // 胡言乱语模式：搞笑/热梗翻译但忠实原意（设置页开关）
 const cacheDir = ref('')         // 缓存/工作目录（可改到其他盘省 C 盘；空 = 系统默认；重启生效）
 async function pickCacheDir() {
@@ -182,8 +169,9 @@ async function runTest(which) {
   }
 }
 
-// 测试吞吐档位：后端从高到低逐档探测并发/批大小，返回绝对稳定不触发 API 报错的档位。
-// 成功后应用到档位下拉 + 并发/批/扫描三个值（用户诉求：自动选稳定档位让用户舒心运行）。
+// 测试吞吐：后端**动态爬坡探测**该 API 的最优并发/批次（v1.2.3，替代三档分发）——
+// 真实长度样本逐步加压，测出「稳定前提下最高吞吐」组合（RPM 限流/超时现形）。
+// 成功后直接应用数值；下拉档位保留作手动兜底（动态值存进 config 后照常生效）。
 async function runThroughputTest() {
   tpTesting.value = true
   tpResult.value = ''
@@ -195,8 +183,7 @@ async function runThroughputTest() {
           llm: { base_url: baseUrl.value.trim(), model: model.value.trim() },
           api_key: (apiKey.value && apiKey.value !== API_KEY_PLACEHOLDER) ? apiKey.value : undefined }
     const r = await testThroughput(body)
-    if (r.ok && r.preset) {
-      throughput.value = r.preset
+    if (r.ok) {
       concurrency.value = r.concurrency
       batchSize.value = r.batch_size
       scanConcurrency.value = r.scan_concurrency
@@ -294,14 +281,8 @@ onMounted(async () => {
     if (cfg.concurrency) concurrency.value = cfg.concurrency
     // 批量大小回填：未配置保持默认（厂商）
     if (cfg.batch_size) batchSize.value = cfg.batch_size
-    // 吞吐档位回填：按保存的并发/批次匹配最近档位
-    const _c = cfg.concurrency || 5
-    // 修复：档位回填按「并发数」匹配（batch/scan 可能因版本调整与旧保存值不一致——
-    // 精确匹配 concurrency+batch 会导致用户旧值回退到「中」）；并发匹配即认定该档位
-    const _preset = Object.entries(THROUGHPUT_PRESETS)
-      .find(([, v]) => v.concurrency === _c)?.[0]
-    throughput.value = _preset || 'medium'
-    // 扫描并发数回填：未配置时保持默认 4
+    // 吞吐滑动条回填：concurrency/batch_size/scan_concurrency 已在上方按保存值回填
+    // （v1.2.3 移除三档预设，滑动条直接显示保存值；未保存保持默认）
     if (cfg.scan_concurrency) scanConcurrency.value = cfg.scan_concurrency
     // 胡言乱语模式回填：未配置默认关
     if (cfg.silly_mode != null) sillyMode.value = !!cfg.silly_mode
@@ -417,13 +398,23 @@ async function saveAndClose() {
             : '经后端写入本机系统凭据库（keyring），不落配置文件') }}</small>
       </div>
       <div class="field">
-        <label>吞吐档位</label>
-        <select v-model="throughput" @change="applyThroughput">
-          <option value="low">低（稳定 · 并发 2 · 批 12 · 扫描 2）</option>
-          <option value="medium">中（均衡 · 并发 5 · 批 25 · 扫描 4）</option>
-          <option value="high">高（较快 · 并发 8 · 批 35 · 扫描 6）</option>
-        </select>
-        <small class="sub">同时调「并发请求数 + 每次翻译条数 + 扫描并发数」：高档吞吐更快但更吃 API 额度/磁盘/易限流；网络或 API 慢时用低档更稳</small>
+        <label>吞吐调节</label>
+        <div class="slider-row">
+          <span class="slider-name">并发数</span>
+          <input type="range" v-model.number="concurrency" min="1" max="16" step="1" class="slider">
+          <span class="slider-val">{{ concurrency }}</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-name">每次批条数</span>
+          <input type="range" v-model.number="displayBatch" min="4" max="60" step="1" class="slider">
+          <span class="slider-val">{{ displayBatch }}</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-name">扫描并发</span>
+          <input type="range" v-model.number="scanConcurrency" min="1" max="8" step="1" class="slider">
+          <span class="slider-val">{{ scanConcurrency }}</span>
+        </div>
+        <small class="sub">拖动调节并发/批次/扫描；点下方「动态测试吞吐」按当前 API 实际能力自动探测最优组合（真实文本样本 · 约需 1 分钟），测完滑动条自动定位——测出的档位即可满速运行</small>
       </div>
       <div class="field">
         <label>胡言乱语模式</label>
@@ -437,7 +428,7 @@ async function saveAndClose() {
           {{ testing ? '测试中…' : '测试连接' }}
         </button>
         <button class="btn" :disabled="tpTesting" @click="runThroughputTest">
-          <span v-if="tpTesting" class="spinner"></span>{{ tpTesting ? '测试中……' : '测试吞吐档位' }}
+          <span v-if="tpTesting" class="spinner"></span>{{ tpTesting ? '测试中……' : '动态测试吞吐' }}
         </button>
         <span v-if="testResult" class="test-result" :class="testOk ? 'ok' : 'fail'">
           {{ testOk ? '✓ 连接成功' : '✗ ' + testResult }}
@@ -573,6 +564,14 @@ async function saveAndClose() {
 
 <style scoped>
 .ver { font-size: 11px; font-weight: 400; color: var(--text-dim); margin-left: 10px; letter-spacing: .05em; vertical-align: middle; }
+/* 吞吐滑动条（v1.2.3 预设改滑动条）：方形滑块 + 硬边，测试完自动定位 */
+.slider-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.slider-row:last-child { margin-bottom: 0; }
+.slider-name { flex: 0 0 76px; font-size: 13px; color: var(--text-dim); }
+.slider { flex: 1; -webkit-appearance: none; appearance: none; height: 6px; background: #d5cdb8; border: none; border-radius: 0; outline: none; }
+.slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; background: var(--accent); border: 2px solid var(--accent); box-shadow: 2px 2px 0 rgba(47,80,56,.45); cursor: pointer; border-radius: 0; }
+.slider::-moz-range-thumb { width: 14px; height: 14px; background: var(--accent); border: 2px solid var(--accent); cursor: pointer; border-radius: 0; }
+.slider-val { flex: 0 0 30px; text-align: right; font-size: 14px; font-weight: 700; color: var(--accent); }
 /* 测试连接：按钮 + 结果横排，结果绿=成功 / 红=失败 */
 .test-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .test-result { font-size: 13px; }

@@ -647,60 +647,84 @@ async def test_throughput(payload: dict = None):
         return {"ok": False, "message": "base_url/model 未配置"}
 
     from app.translate.llm import LLMClient
-    # 档位候选（与前端 THROUGHPUT_PRESETS 对齐）：并发 / 批大小 / 扫描并发
-    presets = {
-        "high":   {"concurrency": 8, "batch_size": 35, "scan_concurrency": 6},
-        "medium": {"concurrency": 5, "batch_size": 25, "scan_concurrency": 4},
-        "low":    {"concurrency": 2, "batch_size": 12, "scan_concurrency": 2},
-    }
-    # 修复（recheck）：**从高到低定位 API 能承受的最高档（摸到上限）**——high 成功说明
-    # 上限≥high 直接返回；high 失败才降档试 medium/low。**每档 2 轮探测**（各 8 条短句），
-    # 两轮都无 failed 才判该档稳定（限流是概率性的，一次抖动不误判整档过载）。
-    # 每轮 30s 超时上限——translate_batch 内部有重试链，API 不可达时拖数分钟会让前端
-    # 「测试中」像卡死，超时直接判该轮失败。
-    probe = [f"吞吐探测 {i}: Hello World" for i in range(8)]
+    # ===== 动态爬坡探测（v1.2.3：替代三档分发）=====
+    # 不再用 high/medium/low 硬编码 + 短句探测（短句又小又快，测不出 RPM 限流与真实
+    # 延迟 → 百炼等平台测出「假 high 档」，实际跑长文本 batch 露馅）。
+    # 新方法：**从保守起点逐步加压**，每档用**真实长度样本**连续跑批，任何一批
+    # 429/超时/failed → 该档判不稳（RPM 限流在此现形）→ 摸到稳定上限 → 取 0.7 余量。
+    # 探测文本：短选项/中等句/长描述混合，贴近语言文件实际长度分布。
+    probe = [
+        "Sprint", "Back", "Enabled", "Silk Touch",                 # 短选项
+        "Use this item to light up dark areas in your base",       # 中等句
+        "Shows the current weather and time on the HUD overlay",   # 中等句
+        "This enchanting table allows you to apply powerful enchantments to your gear",  # 长句
+        "Right click on a block to place it, sneak and click to open the configuration screen",
+        "Press the key bound in Controls to toggle the minimap visibility while playing",
+        "Warning: this option will reset all settings to their default values",
+        "Each tool has its own durability and can be repaired on an anvil with the matching material",
+    ]
     results: dict = {}
-    chosen = None
-    for name in ("high", "medium", "low"):
-        p = presets[name]
+
+    async def _probe_ok(concurrency: int, batch_size: int, rounds: int = 1,
+                        timeout: float = 60) -> tuple[bool, str]:
+        """以 (并发, 批) 发 rounds 批真实样本，全部干净（无 failed/429/超时）返回 True。
+
+        每批结束关闭 httpx client（防连接堆积）；batch 内 429/超时被 translate_batch
+        降级链捕获进 meta["failed"]（v1.2.3 深度封顶后失败子集不会再无限重试放大）。"""
         eng = None
         try:
             eng = LLMClient(base_url, api_key, model,
-                            concurrency=p["concurrency"], batch_size=p["batch_size"])
-            rounds: list[tuple[float, int, str]] = []
-            for _round in range(2):
+                            concurrency=max(1, concurrency), batch_size=max(1, batch_size))
+            for _r in range(rounds):
                 _meta: dict = {}
-                t0 = _t.time()
-                await asyncio.wait_for(
-                    eng.translate_batch(probe, "zh_cn", meta=_meta), timeout=30)
-                rounds.append((_t.time() - t0, len(_meta.get("failed") or set()),
-                               str(_meta.get("kind", "ok"))))
-            ok = all(f == 0 for _, f, _ in rounds)
-            results[name] = {"ok": ok,
-                             "failed": sum(f for _, f, _ in rounds),
-                             "elapsed": round(sum(r for r, _, _ in rounds), 1),
-                             "kind": rounds[-1][2]}
-            if ok and chosen is None:
-                chosen = name
-        except asyncio.TimeoutError:
-            results[name] = {"ok": False, "failed": len(probe) * 2, "elapsed": 30,
-                             "kind": "timeout", "error": "超时（30s）"}
+                try:
+                    await asyncio.wait_for(
+                        eng.translate_batch(probe, "zh_cn", meta=_meta), timeout=timeout)
+                except asyncio.TimeoutError:
+                    return False, "timeout"
+                _failed = _meta.get("failed") or set()
+                _kind = str(_meta.get("kind", "other"))
+                if _failed or _kind not in ("ok", "other"):
+                    return False, _kind or "failed"   # ratelimit/timeout/network/server/... → 不稳
+            return True, "ok"
         except Exception as e:
-            results[name] = {"ok": False, "failed": len(probe) * 2, "elapsed": 0,
-                             "kind": "exception", "error": str(e)[:100]}
+            return False, f"exception:{str(e)[:60]}"
         finally:
             if eng is not None:
                 try:
-                    await eng.aclose()   # 修复（recheck）：每次探测关闭 httpx client，防连接堆积
+                    await eng.aclose()
                 except Exception:
                     pass
-    if chosen is None:
-        return {"ok": False, "message": "当前 API 各档位均不稳定或不可用，请先测试连接", "results": results}
-    p = presets[chosen]
-    return {"ok": True, "preset": chosen,
-            "concurrency": p["concurrency"], "batch_size": p["batch_size"],
-            "scan_concurrency": p["scan_concurrency"],
-            "message": f"建议档位：{chosen}（并发 {p['concurrency']} · 批 {p['batch_size']} · 扫描 {p['scan_concurrency']}）",
+
+    # 1) 批大小上限：固定并发 2，批递增（受输出 token 上限 / 超时约束）
+    batch_ok = 12
+    for bs in (12, 16, 24, 32):
+        ok, why = await _probe_ok(2, bs, rounds=1)
+        results[f"b{bs}"] = {"ok": ok, "kind": why}
+        if ok:
+            batch_ok = bs
+        else:
+            break   # 批过大失败 → 该档为上限，不再加大
+    batch_opt = max(8, int(batch_ok * 0.7))   # 留 0.7 余量：实际长文本 batch 不触发超限
+
+    # 2) 并发上限：固定批=batch_opt，并发递增（RPM 限流 → 429 在该档现形）
+    concurrency_ok = 2
+    for cc in (2, 3, 4, 6, 8, 10):
+        ok, why = await _probe_ok(cc, batch_opt, rounds=2)   # 2 轮：限流是概率性，2 轮都干净才稳
+        results[f"c{cc}"] = {"ok": ok, "kind": why}
+        if ok:
+            concurrency_ok = cc
+        else:
+            break
+    scan_ok = min(6, max(1, concurrency_ok))
+    if concurrency_ok < 2 or batch_opt < 8:
+        return {"ok": False, "message": "当前 API 不稳定（最保守档位也失败），请先测试连接",
+                "results": results}
+    return {"ok": True, "preset": "auto",
+            "concurrency": concurrency_ok, "batch_size": batch_opt,
+            "scan_concurrency": scan_ok,
+            "message": (f"动态探测最优：并发 {concurrency_ok} · 批 {batch_opt} · 扫描 {scan_ok}"
+                        f"（批上限 {batch_ok}，取 0.7 余量，实测满速）"),
             "results": results}
 
 

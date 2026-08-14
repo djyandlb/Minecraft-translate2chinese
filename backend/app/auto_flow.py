@@ -17,6 +17,7 @@ map 委托 maps_flow。原 jar/存档只读，一切写操作只在 work 副本�
 """
 import asyncio
 import json
+import random
 import re
 import shutil
 import threading
@@ -581,12 +582,16 @@ class AutoFlow:
         return results, meta
 
     async def _wait_network_retry(self, translate_fn, texts: list[str],
-                                  reasons: list[str]) -> list | None:
-        """网络/限流失败：等待网络恢复后重试整批（用户诉求——网络超时不记 failed、不放弃，
-        转圈提示条 + 退避等待，直到网络恢复或用户取消）。返回成功译文列表；取消返回 None。
+                                  reasons: list[str], max_attempts: int = 4) -> list | None:
+        """网络/限流失败：退避等待后重试失败子集（v1.2.3 封顶，不再无限等待卡住）。
+
+        退避 3s→6s→12s→24s 加抖动，封顶 max_attempts 次（≈45s）后返回 None——调用方
+        （_flush）据此明确记 failed（服务不可用），不再无限假装网络等待（用户「1.5h 几千条」
+        根因之一：429/超时陷入无限退避）。返回成功译文列表；用户取消 / 封顶返回 None。
         """
         wait = 3
-        while not self.state.cancelled:
+        attempts = 0
+        while not self.state.cancelled and attempts < max_attempts:
             await self._wait_if_paused()   # 修复：网络等待也响应暂停（暂停语义不失效）
             self.state.progress.append({"status": "translating", "count": len(texts),
                                         "note": f"网络超时，等待网络恢复（{wait}s 后重试）…"})
@@ -614,12 +619,13 @@ class AutoFlow:
                           else (getattr(self.engine, "_fatal_error", None) or "API Key 无效或无权限"))
                     raise ValueError(f"翻译失败：{_f}")
                 if not any(t in _failed for t in texts):
-                    return got   # 网络恢复，整批翻译成功（一条都不许跳过）
+                    return got   # 网络恢复，失败子集整批重试成功（一条都不许跳过）
             except ValueError:
                 raise
             except Exception:
                 pass
-            wait = min(wait * 2, 30)   # 退避封顶 30s，持续等待直至网络恢复
+            attempts += 1
+            wait = min(int(wait * 2 * random.uniform(0.8, 1.2)), 30)   # 抖动退避封顶 30s
         return None
 
     async def _translate_batch_pipeline(self, items, translate_fn, batch_size: int = 20,
@@ -677,18 +683,24 @@ class AutoFlow:
             if _fatal or (translated_list is None and "未配置" in (_batch_err or "")):
                 raise ValueError(f"翻译失败：{_fatal or _batch_err}")
             # 错误分类（修复「无论怎样都显示网络超时」）：只有可恢复错误（timeout/network/
-            # ratelimit/server 5xx）才等网络恢复重试；rejected（4xx 配置/数据错）/other 是
+            # ratelimit/server 5xx）才攒批重试；rejected（4xx 配置/数据错）/other 是
             # 不可恢复，明确记 failed 带原因，绝不假装网络超时无限等待。
             _failed = (_meta.get("failed") if _meta
-                       else (getattr(self.engine, "_batch_failed_texts", ()) if self.engine else ()))
+                       else (set(getattr(self.engine, "_batch_failed_texts", ())) if self.engine else set()))
             _kind = (_meta.get("kind") if _meta
                      else (getattr(self.engine, "_last_error_kind", "other") if self.engine else "other"))
             _retryable = _kind in ("timeout", "network", "ratelimit", "server")
-            _has_fail = (_failed and any(t in _failed for t in texts))
-            if (translated_list is None and _retryable) or (_has_fail and _retryable):
-                # 先连通性检查：网络通但请求失败 → 不是网络问题（API 服务/配置），明确报错，
-                # 不无限「等待网络恢复」假装网络超时（用户反馈「无论怎样都显示网络超时」根因）。
-                # 无连通性检查能力（mock/旧引擎）→ 默认走网络等待重试（兼容测试/降级）
+            _failed_set = set(_failed or ())
+            _has_fail = bool(_failed_set and any(t in _failed_set for t in texts))
+            if _retryable and (_has_fail or translated_list is None):
+                # v1.2.3：失败**子集**攒批重试（封顶）——不再整批断网无限等待、不假装网络超时。
+                # 失败子集：整批异常取全 pending；部分失败取 _failed 命中的条目。
+                if translated_list is None:
+                    retry_pos = list(range(len(pending)))
+                else:
+                    retry_pos = [k for k, p in enumerate(pending) if p["text"] in _failed_set]
+                # 连通性检查一次：网络通但请求失败 → 服务/配置问题，攒批重试；
+                # 无连通性检查能力（mock/旧引擎）→ 走断网等待重试（兼容测试/降级）
                 _online = False
                 if hasattr(self.engine, "check_connectivity"):
                     try:
@@ -696,35 +708,90 @@ class AutoFlow:
                     except Exception:
                         _online = False
                 if not _online:
-                    # 真断网 → 等网络恢复（用户铁律：网络不好等恢复再继续，不跳过不放弃）
+                    # 真断网 → 退避重试（_wait_network_retry 内部封顶 max_attempts，不再无限等待）
                     _note = {"timeout": "网络超时", "network": "网络连接失败",
                              "ratelimit": "请求被限流", "server": "翻译服务暂时不可用"}.get(_kind, "网络中断")
                     self.state.progress.append({"status": "translating", "count": len(pending),
                                                 "note": f"{_note}，等待网络恢复…"})
                     self.store.save(self.state)
-                    translated_list = await self._wait_network_retry(
-                        translate_fn, texts, [p.get("reason", "") for p in pending])
-                    if translated_list is None:
-                        return   # 用户取消，中断整个流程
-                    _batch_err = ""
-                    # 修复（recheck #1）：网络重试成功后用**新鲜失败集**——重试调用成功时引擎
-                    # _batch_failed_texts 已刷新（AI 合法保留原文的条目不在其中），若沿用首次
-                    # 失败的旧 _failed，会把「重试成功后 AI 合法保留原文」误判真失败 → 缺键+假 failed
-                    _meta = None
-                    _failed = (set(getattr(self.engine, "_batch_failed_texts", ())) or None
-                               if self.engine else None)
-                    _kind = getattr(self.engine, "_last_error_kind", "other") if self.engine else "other"
+                    _retried = await self._wait_network_retry(
+                        translate_fn, [pending[k]["text"] for k in retry_pos],
+                        [pending[k].get("reason", "") for k in retry_pos])
+                    if _retried is None:
+                        if self.state.cancelled:
+                            return   # 用户取消，中断整个流程
+                        # 封顶仍失败 → 明确记 failed（不无限假装网络等待）
+                        _batch_err = _batch_err or "网络持续不可用，多次重试仍失败"
+                        _failed = {pending[k]["text"] for k in retry_pos}
+                        _has_fail = True
+                        if translated_list is None:
+                            translated_list = [p["text"] for p in pending]
+                        for k in retry_pos:
+                            translated_list[k] = pending[k]["text"]
+                    else:
+                        # 网络恢复，失败子集整批重试成功
+                        if translated_list is None:
+                            translated_list = [p["text"] for p in pending]
+                        for k, tr in zip(retry_pos, _retried):
+                            translated_list[k] = tr
+                        _batch_err = ""
+                        _failed = set()
+                        _has_fail = False
                 else:
-                    # 网络连通但翻译请求失败 → 不是网络超时，明确记 failed（服务/配置问题）
-                    if translated_list is None:
-                        translated_list = [p["text"] for p in pending]
-                    _batch_err = (_batch_err or
-                                  f"网络连通正常但翻译服务异常（{_kind}），请检查 API 地址/模型配置")
+                    # 网络连通：失败子集攒批重试（_MAX_FLUSH_RETRY 封顶，消灭无限重试卡住）
+                    _MAX_FLUSH_RETRY = 2
+                    for _attempt in range(_MAX_FLUSH_RETRY):
+                        if not retry_pos:
+                            break
+                        _rp = [pending[k] for k in retry_pos]
+                        _r_texts = [p["text"] for p in _rp]
+                        _r_reasons = [p.get("reason", "") for p in _rp]
+                        try:
+                            _retried, _r_meta = await translate_fn(_r_texts, _r_reasons)
+                        except Exception:
+                            _retried, _r_meta = None, None
+                        if _retried is None:
+                            break
+                        if translated_list is None:
+                            translated_list = [p["text"] for p in pending]
+                        _r_failed = set((_r_meta or {}).get("failed") or ()) if _r_meta else set()
+                        for k, tr in zip(retry_pos, _retried):
+                            translated_list[k] = tr
+                        retry_pos = [k for k in retry_pos if pending[k]["text"] in _r_failed]
+                    # 封顶后仍失败 → 明确记 failed（服务不稳定），不无限假装网络等待
+                    if retry_pos:
+                        _batch_err = _batch_err or "多次重试仍失败（服务不稳定）"
+                        _failed = {pending[k]["text"] for k in retry_pos}
+                        _has_fail = True
+                    else:
+                        _batch_err = ""
+                        _failed = set()
+                        _has_fail = False
             elif translated_list is None or _has_fail:
                 # 不可恢复失败（4xx 配置/数据错误等）：不假装网络超时，明确记 failed 带原因
                 if translated_list is None:
                     translated_list = [p["text"] for p in pending]
                 _batch_err = _batch_err or f"请求被拒绝（{_kind}），请检查 API 配置"
+            # 运行时自适应（v1.2.3 熔断语义）：连续可恢复失败（限流/超时/网络/server）≥3 次
+            # → 自动降并发/批次（保护慢 API 不被高并发反复打挂「卡死」，适配所有 API）。
+            # 降档后重置计数，需再攒 3 次才再降（防震荡穿底）；恢复由「动态测试吞吐」重新校准。
+            if isinstance(self.engine, LLMClient):
+                _cc = getattr(self.engine, "_consec_fails", 0)
+                if _has_fail and _retryable:
+                    self.engine._consec_fails = _cc + 1
+                else:
+                    self.engine._consec_fails = 0
+                if self.engine._consec_fails >= 3:
+                    _cur_c = getattr(self.engine, "concurrency", 5) or 5
+                    _cur_b = getattr(self.engine, "batch_size", 20) or 20
+                    _new_c = max(1, _cur_c // 2)
+                    _new_b = max(4, _cur_b // 2)
+                    if _new_c != _cur_c or _new_b != _cur_b:
+                        self.set_throughput(concurrency=_new_c, batch_size=_new_b)
+                        self.state.progress.append({"status": "translating", "count": len(pending),
+                                                    "note": f"当前 API 限流/超时频繁，已自动降低并发（{_cur_c}→{_new_c} · 批 {_cur_b}→{_new_b}）"})
+                        self.store.save(self.state)
+                    self.engine._consec_fails = 0
             # 防 zip 截断：引擎返回条数不足 pending 时，尾部条目静默丢失会让
             # done<total、进度卡 <100%、产物缺条目（审查 P1-2）→ 按原文补足并计 failed
             if len(translated_list) != len(pending):
@@ -1043,89 +1110,56 @@ class AutoFlow:
         # 审查后处理闭环（用户诉求）：审查不合格（bad_items）+ 审查通过但纯英文该翻（force_retrans）。
         # —— 第一轮：**相同 prompt 重跑一遍**（不直接 forced，可能是批量/偶发偷懒或截断）：
         #    结果不同且全量中文 → 算过采用；仍原文/英文 → 进强制翻译。
+        # 审查后处理闭环（v1.2.3 裁剪：串行往返 6+N → 4）。合并原「R1 相同 prompt 重跑
+        # (forced=False) + R2 forced」为**一轮 forced**——forced=True 是超集（追加「宁可
+        # 翻译不要保留」，仍豁免专名/命令/代码标识），对不稳定 API 少一轮串行请求的收益
+        # 大于原「同 prompt 重跑」的边际收益。
         retrans_items = bad_items + force_retrans
+        _final: list[dict] = []
         if retrans_items:
-            _need_forced: list[dict] = []
-            _pass1: list[tuple[dict, str]] = []
-            _r1net = False
+            _net = False
             try:
-                _t1 = [it["source"] for it in retrans_items]
-                _rs1 = [bad_keys.get(it["key"], "") for it in retrans_items]
-                _g1, _m1 = await self._engine_translate(_t1, _rs1, forced=False)
-                _m1f = (_m1 or {}).get("failed") or set()
-                _m1k = (_m1 or {}).get("kind") or "other"
-                _r1net = (_m1k in ("timeout", "network", "ratelimit", "server")
-                          or any(x in _m1f for x in _t1))
+                _t = [it["source"] for it in retrans_items]
+                _rs = [bad_keys.get(it["key"], "译文质量不合格，请翻译成目标语言")
+                       for it in retrans_items]
+                _g, _m = await self._engine_translate(_t, _rs, forced=True)
+                _mf = (_m or {}).get("failed") or set()
+                _mk = (_m or {}).get("kind") or "other"
+                _net = (_mk in ("timeout", "network", "ratelimit", "server")
+                        or any(x in _mf for x in _t))
             except Exception:
-                _g1 = [it["source"] for it in retrans_items]
-                _r1net = True   # 重跑异常：按网络失败处理，进强制轮
-            # 重跑翻出译文的条目（tr1 != source）**再送审查**（用户诉求「全量中文且审查算过才算过」）：
-            # 否则截断译文（如「（祭」）含汉字会被 _is_target_lang 误判 pass（用户实测长文本截断）
-            _cand1 = [(it, tr1) for it, tr1 in zip(retrans_items, _g1)
-                      if not _r1net and tr1 != it["source"]]
-            _c1issues = {}
-            if _cand1:
-                _c1pairs = [{"key": it["key"], "source": it["source"], "translated": tr1}
-                            for it, tr1 in _cand1]
-                try:
-                    _c1issues = {iss["key"]: iss.get("reason", "") for iss in await
-                                 review_translations(self.engine, _c1pairs, self.req.target_lang)}
-                except Exception:
-                    _c1issues = {}
-            for it, tr1 in zip(retrans_items, _g1):
-                if _r1net:
-                    _need_forced.append(it)
-                elif tr1 != it["source"] and self._is_target_lang(tr1, self.req.target_lang) \
-                        and it["key"] not in _c1issues:
-                    _pass1.append((it, tr1))   # 不同、含中文、审查过 → 算过
-                else:
-                    _need_forced.append(it)    # 相同/仍原文/英文/审查不过 → 进强制
-            for it, tr in _pass1:
-                self._write_reviewed(it, tr)
-            # —— 第二轮：强制翻译（forced）→ 再审查一次：过 → 输出；不过 → 终审（终审也尽力输出）
-            if _need_forced:
-                _net2 = False
-                try:
-                    _t2 = [it["source"] for it in _need_forced]
-                    _rs2 = [bad_keys.get(it["key"], "译文仍是原文，必须翻译成目标语言")
-                            for it in _need_forced]
-                    _g2, _m2 = await self._engine_translate(_t2, _rs2, forced=True)
-                    _m2f = (_m2 or {}).get("failed") or set()
-                    _m2k = (_m2 or {}).get("kind") or "other"
-                    _net2 = (_m2k in ("timeout", "network", "ratelimit", "server")
-                             or any(x in _m2f for x in _t2))
-                except Exception:
-                    _g2 = [it["source"] for it in _need_forced]
-                    _net2 = True
-                # forced 结果再审查（对翻出译文的条目）
-                _f2pairs = [{"key": it["key"], "source": it["source"], "translated": tr2}
-                            for it, tr2 in zip(_need_forced, _g2) if tr2 != it["source"]]
-                _f2issues = {}
-                if _f2pairs:
-                    try:
-                        _f2issues = {iss["key"]: iss.get("reason", "") for iss in await
-                                     review_translations(self.engine, _f2pairs, self.req.target_lang)}
-                    except Exception:
-                        _f2issues = {}
-                for it, tr2 in zip(_need_forced, _g2):
-                    if _net2:
-                        # 网络/服务失败：初次有真译文（目标语言）保留写回；否则终审
-                        if it["translated"] != it["source"] \
-                                and self._is_target_lang(it["translated"], self.req.target_lang):
-                            self._write_reviewed(it, it["translated"])
-                        else:
-                            await self._final_judge_leak(it, bad_keys.get(it["key"], "翻译服务异常"))
-                        continue
-                    # 多次翻译都是原文 → 终审
-                    if tr2 == it["source"]:
-                        await self._final_judge_leak(it, bad_keys.get(it["key"], "多次翻译仍原文"))
-                        continue
-                    # forced 翻出译文：全量中文且审查过 → 输出；否则 → 终审（终审尽力输出）
-                    if self._is_target_lang(tr2, self.req.target_lang) \
-                            and it["key"] not in _f2issues:
-                        self._write_reviewed(it, tr2)
+                _g = [it["source"] for it in retrans_items]
+                _net = True   # 重翻异常：按网络失败处理
+            if _net:
+                # 网络/服务失败：初次有真译文（目标语言）保留写回；否则进终审
+                for it, tr in zip(retrans_items, _g):
+                    if it["translated"] != it["source"] \
+                            and self._is_target_lang(it["translated"], self.req.target_lang):
+                        self._write_reviewed(it, it["translated"])
                     else:
-                        await self._final_judge_leak(it, bad_keys.get(it["key"], "强制翻译仍审查不过"))
+                        _final.append(it)
+            else:
+                # forced 翻出译文的条目**再送审查**（用户诉求「全量中文且审查算过才算过」）：
+                # 否则截断译文（如「（祭」）含汉字会被 _is_target_lang 误判 pass（长文本截断）
+                _cand = [(it, tr) for it, tr in zip(retrans_items, _g) if tr != it["source"]]
+                _cissues = {}
+                if _cand:
+                    _cpairs = [{"key": it["key"], "source": it["source"], "translated": tr}
+                               for it, tr in _cand]
+                    try:
+                        _cissues = {iss["key"]: iss.get("reason", "") for iss in await
+                                    review_translations(self.engine, _cpairs, self.req.target_lang)}
+                    except Exception:
+                        _cissues = {}
+                for it, tr in zip(retrans_items, _g):
+                    if tr != it["source"] and self._is_target_lang(tr, self.req.target_lang) \
+                            and it["key"] not in _cissues:
+                        self._write_reviewed(it, tr)      # 翻出译文且审查过 → 输出
+                    else:
+                        _final.append(it)                 # 仍原文/英文/审查不过 → 终审
+            # 终审批量（v1.2.3）：一次 forced 批量终审（替代原逐条 _final_judge_leak 的 N 次单发）
+            if _final:
+                await self._final_judge_batch(_final, bad_keys)
         self.memory.save()
         self.store.save(self.state)
 
@@ -1472,42 +1506,51 @@ class AutoFlow:
         if _mem_changed:
             self.memory.save()
 
-    async def _final_judge_leak(self, it: dict, reason: str = "") -> None:
-        """终审（用户诉求：保证覆盖率，不冷酷 failed）——做**最后一次终审翻译**（forced）：
-        只要翻出非原文的目标语言译文就**输出写回**（人类对语言即使略生硬也能读懂）；
-        真翻不出（仍原文/纯英文）才按合理保留 / 漏翻处理。
-        合理保留仍写回原文到 sink（防 audit_invariants 误报「缺译文」双计 failed）。"""
-        src_full = (it.get("source") or "")
-        src = src_full[:50]
-        reason = (reason or "").strip() or "译文质量不合格"
-        sink = it.get("sink")
-        if sink is None:
-            sink = it["sink"] = self.by_mod.setdefault(it.get("modid", ""), {})
-        # 终审翻译：forced 再试一次，翻出非原文的目标语言译文 → 输出写回（覆盖率优先）
-        final_tr = ""
-        try:
-            _r, _m = await self._engine_translate([src_full], [reason], forced=True)
-            _rt = _r[0] if _r else ""
-            if _rt and _rt != src_full and self._is_target_lang(_rt, self.req.target_lang):
-                final_tr = _rt
-        except Exception:
-            final_tr = ""
-        if final_tr:
-            self._write_reviewed(it, final_tr)
+    async def _final_judge_batch(self, items: list[dict], bad_keys: dict) -> None:
+        """终审批量（v1.2.3 性能修复）：N 条漏翻**一次** forced 批量终审，替代原
+        _final_judge_leak 逐条单发（慢 API 下每条一个请求 → 串行放大）。落败路径
+        （合理保留不 failed / 该翻没翻记 failed + 记忆/词汇表）逐条照搬原语义。"""
+        if not items:
             return
-        sink[it["key"]] = src_full
-        # 修复（recheck）：终审合理保留也要过**规则关**——`_is_legit_keep_by_source`（纯占位符/
-        # 无字母/代码标识等确定翻不动）优先判定；AI 的 reason 只作补充。否则 AI 把「该翻的
-        # 界面英文」reason 写成「专有名词保留」就误放行（用户实测纯英文残留的根因）。
-        if _is_legit_keep_by_source(src_full) or _is_legit_keep(reason):
-            # 合理保留（规则确认翻不动 / 命令/代码标识/路径）→ 提示不 failed，且记录「保留」
-            # 决策到记忆 + 词汇表：后续同词直接沿用保留，不再反复 AI 判断（项目级统一）
-            self.failures.append({"text": src, "reason": f"保留原文：{reason}"})
-            self.memory.set(src_full, self.req.target_lang, src_full)
-            self._add_project_term(src_full, src_full)
-        else:
-            self.state.failed += 1
-            self.failures.append({"text": src, "reason": f"漏翻未译出：{reason}"})
+        _srcs = [it.get("source") or "" for it in items]
+        _reasons = [bad_keys.get(it["key"], "译文质量不合格") for it in items]
+        _g: list[str] = []
+        _net = False
+        try:
+            _g, _m = await self._engine_translate(_srcs, _reasons, forced=True)
+            _mf = (_m or {}).get("failed") or set()
+            _mk = (_m or {}).get("kind") or "other"
+            _net = (_mk in ("timeout", "network", "ratelimit", "server")
+                    or any(x in _mf for x in _srcs))
+        except Exception:
+            _g = list(_srcs)
+            _net = True
+        for it, tr in zip(items, _g):
+            src_full = it.get("source") or ""
+            src = src_full[:50]
+            reason = (bad_keys.get(it["key"], "") or "").strip() or "译文质量不合格"
+            sink = it.get("sink")
+            if sink is None:
+                sink = it["sink"] = self.by_mod.setdefault(it.get("modid", ""), {})
+            # 尽力输出：翻出非原文的目标语言译文 → 输出写回（覆盖率优先）
+            if (not _net) and tr and tr != src_full \
+                    and self._is_target_lang(tr, self.req.target_lang):
+                self._write_reviewed(it, tr)
+                continue
+            sink[it["key"]] = src_full
+            # 合理保留也要过**规则关**（_is_legit_keep_by_source 优先 + _is_legit_keep 补充）——
+            # 否则 AI 把「该翻的界面英文」reason 写成「专有名词保留」就误放行（纯英文残留根因）
+            if _is_legit_keep_by_source(src_full) or _is_legit_keep(reason):
+                self.failures.append({"text": src, "reason": f"保留原文：{reason}"})
+                self.memory.set(src_full, self.req.target_lang, src_full)
+                self._add_project_term(src_full, src_full)
+            else:
+                self.state.failed += 1
+                self.failures.append({"text": src, "reason": f"漏翻未译出：{reason}"})
+
+    async def _final_judge_leak(self, it: dict, reason: str = "") -> None:
+        """终审单条（v1.2.3 保留为薄包装，兼容外部调用）：委托 _final_judge_batch。"""
+        await self._final_judge_batch([it], {it["key"]: reason})
 
     def _save_report(self) -> None:
         """任务收尾生成翻译报告（通用所有模式：整合包/mod/光影；地图由 maps/flow 单独生成）。

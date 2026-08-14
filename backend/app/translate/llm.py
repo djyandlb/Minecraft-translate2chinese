@@ -9,6 +9,7 @@
 构造签名与任务 8 的 create_engine 调用匹配。
 """
 import asyncio
+import random
 import re
 from typing import Callable
 
@@ -36,6 +37,16 @@ _SILLY_NOTE = ("【胡言乱语模式】本条翻译用搞笑、玩梗、网络�
 
 # 助词折叠白名单：含连续重复格助词的合法成语（折叠前先保护，避免误伤）
 _PARTICLE_IDIOMS = ("的的确确", "了了分明", "地地道道")
+
+# 降级链深度封顶（v1.2.3 性能修复）：请求失败**不再无限对半切批**（原 25 条最坏
+# 1+2+4+8+16≈31 次请求，不稳定 API 触发指数爆炸 → 1.5h 才几千条的根因）。
+# - 网络类错误（timeout/network/ratelimit/server）：瞬态，切批无助于定位毒丸，最多切 1 层；
+# - 非网络/整批格式不符：有界切批定位毒丸（深度 3，最坏 1+2+4+8=15 次）；
+# - 深度封顶后剩余整块逐条记 ctx["failed"]（原始 source 文本，语义不变），
+#   交上层 _translate_batch_pipeline 攒批重试（不破坏 meta 协议）。
+_NET_KINDS = ("timeout", "network", "ratelimit", "server")
+_MAX_NET_SPLIT_DEPTH = 1
+_MAX_SPLIT_DEPTH = 3
 
 
 def build_tagged_texts(texts: list[str]) -> str:
@@ -150,6 +161,10 @@ class LLMClient:
         # 鉴权致命错误（401/403）：置为非 None 后整批回原文并停止降级链递归，
         # translate_batch 结束后抛带文案异常（修复：失败指数放大 + 静默回原文）
         self._fatal_error: str | None = None
+        # 运行时自适应（v1.2.3 熔断语义）：连续请求失败计数（429/超时/网络/server），
+        # auto_flow._flush 据此自动降并发/批次——保护慢 API 不被高并发拖死（适配所有 API）。
+        # 主请求成功清零；请求失败 +1。
+        self._consec_fails: int = 0
 
     def _err_kind(self, exc: Exception) -> str:
         """异常分类（修复：4xx/5xx 曾一律归 other → 被 auto_flow 当网络超时无限等待）。
@@ -313,14 +328,18 @@ class LLMClient:
         return results
 
     async def _request_chunk(self, client, todo, masked_list, markers_list, target_lang, results,
-                             ctx: dict, forced: bool = False, feedback: list[str] | None = None):
-        """对一批 todo 发一次请求；失败则对半切批重试，最终逐条。
+                             ctx: dict, forced: bool = False, feedback: list[str] | None = None,
+                             depth: int = 0):
+        """对一批 todo 发一次请求；失败则有界切批重试（v1.2.3 深度封顶），最终逐条。
 
         todo 元素为 (原索引, 原文)，masked_list/markers_list 为
         (原索引, 脱敏文本/标记列表)，三者按块内顺序对齐。
         forced=True：prompt 追加「界面文本必须翻译」指令（AI 审查漏翻重翻用）。
         feedback：与 texts 全量对齐的不合格原因；对命中条目标注「上次审查不合格」，
         让 AI 针对原因修正（审查反馈重翻）。
+        depth：降级切批深度（v1.2.3）。网络类错误 _MAX_NET_SPLIT_DEPTH=1 层，
+        非网络/格式不符 _MAX_SPLIT_DEPTH=3 层；封顶后剩余整块记 ctx["failed"]
+        交上层攒批重试，不再递归（消灭指数爆炸）。
         """
         if ctx["fatal"]:
             return   # 已遇鉴权致命错误：整批回原文，停止递归切批
@@ -415,10 +434,13 @@ class LLMClient:
                 return
             ctx["kind"] = self._err_kind(e)   # 修复：batch 级失败也更新错误类别（否则错误分类漂移）
             out = None
+            self._consec_fails = getattr(self, "_consec_fails", 0) + 1   # 运行时自适应计数
         except Exception as e:
             ctx["kind"] = self._err_kind(e)   # 修复：同上
             out = None
+            self._consec_fails = getattr(self, "_consec_fails", 0) + 1   # 运行时自适应计数
         if out is not None:
+            self._consec_fails = 0   # 主请求成功：清零（稳定信号，自适应降档据此恢复窗口）
             # 修复：on_usage 回调（含落盘）异常只记日志，不影响已成功的翻译结果
             if self.on_usage:
                 try:
@@ -438,13 +460,21 @@ class LLMClient:
                 return
             parsed = parse_tagged(out)
             if not parsed:
-                # 整批格式完全不符（一个条目都没解析出来）→ 对半切批重试（复用现有降级链）。
+                # 整批格式完全不符（一个条目都没解析出来）→ 有界切批重试（v1.2.3 深度封顶）。
                 # 透传 forced/feedback：审查反馈重翻在递归降级时不丢原因标注
-                half = len(todo) // 2
-                await self._request_chunk(client, todo[:half], masked_list[:half], markers_list[:half],
-                                          target_lang, results, ctx, forced=forced, feedback=feedback)
-                await self._request_chunk(client, todo[half:], masked_list[half:], markers_list[half:],
-                                          target_lang, results, ctx, forced=forced, feedback=feedback)
+                if len(todo) > 1 and depth < _MAX_SPLIT_DEPTH:
+                    await asyncio.sleep(0.5 * random.uniform(0.8, 1.2))  # 抖动退避防惊群
+                    half = len(todo) // 2
+                    await self._request_chunk(client, todo[:half], masked_list[:half], markers_list[:half],
+                                              target_lang, results, ctx, forced=forced, feedback=feedback,
+                                              depth=depth + 1)
+                    await self._request_chunk(client, todo[half:], masked_list[half:], markers_list[half:],
+                                              target_lang, results, ctx, forced=forced, feedback=feedback,
+                                              depth=depth + 1)
+                else:
+                    # 深度封顶：剩余整块不再递归，记 failed 交上层攒批重试
+                    for _i, _t in todo:
+                        ctx["failed"].add(_t)
                 return
             for n, (i, _) in enumerate(todo):
                 if n in parsed:
@@ -455,16 +485,26 @@ class LLMClient:
                         client, todo[n][1], masked[n], markers[n], target_lang, ctx,
                         forced=forced, feedback=(fb_by_idx.get(todo[n][0], "") if feedback else ""))
             return
-        # 请求失败 → 降级：对半切批，直到逐条（透传 forced/feedback）
-        # 修复（recheck）：切批前退避——网络持续断连时对半切批会指数放大请求量
-        #（25 条 → 1+2+4+8+16 ≈ 31 次），加 0.5s 退避让网络有恢复窗口
+        # 请求失败 → 降级：有界切批（v1.2.3 深度封顶，不再无限切到单条——指数爆炸）。
+        # 网络类错误（timeout/network/ratelimit/server）是瞬态，切批无助于定位毒丸，
+        # 只放大请求量 → 最多切 1 层；非网络/格式不符切 3 层定位毒丸后整块交上层攒批重试。
+        # 切批前抖动退避（0.4-0.6s）让网络有恢复窗口、防惊群。
         if len(todo) > 1:
-            await asyncio.sleep(0.5)
-            half = len(todo) // 2
-            await self._request_chunk(client, todo[:half], masked_list[:half], markers_list[:half],
-                                      target_lang, results, ctx, forced=forced, feedback=feedback)
-            await self._request_chunk(client, todo[half:], masked_list[half:], markers_list[half:],
-                                      target_lang, results, ctx, forced=forced, feedback=feedback)
+            _kind = ctx.get("kind") or "other"
+            _max_depth = _MAX_NET_SPLIT_DEPTH if _kind in _NET_KINDS else _MAX_SPLIT_DEPTH
+            if depth < _max_depth:
+                await asyncio.sleep(0.5 * random.uniform(0.8, 1.2))
+                half = len(todo) // 2
+                await self._request_chunk(client, todo[:half], masked_list[:half], markers_list[:half],
+                                          target_lang, results, ctx, forced=forced, feedback=feedback,
+                                          depth=depth + 1)
+                await self._request_chunk(client, todo[half:], masked_list[half:], markers_list[half:],
+                                          target_lang, results, ctx, forced=forced, feedback=feedback,
+                                          depth=depth + 1)
+            else:
+                # 深度封顶：剩余整块不再递归，逐条记 failed（交上层 _flush 攒批重试）
+                for _i, _t in todo:
+                    ctx["failed"].add(_t)
         else:
             i, t = todo[0]
             results[i] = await self._translate_single(
