@@ -737,8 +737,9 @@ async def test_throughput(payload: dict = None):
             break   # 批越大 token_s 不再显著涨（每请求开销已摊销）→ 上一档为最优
         best_batch, best_bts = bs, ts
         prev_bts = ts
-    if best_bts <= 0 and batches_run and results["b12"]["failures"] >= MAX_FAIL_TOLERATE:
-        return {"ok": False, "message": f"当前 API 不稳定（最小批 12 也失败），请先测试连接",
+    _min_b_key = f"b{BATCH_CURVES[0]}"
+    if best_bts <= 0 and batches_run and results.get(_min_b_key, {}).get("failures", 0) >= MAX_FAIL_TOLERATE:
+        return {"ok": False, "message": f"当前 API 不稳定（最小批 {BATCH_CURVES[0]} 也失败），请先测试连接",
                 "results": results}
 
     # ===== 阶段 B · 并发拐点（固定最优批）=====
