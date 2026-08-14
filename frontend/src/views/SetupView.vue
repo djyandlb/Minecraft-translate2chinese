@@ -52,6 +52,7 @@ const displayBatch = computed({
   set: (v) => { batchSize.value = v },
 })
 const rpm = ref(0)              // 每分钟请求预算（RPM，预算闸）：0 = 自动校准（推荐，自学习 API 配额）；>0 = 手动固定
+const tpm = ref(0)              // 每分钟 token 预算（TPM，v1.2.7+）：0 = 自动（读响应头）/未知 → 批=40；>0 → 批=TPM/1000
 const sillyMode = ref(false)     // 胡言乱语模式：搞笑/热梗翻译但忠实原意（设置页开关）
 const cacheDir = ref('')         // 缓存/工作目录（可改到其他盘省 C 盘；空 = 系统默认；重启生效）
 async function pickCacheDir() {
@@ -238,6 +239,7 @@ function buildConfigBody() {
     scan_concurrency: scanConcurrency.value,
     batch_size: batchSize.value ? Number(batchSize.value) : null,
     rpm: Number(rpm.value) || 0,
+    tpm: Number(tpm.value) || 0,
     silly_mode: sillyMode.value,
     cache_dir: cacheDir.value,
     llm: { base_url: baseUrl.value.trim(), model: model.value.trim() },
@@ -255,7 +257,7 @@ async function autoSave() {
     } catch (e) { /* 自动保存失败静默：用户点「保存」按钮时再显式报错 */ }
   }, 800)
 }
-watch([engine, provider, baseUrl, model, targetLang, concurrency, scanConcurrency, batchSize, rpm, sillyMode, cacheDir], autoSave)
+watch([engine, provider, baseUrl, model, targetLang, concurrency, scanConcurrency, batchSize, rpm, tpm, sillyMode, cacheDir], autoSave)
 // 组件卸载（关窗/销毁）时立即保存当前值，防防抖窗口期内的改动丢失（webview 关窗会丢弃 pending setTimeout）
 onUnmounted(() => {
   clearTimeout(saveTimer)
@@ -294,6 +296,7 @@ onMounted(async () => {
     if (cfg.cache_dir) cacheDir.value = cfg.cache_dir
     // 每分钟请求预算（RPM）：未配置默认 60（预算闸）
     if (cfg.rpm != null) rpm.value = Number(cfg.rpm) || 0
+    if (cfg.tpm != null) tpm.value = Number(cfg.tpm) || 0
     // O2：本地未存 key 时，问后端 keyring 是否已配置过——已配置则回显占位符，不空白
     if (!apiKey.value) {
       try {
@@ -425,7 +428,14 @@ async function saveAndClose() {
           <input type="number" v-model.number="rpm" min="0" max="100000" step="10" class="rpm-input">
           <span class="slider-val">RPM</span>
         </div>
-        <small class="sub">每分钟请求预算（RPM）：<b>0 = 自动校准（推荐）</b>——预算闸自学习该 API 配额，撞限流自动退、稳定自动升，无需手动填；想精确控制的高手可填具体值。预算闸在请求发送前按配额放行，超配的本地排队，API 永不 429</small>
+        <div class="slider-row">
+          <span class="slider-name">Token预算</span>
+          <input type="number" v-model.number="tpm" min="0" max="100000000" step="1000" class="rpm-input">
+          <span class="slider-val">TPM</span>
+        </div>
+        <small class="sub">RPM <b>0 = 自动校准</b>（自学习 API 配额）；&gt;0 按值放行</small>
+        <small class="sub">TPM <b>0 = 自动/未知</b>（读到响应头自动用，读不到批=40）；&gt;0 → 批 = TPM ÷ 1000</small>
+        <p class="warn-tip">⚠️ <b>首次使用请先点「动态测试吞吐」校准档位</b>（约 30-60 秒，其中 RPM 校准要灌满一个 60s 限流窗口才能测准）：否则按默认保守档跑，API 可能跑不满、偏卡慢。预算闸默认自动校准 RPM，无需手动填写；已知配额可直接填数值跳过校准。</p>
       </div>
       <div class="field">
         <label>胡言乱语模式</label>
@@ -448,7 +458,6 @@ async function saveAndClose() {
           {{ tpOk ? '✓ ' + tpResult : '✗ ' + tpResult }}
         </span>
       </div>
-      <p class="warn-tip">⚠️ <b>首次使用请先点「动态测试吞吐」校准档位</b>（约 30-60 秒，其中 RPM 校准要灌满一个 60s 限流窗口才能测准）：否则按默认保守档跑，API 可能跑不满、偏卡慢。预算闸默认自动校准 RPM，无需手动填写；已知配额可直接填数值跳过校准。</p>
     </template>
 
     <!-- 在线机翻区 -->

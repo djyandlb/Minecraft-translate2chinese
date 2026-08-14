@@ -151,6 +151,10 @@ class LLMClient:
         # 撞 429 退、稳定升，无需手动设置）；rpm>0 = 固定精确。翻译请求超配额在本地排队
         # → API 永不触发 429（限流保底）。
         self.rate_gate = RateGate(float(rpm or 0))
+        # TPM 配额（v1.2.7+）：从响应头 x-ratelimit-limit-tokens 自动读取，供
+        # 动态测试用「批 = TPM/1000」约束每批条数（防单批烧爆每分钟 token 配额）。
+        # 0 = 未知（平台没给头）。
+        self._ratelimit_tpm: int = 0
         # 技术串过滤开关：默认 True（结构化 JSON/硬编码等 snake_case 标识符跳过）。
         # 语言文件阶段由 auto_flow 临时置 False——语言文件值是可翻译文本，
         # "Requires_Armor" 这类 snake_case 真实短语不得被 should_translate 误杀。
@@ -436,6 +440,14 @@ class LLMClient:
             resp.raise_for_status()
             data = resp.json()
             out = data["choices"][0]["message"]["content"]
+            # v1.2.7+ TPM 自动读取：OpenAI 兼容平台在响应头返回 token 限流信息
+            #（x-ratelimit-limit-tokens），供动态测试用「批 = TPM/1000」约束批条数。
+            try:
+                _rl_t = resp.headers.get("x-ratelimit-limit-tokens")
+                if _rl_t:
+                    self._ratelimit_tpm = int(float(_rl_t))
+            except Exception:
+                pass
         except httpx.HTTPStatusError as e:
             sc = e.response.status_code if e.response is not None else 0
             if sc in (401, 403):

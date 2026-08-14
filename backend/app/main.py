@@ -694,7 +694,9 @@ async def test_throughput(payload: dict = None):
                 await eng.aclose()
             except Exception:
                 pass
-        return (sum(times) / len(times) if times else 30.0), bool(times)
+        # v1.2.7+ 顺带读响应头的 TPM 配额（x-ratelimit-limit-tokens），供批大小约束
+        _tpm = getattr(eng, "_ratelimit_tpm", 0) or 0
+        return (sum(times) / len(times) if times else 30.0), bool(times), int(_tpm)
 
     async def _find_auto_rpm() -> tuple[int, float, bool]:
         """自动校准（v1.2.6+ **60s 滑动窗口灌满法**）：RPM 是 60 秒滑动窗口配额。
@@ -790,7 +792,7 @@ async def test_throughput(payload: dict = None):
 
     # 生效 RPM：固定填了用固定的；默认自动 → 动态测试顺便校准出该 API 建议值
     rpm_eff = _rpm_cfg if not rpm_auto else 0
-    w, w_ok = await _measure_w()
+    w, w_ok, probe_tpm = await _measure_w()
     if not w_ok:
         return {"ok": False, "message": "当前 API 请求全部失败（请先测试连接）"}
     rpm_secs = 0.0
@@ -799,15 +801,16 @@ async def test_throughput(payload: dict = None):
         rpm_eff, rpm_secs, rpm_hit = await _find_auto_rpm()   # 60s 滑窗灌满校准（10-65s）
     # ===== 方程（Little's Law）：并发 = 每分钟配额 × 单批耗时 / 60，封顶滑块上限 =====
     conc = min(MAX_CONC, max(1, round((max(1, rpm_eff) / 60.0) * w)))
-    batch = MAX_BATCH
+    # ===== 批大小按 TPM 约束（v1.2.7+ 用户方案）：没拿到 TPM → 40；
+    # 拿到（响应头 x-ratelimit-limit-tokens 或设置页手填）→ TPM/1000
+    #（每条按 ≤1000 token 预留，保证单批 token 不超每分钟配额），封顶 40、下限 4。=====
+    _tpm = int(cfg.get("tpm") or 0) or int(probe_tpm or 0)
+    batch = max(4, min(MAX_BATCH, (_tpm // 1000) if _tpm > 0 else MAX_BATCH))
     # ===== 保底验证：方程给理论值，verify 确认该并发可跑（v1.2.7+ 仅单级降档——
-# 429/限流不算不稳，只有真网络/5xx 才降一档；不再连降到 1 误伤）=====
+    # 429/限流不算不稳，只有真网络/5xx 才降一档；不再连降到 1 误伤）=====
     _final_c = conc
     if not await _verify(_final_c, batch):
         _final_c = max(1, _final_c // 2)   # 真不稳 → 降一档
-    # v1.2.7+ 自动调：批/扫描**随并发**（不再是固定 40/5）——快 API 高并发吃大批，
-    # 慢 API 降档后小批（防超时）；扫描 = round(并发×0.6) 封顶 8（滑块上限）。
-    batch = min(MAX_BATCH, 12 + _final_c * 4)   # 并发 1→16、4→28、8→40（封顶 40）
     scan_ok = min(8, max(1, round(_final_c * 0.6)))
     if rpm_auto and rpm_hit:
         _auto_note = f"（实测撞限流：RPM≈{rpm_eff}，×{rpm_secs}s 窗口校准）"
