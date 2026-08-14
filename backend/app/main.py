@@ -619,12 +619,18 @@ def test_connection(payload: dict = None):
 
 @app.post("/api/test-throughput")
 async def test_throughput(payload: dict = None):
-    """测试当前引擎的**稳定吞吐档位**：从高到低逐档探测（不同并发/批大小发一批翻译请求），
-    整批成功且无 API 报错即该档可用，第一个可用档位为建议。用户诉求：自动选绝对稳定、
-    不触发 API 报错（限流/超时/截断）的档位，让用户舒心运行。
+    """动态吞吐探测（v1.2.3 **拐点法**，业界标准：ray-project/llmperf 持续压测 +
+    OpenAI cookbook RPM/TPM 限流理论）。替代过时的「三档分发 / 爬坡探 429」。
 
-    探测文本用 40 条短句（避开长文本 max_tokens 截断干扰，专注吞吐稳定性）；
-    逐档构造 LLMClient(concurrency, batch_size) 发一批，failed==0 判稳定。
+    核心：
+    - **固定时间窗口持续压测**：每档并发 N 个 worker 在 WINDOW_SEC 内不停发翻译请求，
+      统计 token/s 真实吞吐（usage 累计）——不只「发几批看报不报错」（那测不出 TPM 限流
+      和服务端排队变慢）。
+    - **找吞吐-并发拐点**：token/s 随并发升 → 增速放缓（<10% 边际收益消失 = TPM 到了）
+      或失败数上升（429/超时 = RPM 到/过载）→ 该点为最优并发。覆盖所有 API 脾气：
+      DeepSeek 官网无限流 → 爬满 16；百炼限流 → 429 处停；token/分钟 限制的 API →
+      token/s 拐点处停（探 429 测不出这种，会误判还能加并发）。
+    - 批大小固定（12）：批次影响单批 token/截断，吞吐拐点主要由**并发**决定（llmperf 同思路）。
     """
     import time as _t
     payload = payload or {}
@@ -647,84 +653,95 @@ async def test_throughput(payload: dict = None):
         return {"ok": False, "message": "base_url/model 未配置"}
 
     from app.translate.llm import LLMClient
-    # ===== 动态爬坡探测（v1.2.3：替代三档分发）=====
-    # 不再用 high/medium/low 硬编码 + 短句探测（短句又小又快，测不出 RPM 限流与真实
-    # 延迟 → 百炼等平台测出「假 high 档」，实际跑长文本 batch 露馅）。
-    # 新方法：**从保守起点逐步加压**，每档用**真实长度样本**连续跑批，任何一批
-    # 429/超时/failed → 该档判不稳（RPM 限流在此现形）→ 摸到稳定上限 → 取 0.7 余量。
-    # 探测文本：短选项/中等句/长描述混合，贴近语言文件实际长度分布。
+    # 真实长度样本（token 消耗贴近语言文件：短选项/中句/长描述混合）
     probe = [
-        "Sprint", "Back", "Enabled", "Silk Touch",                 # 短选项
-        "Use this item to light up dark areas in your base",       # 中等句
-        "Shows the current weather and time on the HUD overlay",   # 中等句
-        "This enchanting table allows you to apply powerful enchantments to your gear",  # 长句
+        "Sprint", "Back", "Enabled", "Silk Touch",
+        "Use this item to light up dark areas in your base",
+        "Shows the current weather and time on the HUD overlay",
+        "This enchanting table allows you to apply powerful enchantments to your gear",
         "Right click on a block to place it, sneak and click to open the configuration screen",
         "Press the key bound in Controls to toggle the minimap visibility while playing",
         "Warning: this option will reset all settings to their default values",
         "Each tool has its own durability and can be repaired on an anvil with the matching material",
+        "When both the right and the left wing are balanced, the crafted shield gains additional knockback resistance",
+        "Enchantments applied to this bow affect every arrow shot regardless of the arrow's origin",
     ]
+    # 探测参数
+    FIXED_BATCH = 12       # 批大小固定（吞吐拐点由并发决定）
+    WINDOW_SEC = 12        # 每档压测窗口
+    CURVES = [1, 2, 4, 6, 8, 12, 16]   # 并发档位：从 1 爬坡找拐点
+    MAX_FAIL_TOLERATE = 3  # 每档失败条数容忍上限（偶发抖动不误判）
     results: dict = {}
 
-    async def _probe_ok(concurrency: int, batch_size: int, rounds: int = 1,
-                        timeout: float = 60) -> tuple[bool, str]:
-        """以 (并发, 批) 发 rounds 批真实样本，全部干净（无 failed/429/超时）返回 True。
+    async def _run_concurrency(c: int) -> tuple[float, int, float]:
+        """以并发 c 持续压测一个窗口：返回 (token_sec, 失败条数, 平均单批耗时秒)。"""
+        usage_acc = {"completion": 0, "prompt": 0}
 
-        每批结束关闭 httpx client（防连接堆积）；batch 内 429/超时被 translate_batch
-        降级链捕获进 meta["failed"]（v1.2.3 深度封顶后失败子集不会再无限重试放大）。"""
-        eng = None
-        try:
-            eng = LLMClient(base_url, api_key, model,
-                            concurrency=max(1, concurrency), batch_size=max(1, batch_size))
-            for _r in range(rounds):
+        def _on_usage(pc: int, cc: int) -> None:
+            usage_acc["prompt"] += pc
+            usage_acc["completion"] += cc
+
+        eng = LLMClient(base_url, api_key, model, concurrency=c,
+                        batch_size=FIXED_BATCH, on_usage=_on_usage)
+        fail_n = 0
+        batch_elapsed: list[float] = []
+        t0 = _t.time()
+        lock = asyncio.Lock()
+
+        async def _worker() -> None:
+            nonlocal fail_n
+            while True:
+                remain = WINDOW_SEC - (_t.time() - t0)
+                if remain <= 0:
+                    return
                 _meta: dict = {}
+                _bt0 = _t.time()
                 try:
-                    await asyncio.wait_for(
-                        eng.translate_batch(probe, "zh_cn", meta=_meta), timeout=timeout)
-                except asyncio.TimeoutError:
-                    return False, "timeout"
-                _failed = _meta.get("failed") or set()
-                _kind = str(_meta.get("kind", "other"))
-                if _failed or _kind not in ("ok", "other"):
-                    return False, _kind or "failed"   # ratelimit/timeout/network/server/... → 不稳
-            return True, "ok"
-        except Exception as e:
-            return False, f"exception:{str(e)[:60]}"
-        finally:
-            if eng is not None:
-                try:
-                    await eng.aclose()
+                    await asyncio.wait_for(eng.translate_batch(probe, "zh_cn", meta=_meta),
+                                           timeout=max(1, remain))
                 except Exception:
-                    pass
+                    fail_n += len(probe)   # 超时/网络/异常：整批记失败
+                else:
+                    _f = _meta.get("failed") or set()
+                    if _f:
+                        fail_n += len(_f)
+                    async with lock:
+                        batch_elapsed.append(_t.time() - _bt0)
+        workers = [asyncio.create_task(_worker()) for _ in range(c)]
+        await asyncio.wait(workers)
+        try:
+            await eng.aclose()
+        except Exception:
+            pass
+        elapsed = max(_t.time() - t0, 0.1)
+        tok_sec = usage_acc["completion"] / elapsed
+        batch_avg = (sum(batch_elapsed) / len(batch_elapsed)) if batch_elapsed else 0.0
+        return tok_sec, fail_n, batch_avg
 
-    # 1) 批大小上限：固定并发 2，批递增（受输出 token 上限 / 超时约束）
-    batch_ok = 12
-    for bs in (12, 16, 24, 32):
-        ok, why = await _probe_ok(2, bs, rounds=1)
-        results[f"b{bs}"] = {"ok": ok, "kind": why}
-        if ok:
-            batch_ok = bs
-        else:
-            break   # 批过大失败 → 该档为上限，不再加大
-    batch_opt = max(8, int(batch_ok * 0.7))   # 留 0.7 余量：实际长文本 batch 不触发超限
-
-    # 2) 并发上限：固定批=batch_opt，并发递增（RPM 限流 → 429 在该档现形）
-    concurrency_ok = 2
-    for cc in (2, 3, 4, 6, 8, 10):
-        ok, why = await _probe_ok(cc, batch_opt, rounds=2)   # 2 轮：限流是概率性，2 轮都干净才稳
-        results[f"c{cc}"] = {"ok": ok, "kind": why}
-        if ok:
-            concurrency_ok = cc
-        else:
-            break
-    scan_ok = min(6, max(1, concurrency_ok))
-    if concurrency_ok < 2 or batch_opt < 8:
-        return {"ok": False, "message": "当前 API 不稳定（最保守档位也失败），请先测试连接",
+    # 从并发 1 爬坡：找 token/s 吞吐-并发拐点
+    best_conv, best_ts = 1, 0.0
+    prev_ts = 0.0
+    curve = []
+    for c in CURVES:
+        tok_sec, fail_n, batch_avg = await _run_concurrency(c)
+        curve.append({"concurrency": c, "token_sec": round(tok_sec, 1),
+                      "failures": fail_n, "batch_avg_s": round(batch_avg, 1)})
+        results[f"c{c}"] = curve[-1]
+        if fail_n >= MAX_FAIL_TOLERATE:
+            break   # 限流/过载（RPM 到了）→ 当前/上一档为最优
+        if prev_ts > 0 and c > best_conv and tok_sec < prev_ts * 1.10:
+            break   # 边际收益消失（TPM 到了 / 服务端排队）→ 上一档为最优
+        best_conv, best_ts = c, tok_sec
+        prev_ts = tok_sec
+    if best_ts <= 0 and results["c1"]["failures"] >= MAX_FAIL_TOLERATE:
+        return {"ok": False, "message": f"当前 API 不稳定（并发 1 也失败，wind {WINDOW_SEC}s），请先测试连接",
                 "results": results}
+    scan_ok = min(6, max(1, best_conv))
     return {"ok": True, "preset": "auto",
-            "concurrency": concurrency_ok, "batch_size": batch_opt,
+            "concurrency": max(1, best_conv), "batch_size": FIXED_BATCH,
             "scan_concurrency": scan_ok,
-            "message": (f"动态探测最优：并发 {concurrency_ok} · 批 {batch_opt} · 扫描 {scan_ok}"
-                        f"（批上限 {batch_ok}，取 0.7 余量，实测满速）"),
+            "message": (f"动态探测最优：并发 {best_conv} · 批 {FIXED_BATCH} · 扫描 {scan_ok}"
+                        f"（token/s 拐点法实测 {round(best_ts, 1)} tokens/秒，爬 {len(curve)} 档）"),
             "results": results}
 
 
