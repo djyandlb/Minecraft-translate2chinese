@@ -1548,3 +1548,9 @@ async def test_ai_renormalize_only_proper_noun_unify(tmp_path, monkeypatch):
     assert "k2" in keys            # Zeno 的「泽昂」≠ 规范译名 → 重翻
     assert "k1" not in keys        # 已是「泽诺」→ 不重翻
     assert "k3" not in keys        # light 非候选 → 不重翻
+
+
+def test_scan_hardcode_all_method_present():
+    """v1.2.7 轻量化：硬编码扫描抽为独立方法 _scan_hardcode_all（供 run 与语言翻译并行）。"""
+    from app.auto_flow import AutoFlow
+    assert callable(getattr(AutoFlow, "_scan_hardcode_all", None))
