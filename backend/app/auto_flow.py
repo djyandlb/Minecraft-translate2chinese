@@ -1905,44 +1905,6 @@ class AutoFlow:
 
     # ---------- 阶段 3：硬编码（引擎分流） ----------
 
-    async def _scan_hardcode_all(self) -> None:
-        """扫描全部 jar 的硬编码候选（v1.2.7 起与语言翻译并行，墙钟减扫描时长）。
-
-        CPU/IO 密集（to_thread），与 _stage_lang（网络 API 密集）互不依赖——run() 在
-        _stage_lang 前 create_task 启动本方法，语言翻译期间后台扫描；await 后
-        self.hard_candidates_by_jar 已填，total 计算与 _stage_hardcode 照旧消费。
-        """
-        if self.engine_machine:
-            self.state.progress.append({"status": "warn",
-                                        "error": "在线机翻无法 AI 判断硬编码，已跳过硬编码翻译"})
-            return
-        if not self.jars:
-            return
-        _hard_sem = asyncio.Semaphore(
-            max(1, int((self.cfg or {}).get("scan_concurrency") or 4)))
-        _hard_done = [0]
-
-        async def _scan_hard_one(jar: Path) -> None:
-            async with _hard_sem:
-                try:
-                    if jar.stat().st_size > _HARDCODE_MAX_BYTES:
-                        self.state.progress.append({"status": "warn",
-                                                    "error": (f"跳过超大 jar {jar.name} 的硬编码扫描"
-                                                              f"（>{_HARDCODE_MAX_BYTES // 1024 // 1024}MB）")})
-                    else:
-                        cands = await asyncio.to_thread(scan_hardcoded_candidates, jar)
-                        if cands:
-                            self.hard_candidates_by_jar[jar] = cands
-                except Exception as e:
-                    self.state.progress.append({"status": "warn",
-                                                "error": f"扫描 {jar.name} 硬编码字符串失败：{e}"})
-            _hard_done[0] += 1
-            self.state.progress.append({"status": "translating", "count": 0,
-                                        "note": f"正在扫描硬编码 {_hard_done[0]}/{len(self.jars)} 个 mod（{jar.name}）…"})
-            self.store.save(self.state)
-
-        await asyncio.gather(*(_scan_hard_one(jar) for jar in self.jars))
-
     async def _stage_hardcode(self) -> None:
         """硬编码翻译：LLM 引擎 AI 判断是否用户可见；machine 无此阶段；兜底引擎批量全翻。"""
         if not self.engine_machine:
@@ -2813,9 +2775,44 @@ class AutoFlow:
                                             "note": f"正在扫描 {_i}/{len(self.jars)} 个 mod 的文本源…"})
                 self.store.save(self.state)
 
-            # v1.2.7 轻量化：硬编码扫描（CPU/IO）与语言翻译（网络 API）并行——后台启动
-            # 扫描 task，_stage_lang/_stage_json 期间完成扫描；await 后再算 total。
-            scan_task = asyncio.create_task(self._scan_hardcode_all())
+            # 硬编码候选扫描（仅非 machine 引擎；LLM 走 AI 判断，兜底引擎走全翻）。
+            # 整合包也扫描硬编码——翻译走 VP 补丁（Vault Patcher）生效，不产修改版 jar。
+            if self.engine_machine:
+                self.state.progress.append({"status": "warn",
+                                            "error": "在线机翻无法 AI 判断硬编码，已跳过硬编码翻译"})
+            else:
+                # 硬编码扫描最耗时（解压 jar + 逐个 class 解析字节码）：并行处理。
+                # Semaphore(4) 限流：同时最多解压/解析 4 个 jar，避免几百个 jar 一起打爆
+                # 磁盘（解压临时目录）和内存（class 加载）。每完成一个 jar 推
+                # 「正在扫描硬编码 i/N（jar 名）」，进度连贯实时（用户诉求：数据流在动）。
+                # 扫描并发数取用户设置（config.scan_concurrency，默认 4，设置页可调）。
+                # 测试/兜底路径 cfg 可能为 None → (self.cfg or {}) 容错回默认 4
+                _hard_sem = asyncio.Semaphore(
+                    max(1, int((self.cfg or {}).get("scan_concurrency") or 4)))
+                _hard_done = [0]
+
+                async def _scan_hard_one(jar: Path) -> None:
+                    async with _hard_sem:
+                        try:
+                            if jar.stat().st_size > _HARDCODE_MAX_BYTES:
+                                self.state.progress.append({"status": "warn",
+                                                            "error": (f"跳过超大 jar {jar.name} 的硬编码扫描"
+                                                                      f"（>{_HARDCODE_MAX_BYTES // 1024 // 1024}MB）")})
+                            else:
+                                cands = await asyncio.to_thread(scan_hardcoded_candidates, jar)
+                                if cands:
+                                    self.hard_candidates_by_jar[jar] = cands
+                        except Exception as e:
+                            # 损坏 jar 异常兜底跳过，不让一个坏文件中断整包流程
+                            self.state.progress.append({"status": "warn",
+                                                        "error": f"扫描 {jar.name} 硬编码字符串失败：{e}"})
+                    _hard_done[0] += 1
+                    self.state.progress.append({"status": "translating", "count": 0,
+                                                "note": f"正在扫描硬编码 {_hard_done[0]}/{len(self.jars)} 个 mod（{jar.name}）…"})
+                    self.store.save(self.state)
+
+                await asyncio.gather(*(_scan_hard_one(jar) for jar in self.jars))
+
             # 词库自动准备：检测输入 MC 版本 → 词库已下载且版本匹配直接用，否则自动下载。
             # 下载/就绪/失败都在进度明细可见（translating/done/warn），不占翻译 total。
             # 仅中文目标：CFPA 是中文社区词库，日文/其他语言不下载也不用（__init__ 已置空 cfpa）
@@ -2830,39 +2827,24 @@ class AutoFlow:
                 if _mc_ver:
                     self.cfpa = await self._ensure_cfpa(_mc_ver)
 
-
-            self.same_script = is_same_script(self.source_lang, self.req.target_lang)
-            self._batch_size = getattr(self.engine, "batch_size", 20)
-
-            # 各阶段依次执行（共享 self 状态，方法间零参数）。
-            # 修复：每阶段后统一查取消（lang/json 阶段经 pipeline 软取消也置 _aborted），
-            # 否则取消后流程继续进 build 把 status 覆盖成 done——用户取消无效且显示完成
-            # 进度总量骨架（lang/json/pack）：hardcode 依赖扫描结果，扫描与语言翻译并行
-            # 完成后在 await scan_task 后补算（v1.2.7 轻量化）。
+            # 进度总量：逐阶段明细（语言文件 jobs / jar 内 json+lines / 整合包目录文本源 /
+            # 硬编码候选）。用户最新需求：进度条显示「语言文件 + 硬编码」一共数量 + 当前阶段。
+            # 硬编码阶段 done 按候选数推进（可见翻译或 exclude 判定都算「已处理」）；
+            # build 阶段在产物组织前补入（total 依赖阶段 1-3 的实际产出）。
             self.state.stages = [
                 {"name": "lang", "total": len(self.state_jobs), "done": 0},
                 {"name": "json", "total": sum(
                     len(s.entries) for srcs in self.text_sources_by_jar.values() for s in srcs), "done": 0},
                 {"name": "pack", "total": sum(len(s.entries) for s in self.pack_sources), "done": 0},
             ]
-            self.state.stage = "lang"
-            await self._stage_lang()
-            if self.state.cancelled or self._aborted:
-                return
-            await self._stage_json()
-            if self.state.cancelled or self._aborted:
-                return
-            try:
-                await scan_task          # 扫描已在语言/文本翻译期间并行完成
-            except Exception:
-                pass                    # 扫描失败不中断主流程（逐 jar 已兜底）
-            # 进度总量（v1.2.7）：lang/json/pack 骨架已在翻译前建立；hardcode 依赖扫描结果
-            #（与语言翻译并行完成）——扫描 await 后补算 hardcode 阶段 + 总 total。
             if not self.engine_machine:
                 self.state.stages.append({"name": "hardcode", "total": sum(
                     len(c) for c in self.hard_candidates_by_jar.values()), "done": 0})
+            # 修复：total 下限 = done+failed（续联基准可能 > 扫描 total——删 mod/进度虚高时
+            # 进度不超 100%；Agent 审查确认 done>total 无自愈）
             self.state.total = max(sum(s["total"] for s in self.state.stages),
                                    self.state.done + self.state.failed)
+            self.state.stage = "lang"
             # 若语言/文本源为空但有硬编码候选（LLM/兜底引擎），仍需继续流程
             if self.state.total == 0 and not (self.hard_candidates_by_jar and not self.engine_machine):
                 # 空词条（且无硬编码待判断）：直接 done + warn，不导出空包
@@ -2872,6 +2854,19 @@ class AutoFlow:
                 self.store.save(self.state)
                 return
             self.store.save(self.state)
+
+            self.same_script = is_same_script(self.source_lang, self.req.target_lang)
+            self._batch_size = getattr(self.engine, "batch_size", 20)
+
+            # 各阶段依次执行（共享 self 状态，方法间零参数）。
+            # 修复：每阶段后统一查取消（lang/json 阶段经 pipeline 软取消也置 _aborted），
+            # 否则取消后流程继续进 build 把 status 覆盖成 done——用户取消无效且显示完成
+            await self._stage_lang()
+            if self.state.cancelled or self._aborted:
+                return
+            await self._stage_json()
+            if self.state.cancelled or self._aborted:
+                return
             if not self.engine_machine:
                 await self._stage_hardcode()
             if self.state.cancelled or self._aborted:
