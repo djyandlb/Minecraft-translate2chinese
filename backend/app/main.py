@@ -649,7 +649,9 @@ async def test_throughput(payload: dict = None):
         return {"ok": False, "message": "尚未配置 API Key"}
     if not base_url or not model:
         return {"ok": False, "message": "base_url/model 未配置"}
-    rpm = max(0, int(payload.get("rpm") or cfg.get("rpm") or 60))   # 0 = 不限速
+    # RPM：<=0 = 自动校准（推荐，动态测试会估出该 API 建议值）；>0 = 用户固定配额
+    _rpm_cfg = int(payload.get("rpm") if payload.get("rpm") is not None else cfg.get("rpm") or 0)
+    rpm_auto = _rpm_cfg <= 0
 
     from app.translate.llm import LLMClient
     # 真实长度样本（token 消耗贴近语言文件：短选项/中句/长描述混合）
@@ -675,7 +677,7 @@ async def test_throughput(payload: dict = None):
         """低并发测平均单批耗时 W（秒）。全失败返回 (30, False)。"""
         req = _probe_base[:BASE_BATCH]
         eng = LLMClient(base_url, api_key, model, concurrency=BASE_CONC,
-                        batch_size=BASE_BATCH, rpm=rpm)
+                        batch_size=BASE_BATCH, rpm=rpm_eff)
         times: list[float] = []
         try:
             for _ in range(SAMPLE_ROUNDS):
@@ -693,11 +695,43 @@ async def test_throughput(payload: dict = None):
                 pass
         return (sum(times) / len(times) if times else 30.0), bool(times)
 
+    async def _find_auto_rpm() -> int:
+        """自动校准：渐进升档（30→60→120→240 RPM）连发逼 API 显形，撞 429 即停取上一档。
+
+        探测引擎用超大 rpm（不过闸，纯测 API 真实配额反应）；每档 3 批全成功才升档。
+        返回建议 RPM（×0.85 留余量，防边缘抖动）。
+        """
+        est = 0
+        req = _probe_base[:8]
+        for seg in (30, 60, 120, 240):
+            eng = LLMClient(base_url, api_key, model, concurrency=2, batch_size=8, rpm=100000)
+            ok = True
+            try:
+                for _ in range(3):
+                    _m: dict = {}
+                    try:
+                        await asyncio.wait_for(eng.translate_batch(req, "zh_cn", meta=_m), timeout=180)
+                    except Exception:
+                        ok = False
+                        break
+                    if _m.get("failed"):
+                        ok = False
+                        break
+            finally:
+                try:
+                    await eng.aclose()
+                except Exception:
+                    pass
+            if not ok:
+                break
+            est = seg
+        return max(1, int(est * 0.85)) if est else 8   # 首档也撞 → 保守 8
+
     async def _verify(cc: int, bs: int) -> bool:
         """并发 cc/批 bs 发 2 批确认稳定（无异常且 failed==0）。"""
         req = (probe * ((bs // len(probe)) + 1))[:bs]
         eng = LLMClient(base_url, api_key, model, concurrency=max(1, cc),
-                        batch_size=max(1, bs), rpm=rpm)
+                        batch_size=max(1, bs), rpm=rpm_eff)
         ok = True
         try:
             for _ in range(2):
@@ -717,14 +751,15 @@ async def test_throughput(payload: dict = None):
                 pass
         return ok
 
+    # 生效 RPM：固定填了用固定的；默认自动 → 动态测试顺便校准出该 API 建议值
+    rpm_eff = _rpm_cfg if not rpm_auto else 0
     w, w_ok = await _measure_w()
     if not w_ok:
         return {"ok": False, "message": "当前 API 请求全部失败（请先测试连接）"}
+    if rpm_auto:
+        rpm_eff = await _find_auto_rpm()   # 自动校准（渐进升档撞 429 取建议）
     # ===== 方程（Little's Law）：并发 = 每分钟配额 × 单批耗时 / 60，封顶保守 =====
-    if rpm > 0:
-        conc = min(MAX_CONC, max(1, round((rpm / 60.0) * w)))
-    else:
-        conc = MAX_CONC          # 不限速：保守默认 8
+    conc = min(MAX_CONC, max(1, round((max(1, rpm_eff) / 60.0) * w)))
     batch = MAX_BATCH
     # ===== 保底验证：负载拉满确认稳定，不稳降并发重验 =====
     _final_c = conc
@@ -733,12 +768,15 @@ async def test_throughput(payload: dict = None):
             break
         _final_c = max(1, _final_c // 2)   # 仍撞限流：降并发再试
     scan_ok = min(6, max(1, round(_final_c * 0.6)))
+    _auto_note = "（自动校准建议，你无需填写）" if rpm_auto else ""
     return {"ok": True, "preset": "auto",
             "concurrency": _final_c, "batch_size": batch,
-            "scan_concurrency": scan_ok, "rpm": rpm,
-            "message": (f"预算闸方案：RPM={rpm} → 方程算得并发 {_final_c}（单批基准 {round(w, 1)}s）"
+            "scan_concurrency": scan_ok,
+            "rpm": rpm_eff,
+            "message": (f"预算闸方案：RPM≈{rpm_eff}{_auto_note} → 方程算得并发 {_final_c}（单批基准 {round(w, 1)}s）"
                         f"· 批 {batch} · 扫描 {scan_ok}，全速且不触发限流"),
-            "results": {"w_sec": round(w, 1), "rpm": rpm, "verified_conc": _final_c}}
+            "results": {"w_sec": round(w, 1), "rpm": rpm_eff, "rpm_auto": rpm_auto,
+                        "verified_conc": _final_c}}
 
 
 def _check_resume(path_str: str) -> dict:

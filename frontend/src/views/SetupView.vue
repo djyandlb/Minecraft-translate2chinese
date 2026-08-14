@@ -29,7 +29,7 @@ const LANGUAGES = [
 // keyring 已配置时的回显占位符：避免用户每次误以为要重输（保存时跳过该占位值）
 const API_KEY_PLACEHOLDER = '已配置（••••）'
 // 应用版本号：打包时同步更新（设置页「配置」标题右侧淡灰小字展示）
-const APP_VERSION = '1.2.4'
+const APP_VERSION = '1.2.5'
 
 const engine = ref('llm')            // llm(用户 API) | free(免费 API) | machine(机翻)，三选项互斥
 const provider = ref('DeepSeek')
@@ -51,7 +51,7 @@ const displayBatch = computed({
   get: () => batchSize.value ?? 20,
   set: (v) => { batchSize.value = v },
 })
-const rpm = ref(60)              // 每分钟请求预算（RPM，v1.2.4 预算闸）：0 = 不限速
+const rpm = ref(0)              // 每分钟请求预算（RPM，预算闸）：0 = 自动校准（推荐，自学习 API 配额）；>0 = 手动固定
 const sillyMode = ref(false)     // 胡言乱语模式：搞笑/热梗翻译但忠实原意（设置页开关）
 const cacheDir = ref('')         // 缓存/工作目录（可改到其他盘省 C 盘；空 = 系统默认；重启生效）
 async function pickCacheDir() {
@@ -189,7 +189,7 @@ async function runThroughputTest() {
       concurrency.value = r.concurrency
       batchSize.value = r.batch_size
       scanConcurrency.value = r.scan_concurrency
-      if (r.rpm != null) rpm.value = r.rpm
+      // RPM 保持用户选择（0=自动校准 或 手填值），不强制覆盖——测试给出的建议值在 message 里展示
       tpOk.value = true
       tpResult.value = r.message
       autoSave()   // 新档位即时保存
@@ -425,7 +425,7 @@ async function saveAndClose() {
           <input type="number" v-model.number="rpm" min="0" max="100000" step="10" class="rpm-input">
           <span class="slider-val">RPM</span>
         </div>
-        <small class="sub">每分钟请求预算（RPM，0=不限速）：预算闸在请求**发送前**按此配额放行，超配额的本地排队——API 永不触发 429/限流，任何 API 都能稳跑；「动态测试吞吐」按 RPM + 单批耗时用方程算出最优并发并定位滑块</small>
+        <small class="sub">每分钟请求预算（RPM）：<b>0 = 自动校准（推荐）</b>——预算闸自学习该 API 配额，撞限流自动退、稳定自动升，无需手动填；想精确控制的高手可填具体值。预算闸在请求发送前按配额放行，超配的本地排队，API 永不 429</small>
       </div>
       <div class="field">
         <label>胡言乱语模式</label>
@@ -448,6 +448,7 @@ async function saveAndClose() {
           {{ tpOk ? '✓ ' + tpResult : '✗ ' + tpResult }}
         </span>
       </div>
+      <p class="warn-tip">⚠️ <b>首次使用请先点「动态测试吞吐」校准档位</b>（几秒钟）：否则按默认保守档跑，API 可能跑不满、偏卡慢。预算闸默认自动校准 RPM，无需手动填写。</p>
     </template>
 
     <!-- 在线机翻区 -->
@@ -586,6 +587,8 @@ async function saveAndClose() {
 /* 每分钟请求预算（RPM）数字输入：方块风，窄 */
 .rpm-input { width: 86px; padding: 4px 8px; border: 1.5px solid #d5cdb8; background: var(--bg); font-size: 13px; color: var(--text); border-radius: 0; outline: none; }
 .rpm-input:focus { border-color: var(--accent); }
+/* 必做动态测试提醒：浅警示条（不喧宾夺主，但一眼看见） */
+.warn-tip { margin: 12px 0 0; padding: 10px 14px; background: rgba(201, 138, 61, .12); border: 1.5px solid rgba(201, 138, 61, .5); font-size: 12.5px; line-height: 1.7; color: #7a5218; border-radius: 0; }
 /* 测试连接：按钮 + 结果横排，结果绿=成功 / 红=失败 */
 .test-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .test-result { font-size: 13px; }

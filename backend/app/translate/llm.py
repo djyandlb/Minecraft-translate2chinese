@@ -147,9 +147,10 @@ class LLMClient:
         self.batch_size = batch_size
         self.on_usage = on_usage
         self.glossary_prompt = glossary_prompt
-        # 请求前 RPM 预算闸（v1.2.4）：rpm>0 时创建 RateGate，翻译请求超配额在本地排队
-        # → API 永不触发 429（限流保底）。rpm<=0 = 不限速。
-        self.rate_gate = RateGate(rpm) if rpm and float(rpm) > 0 else None
+        # 请求前 RPM 预算闸（v1.2.4b）：rpm<=0 = 自动校准（RateGate 自学习嘴择配额，
+        # 撞 429 退、稳定升，无需手动设置）；rpm>0 = 固定精确。翻译请求超配额在本地排队
+        # → API 永不触发 429（限流保底）。
+        self.rate_gate = RateGate(float(rpm or 0))
         # 技术串过滤开关：默认 True（结构化 JSON/硬编码等 snake_case 标识符跳过）。
         # 语言文件阶段由 auto_flow 临时置 False——语言文件值是可翻译文本，
         # "Requires_Armor" 这类 snake_case 真实短语不得被 should_translate 误杀。
@@ -443,10 +444,16 @@ class LLMClient:
                 return
             ctx["kind"] = self._err_kind(e)   # 修复：batch 级失败也更新错误类别（否则错误分类漂移）
             out = None
+            if ctx["kind"] == "ratelimit" and self.rate_gate is not None:
+                self.rate_gate.report_ratelimit()          # 自动校准：撞限流 → 退 40%
         except Exception as e:
             ctx["kind"] = self._err_kind(e)   # 修复：同上
             out = None
+            if ctx["kind"] == "ratelimit" and self.rate_gate is not None:
+                self.rate_gate.report_ratelimit()          # 自动校准：撞限流 → 退 40%
         if out is not None:
+            if self.rate_gate is not None:
+                self.rate_gate.report_ok()                 # 自动校准：成功 → 累计微升
             # 修复：on_usage 回调（含落盘）异常只记日志，不影响已成功的翻译结果
             if self.on_usage:
                 try:
@@ -576,6 +583,8 @@ class LLMClient:
             out = data["choices"][0]["message"]["content"]
         except httpx.HTTPStatusError as e:
             ctx["kind"] = self._err_kind(e)
+            if ctx["kind"] == "ratelimit" and self.rate_gate is not None:
+                self.rate_gate.report_ratelimit()          # 自动校准：撞限流 → 退 40%
             sc = e.response.status_code if e.response is not None else 0
             if sc in (401, 403):
                 ctx["fatal"] = f"API Key 无效或无权限（HTTP {sc}），请检查设置中的 API Key"
@@ -586,6 +595,8 @@ class LLMClient:
             ctx["kind"] = self._err_kind(exc)
             ctx["failed"].add(text)
             return text
+        if self.rate_gate is not None:
+            self.rate_gate.report_ok()                     # 自动校准：成功 → 累计微升
         # 兜底容错：即便模型带 [iN] 前缀输出也剥掉（单条无标签时直接取全文）。
         single_parsed = parse_tagged(out)
         if 0 in single_parsed:
