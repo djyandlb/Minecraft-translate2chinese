@@ -696,27 +696,29 @@ async def test_throughput(payload: dict = None):
                 pass
         return (sum(times) / len(times) if times else 30.0), bool(times)
 
-    async def _find_auto_rpm() -> int:
-        """自动校准（v1.2.5+ **60s 滑动窗口灌满法**）：RPM 是 60 秒滑动窗口配额，
-        「几秒连发几档」永远测不准（你 mimo=100/分，我几秒发 30 个当然全过告你 200+）。
+    async def _find_auto_rpm() -> tuple[int, float, bool]:
+        """自动校准（v1.2.6+ **60s 滑动窗口灌满法**）：RPM 是 60 秒滑动窗口配额。
 
-        正确做法 = 让一个 60s 窗口**灌满配额**再数：
-        - 中并发（6）持续发小块短批（批 8 短句）逼 API 显形，记录每个请求成功率；
-        - 首次 429 出现后的「前 60s 内成功数」≈ 该 API 的 RPM（滑窗配额刚用完）；
-        - **提前退出**：连续 ≥8 次 429 且已跑 ≥10s → 配额已现封顶，提前收（多数 API 10-40s 内退出）；
-        - 满 65s 无 429 → 配额 ≥ 65s 总成功数（该值即建议量，取整）。
-        返回建议 RPM（×0.85 留余量，防边缘抖动）。
+        正确做法 = 让一个 60s 窗口灌满配额再数（业界压测同思路）：
+        - **高并发（14）持续发小块短批（批 8）逼 API 显形**——并发足够才有「灌满」的能力：
+          慢 + 高配额 API（如 mimo：批 8 条≈10s、配额 100/分）需要 ~17 并发才能在窗口内
+          发满 100；并发 6 只发 ~40 个 → 65s 不撞 → 会把「65s 内成功数」当 RPM 严重低估
+          并反被闸二次压慢（recheck 确认的 bug）。并发 14 → 65s 能发 ~90，下界逼近真实。
+        - **首次 429 前 60s 内成功数 ≈ 该 API 真实 RPM**（滑窗配额刚用完，精确）；
+        - **没撞 429（65s 到顶）**：只测得「下限」——真实配额 ≥ 该值，此时**不乘 0.85 再次
+          低估**，并返回 hit_limit=False 让上层提示「可填已知配额更精确」。
+        返回 (建议RPM, 耗时秒, 是否撞到限流)。
         """
         req = _probe_base[:8]
         stamps_ok: list[float] = []
         stamps_429: list[float] = []
         t0 = _t.time()
         deadline = t0 + 65
-        eng = LLMClient(base_url, api_key, model, concurrency=6, batch_size=8, rpm=100000)
+        PROBE_CONC = 14   # recheck：灌满并发，让慢+高配额 API 的 65s 下界逼近真实
+        eng = LLMClient(base_url, api_key, model, concurrency=PROBE_CONC, batch_size=8, rpm=100000)
 
         async def _worker() -> None:
-            """真正并发的灌满 worker：6 个同时发，直到硬顶或 429 现形提前收。
-            （旧版是顺序循环 = 实际并发 1，mimo 慢时 60s 只发 30 个测出 rpm≈25 的 bug）"""
+            """灌满 worker：PROBE_CONC 个同时发，直到硬顶或 429 现形提前收。"""
             while True:
                 if len(stamps_429) >= 5 and (_t.time() - t0) > 8:
                     return                # 配额封顶已现形，提前收
@@ -735,20 +737,23 @@ async def test_throughput(payload: dict = None):
                         stamps_ok.append(_tx)
 
         try:
-            await asyncio.gather(*(_worker() for _ in range(6)))
+            await asyncio.gather(*(_worker() for _ in range(PROBE_CONC)))
         finally:
             try:
                 await eng.aclose()
             except Exception:
                 pass
-        # 滑窗计数：首次 429 前 60s 内的成功数 ≈ 配额（无 429 → 65s 内全部成功换算 60s）
+        # 命中限流 → cnt = 首次 429 前 60s 内成功数 ≈ 真实 RPM；未命中 → 下界（不 ×0.85）
         if stamps_429:
             first_429 = stamps_429[0]
             cnt = len([t for t in stamps_ok if first_429 - 60 < t <= first_429])
+            hit = True
+            rpm_out = max(4, int(cnt * 0.85)) if cnt else 8
         else:
-            elapsed = max(_t.time() - t0, 0.1)
-            cnt = int(len(stamps_ok) * 60 / elapsed)
-        return max(4, int(cnt * 0.85)) if cnt else 8, round(max(_t.time() - t0, 0.1), 1)   # 全挂 → 保守 8
+            cnt = len(stamps_ok)          # 65s 内实际发出的量
+            hit = False
+            rpm_out = max(4, int(cnt)) if cnt else 8   # 未撞：下界就是建议（别再乘 0.85 低估）
+        return rpm_out, round(max(_t.time() - t0, 0.1), 1), hit
 
 
     async def _verify(cc: int, bs: int) -> bool:
@@ -786,8 +791,9 @@ async def test_throughput(payload: dict = None):
     if not w_ok:
         return {"ok": False, "message": "当前 API 请求全部失败（请先测试连接）"}
     rpm_secs = 0.0
+    rpm_hit = False
     if rpm_auto:
-        rpm_eff, rpm_secs = await _find_auto_rpm()   # 60s 滑窗灌满校准（约 10-65s）
+        rpm_eff, rpm_secs, rpm_hit = await _find_auto_rpm()   # 60s 滑窗灌满校准（10-65s）
     # ===== 方程（Little's Law）：并发 = 每分钟配额 × 单批耗时 / 60，封顶保守 =====
     conc = min(MAX_CONC, max(1, round((max(1, rpm_eff) / 60.0) * w)))
     batch = MAX_BATCH
@@ -798,7 +804,13 @@ async def test_throughput(payload: dict = None):
             break
         _final_c = max(1, _final_c // 2)   # 仍撞限流：降并发再试
     scan_ok = min(6, max(1, round(_final_c * 0.6)))
-    _auto_note = f"（自动校准建议 ×{rpm_secs}s 窗口，你无需填写；已知配额可直接在设置页填数值跳过）" if rpm_auto else ""
+    if rpm_auto and rpm_hit:
+        _auto_note = f"（实测撞限流：RPM≈{rpm_eff}，×{rpm_secs}s 窗口校准）"
+    elif rpm_auto:
+        _auto_note = (f"（未撞限流：实际配额 ≥ {rpm_eff}，已按此估算；"
+                      f"已知真实配额可直接在设置页填写更精确，如 {rpm_eff}+）")
+    else:
+        _auto_note = ""
     return {"ok": True, "preset": "auto",
             "concurrency": _final_c, "batch_size": batch,
             "scan_concurrency": scan_ok,
@@ -806,6 +818,7 @@ async def test_throughput(payload: dict = None):
             "message": (f"预算闸方案：RPM≈{rpm_eff}{_auto_note} → 方程算得并发 {_final_c}（单批基准 {round(w, 1)}s）"
                         f"· 批 {batch} · 扫描 {scan_ok}，全速且不触发限流"),
             "results": {"w_sec": round(w, 1), "rpm": rpm_eff, "rpm_auto": rpm_auto,
+                        "rpm_hit_limit": rpm_hit,
                         "verified_conc": _final_c}}
 
 
