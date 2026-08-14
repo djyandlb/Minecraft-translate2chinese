@@ -696,36 +696,52 @@ async def test_throughput(payload: dict = None):
         return (sum(times) / len(times) if times else 30.0), bool(times)
 
     async def _find_auto_rpm() -> int:
-        """自动校准：渐进升档（30→60→120→240 RPM）连发逼 API 显形，撞 429 即停取上一档。
+        """自动校准（v1.2.5+ **60s 滑动窗口灌满法**）：RPM 是 60 秒滑动窗口配额，
+        「几秒连发几档」永远测不准（你 mimo=100/分，我几秒发 30 个当然全过告你 200+）。
 
-        探测引擎用超大 rpm（不过闸，纯测 API 真实配额反应）；每档 3 批全成功才升档。
+        正确做法 = 让一个 60s 窗口**灌满配额**再数：
+        - 中并发（6）持续发小块短批（批 8 短句）逼 API 显形，记录每个请求成功率；
+        - 首次 429 出现后的「前 60s 内成功数」≈ 该 API 的 RPM（滑窗配额刚用完）；
+        - **提前退出**：连续 ≥8 次 429 且已跑 ≥10s → 配额已现封顶，提前收（多数 API 10-40s 内退出）；
+        - 满 65s 无 429 → 配额 ≥ 65s 总成功数（该值即建议量，取整）。
         返回建议 RPM（×0.85 留余量，防边缘抖动）。
         """
-        est = 0
         req = _probe_base[:8]
-        for seg in (30, 60, 120, 240):
-            eng = LLMClient(base_url, api_key, model, concurrency=2, batch_size=8, rpm=100000)
-            ok = True
-            try:
-                for _ in range(3):
-                    _m: dict = {}
-                    try:
-                        await asyncio.wait_for(eng.translate_batch(req, "zh_cn", meta=_m), timeout=180)
-                    except Exception:
-                        ok = False
-                        break
-                    if _m.get("failed"):
-                        ok = False
-                        break
-            finally:
+        stamps_ok: list[float] = []
+        stamps_429: list[float] = []
+        t0 = _t.time()
+        deadline = t0 + 65
+        eng = LLMClient(base_url, api_key, model, concurrency=6, batch_size=8, rpm=100000)
+        try:
+            while _t.time() < deadline:
+                _tx = _t.time()
+                _m: dict = {}
                 try:
-                    await eng.aclose()
+                    await asyncio.wait_for(eng.translate_batch(req, "zh_cn", meta=_m), timeout=45)
                 except Exception:
-                    pass
-            if not ok:
-                break
-            est = seg
-        return max(1, int(est * 0.85)) if est else 8   # 首档也撞 → 保守 8
+                    stamps_429.append(_tx)
+                else:
+                    if _m.get("failed"):
+                        stamps_429.append(_tx)
+                    else:
+                        stamps_ok.append(_tx)
+                # 提前退出：连续 429 已够多且跑过一段 → 配额封顶已现形
+                if len(stamps_429) >= 8 and (_t.time() - t0) > 10:
+                    break
+        finally:
+            try:
+                await eng.aclose()
+            except Exception:
+                pass
+        # 滑窗计数：首次 429 前 60s 内的成功数 ≈ 配额（无 429 → 65s 内全部成功换算 60s）
+        if stamps_429:
+            first_429 = stamps_429[0]
+            cnt = len([t for t in stamps_ok if first_429 - 60 < t <= first_429])
+        else:
+            elapsed = max(_t.time() - t0, 0.1)
+            cnt = int(len(stamps_ok) * 60 / elapsed)
+        return max(4, int(cnt * 0.85)) if cnt else 8, round(max(_t.time() - t0, 0.1), 1)   # 全挂 → 保守 8
+
 
     async def _verify(cc: int, bs: int) -> bool:
         """并发 cc/批 bs 发 2 批确认稳定（无异常且 failed==0）。"""
@@ -756,8 +772,9 @@ async def test_throughput(payload: dict = None):
     w, w_ok = await _measure_w()
     if not w_ok:
         return {"ok": False, "message": "当前 API 请求全部失败（请先测试连接）"}
+    rpm_secs = 0.0
     if rpm_auto:
-        rpm_eff = await _find_auto_rpm()   # 自动校准（渐进升档撞 429 取建议）
+        rpm_eff, rpm_secs = await _find_auto_rpm()   # 60s 滑窗灌满校准（约 10-65s）
     # ===== 方程（Little's Law）：并发 = 每分钟配额 × 单批耗时 / 60，封顶保守 =====
     conc = min(MAX_CONC, max(1, round((max(1, rpm_eff) / 60.0) * w)))
     batch = MAX_BATCH
@@ -768,7 +785,7 @@ async def test_throughput(payload: dict = None):
             break
         _final_c = max(1, _final_c // 2)   # 仍撞限流：降并发再试
     scan_ok = min(6, max(1, round(_final_c * 0.6)))
-    _auto_note = "（自动校准建议，你无需填写）" if rpm_auto else ""
+    _auto_note = f"（自动校准建议 ×{rpm_secs}s 窗口，你无需填写；已知配额可直接在设置页填数值跳过）" if rpm_auto else ""
     return {"ok": True, "preset": "auto",
             "concurrency": _final_c, "batch_size": batch,
             "scan_concurrency": scan_ok,
