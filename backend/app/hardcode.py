@@ -978,7 +978,14 @@ async def _ai_judge_single(engine, client, cand: dict, target_lang: str,
         resp.raise_for_status()
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
+        if _gate is not None:
+            _gate.report_ok()                     # 自动校准：判断成功也计入稳定信号
     except Exception as exc:
+        # v1.2.5：硬编码判断撞 429 也要喂校准信号（共享配额，撞了闸就该退档）
+        if _gate is not None:
+            _resp = getattr(exc, "response", None)
+            if _resp is not None and getattr(_resp, "status_code", None) == 429:
+                _gate.report_ratelimit()
         logger.warning("ai_judge 单条降级请求失败 %s：%s", cand["text"], exc)
         return "unresolved", None
     # 修复：on_usage 回调（含落盘）异常只记日志，不影响已成功的判断结果
@@ -1038,7 +1045,14 @@ async def _ai_judge_batch(engine, client, batch: list[dict], target_lang: str,
         resp.raise_for_status()
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
+        if _gate is not None:
+            _gate.report_ok()                     # 自动校准：判断成功也计入稳定信号
     except Exception as exc:
+        # v1.2.5：批量判断撞 429 也喂校准信号（共享配额，撞了闸就该退档）
+        if _gate is not None:
+            _resp = getattr(exc, "response", None)
+            if _resp is not None and getattr(_resp, "status_code", None) == 429:
+                _gate.report_ratelimit()
         # 请求失败（网络/API/HTTP 错误）→ 整批进 unresolved，不中断其他批次
         logger.warning("ai_judge 批次请求失败，%d 条进 unresolved：%s", len(batch), exc)
         result.unresolved.extend(c["text"] for c in batch)

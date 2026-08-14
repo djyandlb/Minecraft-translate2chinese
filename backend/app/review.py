@@ -131,7 +131,14 @@ async def _review_batch(engine, client, batch: list[dict], target_lang: str,
                 engine.on_usage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
             except Exception:
                 pass   # 修复：on_usage 回调异常不影响审查结果（否则整批审查被丢弃）
-    except Exception:
+        if _gate is not None:
+            _gate.report_ok()                     # 自动校准：审查成功也计入稳定信号
+    except Exception as e:
+        # v1.2.5：审查撞 429 也要喂校准信号（审查与翻译共享配额，撞了闸就该退档）
+        if _gate is not None:
+            _resp = getattr(e, "response", None)
+            if _resp is not None and getattr(_resp, "status_code", None) == 429:
+                _gate.report_ratelimit()
         return {}                # 审查请求失败：不误伤（宁可不审，不把好译文当坏的）
     return parse_review(out or "", len(batch))
 
