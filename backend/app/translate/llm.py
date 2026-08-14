@@ -434,13 +434,10 @@ class LLMClient:
                 return
             ctx["kind"] = self._err_kind(e)   # 修复：batch 级失败也更新错误类别（否则错误分类漂移）
             out = None
-            self._consec_fails = getattr(self, "_consec_fails", 0) + 1   # 运行时自适应计数
         except Exception as e:
             ctx["kind"] = self._err_kind(e)   # 修复：同上
             out = None
-            self._consec_fails = getattr(self, "_consec_fails", 0) + 1   # 运行时自适应计数
         if out is not None:
-            self._consec_fails = 0   # 主请求成功：清零（稳定信号，自适应降档据此恢复窗口）
             # 修复：on_usage 回调（含落盘）异常只记日志，不影响已成功的翻译结果
             if self.on_usage:
                 try:

@@ -655,8 +655,12 @@ async def test_throughput(payload: dict = None):
         return {"ok": False, "message": "base_url/model 未配置"}
 
     from app.translate.llm import LLMClient
-    # 真实长度样本（token 消耗贴近语言文件：短选项/中句/长描述混合）
-    probe = [
+    # 真实长度样本（token 消耗贴近语言文件：短选项/中句/长描述混合）。
+    # **修复（v1.2.3 recheck）**：基数必须 ≥ 最大批大小（40）——否则 probe 条数小于
+    # 批大小档位时 translate_batch 按 batch_size 切 chunk 仍是 1 个 chunk，批大小扫描
+    # 形同虚设（token/s 与批大小无关，永远停在 b12）。扩到 50 条让批 12/20/30/40
+    # 切出不同数量的 chunk，批大小差异真实反映在 token/s 上。
+    _probe_base = [
         "Sprint", "Back", "Enabled", "Silk Touch",
         "Use this item to light up dark areas in your base",
         "Shows the current weather and time on the HUD overlay",
@@ -668,6 +672,7 @@ async def test_throughput(payload: dict = None):
         "When both the right and the left wing are balanced, the crafted shield gains additional knockback resistance",
         "Enchantments applied to this bow affect every arrow shot regardless of the arrow's origin",
     ]
+    probe = list(_probe_base) * 5   # 50 条 ≥ 最大批 40：批大小档位能切出不同 chunk 数
     # 探测参数
     BATCH_CURVES = [12, 20, 30, 40]      # 阶段 A · 批大小档位（固定并发 2）
     BATCH_WINDOW_SEC = 8                 # 批大小扫描窗口（只需测截断/超限，可短些）
