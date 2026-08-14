@@ -210,9 +210,10 @@ class LLMClient:
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-            # 120s 超时（修复：60s 对 AI 长文本生成可能误超时 → 被 auto_flow 当「网络超时」
-            # 无限等待，用户「无论怎样都显示网络超时」根因之一）。生成慢是正常不是断网。
-            self._client = httpx.AsyncClient(timeout=120, headers=headers)
+            # 180s 超时（v1.2.3+ 慢 API 宽容：MiniMax/stepfun 等生成慢（单批 30-60s 正常），
+            # 120s 对大批次长文本仍可能误超时 → 降级链把「慢」当「死」反复重试翻倍耗时）。
+            # 生成慢是正常不是断网——超时只该在网络/服务挂掉时触发。
+            self._client = httpx.AsyncClient(timeout=180, headers=headers)
         return self._client
 
     async def aclose(self) -> None:

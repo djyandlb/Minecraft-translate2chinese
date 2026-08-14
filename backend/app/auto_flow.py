@@ -389,6 +389,13 @@ class AutoFlow:
         self.engine_machine: bool = False
         self.engine_filter_technical = None     # 语言文件阶段临时关闭技术串过滤，需恢复
         self._batch_size: int = 20
+        # 运行时自适应熔断（v1.2.3 + half-open 恢复）：连续失败降并发保护慢 API，
+        # 降档后连续健康自动回升到初始档（不再永久低并发——用户「20 分钟 1000 条 =
+        # 并发被压到 2 不恢复」根因）。
+        self._circuit_reduced = False
+        self._circuit_healthy = 0       # 降档态连续成功批数（满 _CIRCUIT_RECOVER_HEALTHY 回升一档）
+        self._circuit_initial_c: int | None = None   # 初始并发（create_engine 后记录，回升封顶）
+        self._circuit_initial_b: int | None = None   # 初始批次（同上）
         # 阶段产物（阶段方法写入，run 组织导出）
         self.by_mod: dict[str, dict[str, str]] = {}
         self.json_lines_translations: dict[Path, list[tuple[TextSource, dict[str, str]]]] = {}
@@ -772,15 +779,37 @@ class AutoFlow:
                 if translated_list is None:
                     translated_list = [p["text"] for p in pending]
                 _batch_err = _batch_err or f"请求被拒绝（{_kind}），请检查 API 配置"
-            # 运行时自适应（v1.2.3 熔断语义）：连续可恢复失败（限流/超时/网络/server）≥3 次
-            # → 自动降并发/批次（保护慢 API 不被高并发反复打挂「卡死」，适配所有 API）。
-            # 降档后重置计数，需再攒 3 次才再降（防震荡穿底）；恢复由「动态测试吞吐」重新校准。
+            # 运行时自适应熔断（v1.2.3 + half-open 恢复）：连续可恢复失败（限流/超时/网络/
+            # server）≥3 次 → 自动降并发/批次（保护慢 API）；**降档后连续健康（满 10 批）
+            # 自动回升一档直到初始档**——月食降档不再永久压制并发（用户「MiniMax 20 分钟
+            # 1000 条」根因：降下去永不恢复，一直 1-2 并发慢跑）。
+            _CIRCUIT_RECOVER_HEALTHY = 10   # 降档态连续成功批数 → 回升一档（half-open probe）
             if isinstance(self.engine, LLMClient):
                 _cc = getattr(self.engine, "_consec_fails", 0)
                 if _has_fail and _retryable:
                     self.engine._consec_fails = _cc + 1
+                    self._circuit_healthy = 0          # 失败打断健康计数
                 else:
                     self.engine._consec_fails = 0
+                    # 降档态且本批健康 → 累计，满阈值回升一档（封顶初始档）
+                    if self._circuit_reduced:
+                        self._circuit_healthy += 1
+                        if self._circuit_healthy >= _CIRCUIT_RECOVER_HEALTHY:
+                            _cur_c = getattr(self.engine, "concurrency", 5) or 5
+                            _cur_b = getattr(self.engine, "batch_size", 20) or 20
+                            _ic = self._circuit_initial_c or _cur_c
+                            _ib = self._circuit_initial_b or _cur_b
+                            _new_c = min(_ic, _cur_c * 2)
+                            _new_b = min(_ib, _cur_b * 2)
+                            if _new_c != _cur_c or _new_b != _cur_b:
+                                self.set_throughput(concurrency=_new_c, batch_size=_new_b)
+                                self.state.progress.append({"status": "translating", "count": len(pending),
+                                                            "note": f"API 已恢复稳定，自动回升并发（{_cur_c}→{_new_c} · 批 {_cur_b}→{_new_b}）"})
+                                self.store.save(self.state)
+                            self._circuit_healthy = 0
+                            if (_new_c, _new_b) == (_ic, _ib):
+                                self._circuit_reduced = False   # 回到初始档，退出降档态
+                # 触发降档：连续失败 ≥3 次
                 if self.engine._consec_fails >= 3:
                     _cur_c = getattr(self.engine, "concurrency", 5) or 5
                     _cur_b = getattr(self.engine, "batch_size", 20) or 20
@@ -792,6 +821,8 @@ class AutoFlow:
                                                     "note": f"当前 API 限流/超时频繁，已自动降低并发（{_cur_c}→{_new_c} · 批 {_cur_b}→{_new_b}）"})
                         self.store.save(self.state)
                     self.engine._consec_fails = 0
+                    self._circuit_reduced = True
+                    self._circuit_healthy = 0
             # 防 zip 截断：引擎返回条数不足 pending 时，尾部条目静默丢失会让
             # done<total、进度卡 <100%、产物缺条目（审查 P1-2）→ 按原文补足并计 failed
             if len(translated_list) != len(pending):
@@ -2703,6 +2734,15 @@ class AutoFlow:
 
             # 引擎创建（on_usage 回挂必须在 create_engine 前定义，供赋给 engine）
             self.engine = create_engine(self.cfg)
+            # 熔断恢复基准（v1.2.3+）：记录初始并发/批次，降档后回升封顶于此（永不超初始）
+            if isinstance(self.engine, LLMClient):
+                self._circuit_initial_c = getattr(self.engine, "concurrency", None)
+                self._circuit_initial_b = getattr(self.engine, "batch_size", 20)
+            else:
+                self._circuit_initial_c = None
+                self._circuit_initial_b = self._batch_size
+            self._circuit_reduced = False
+            self._circuit_healthy = 0
             if hasattr(self.engine, "on_usage"):
                 self.engine.on_usage = self._on_usage
             if isinstance(self.engine, LLMClient) and self.glossary_prompt:

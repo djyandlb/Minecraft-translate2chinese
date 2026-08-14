@@ -406,7 +406,7 @@ async function saveAndClose() {
         </div>
         <div class="slider-row">
           <span class="slider-name">每次批条数</span>
-          <input type="range" v-model.number="displayBatch" min="4" max="60" step="1" class="slider">
+          <input type="range" v-model.number="displayBatch" min="4" max="100" step="1" class="slider">
           <span class="slider-val">{{ displayBatch }}</span>
         </div>
         <div class="slider-row">

@@ -674,7 +674,9 @@ async def test_throughput(payload: dict = None):
     ]
     probe = list(_probe_base) * 5   # 50 条 ≥ 最大批 40：批大小档位能切出不同 chunk 数
     # 探测参数
-    BATCH_CURVES = [12, 20, 30, 40]      # 阶段 A · 批大小档位（固定并发 2）
+    BATCH_CURVES = [16, 24, 32, 48, 64]  # 阶段 A · 批大小档位（v1.2.3+ 放大：DeepSeek 等
+    #                                       大上下文 API 能吃到 64/批，请求减半；慢/小上下文
+    #                                       API 在截断/失败档自动回退保守批）
     BATCH_WINDOW_SEC = 8                 # 批大小扫描窗口（只需测截断/超限，可短些）
     CONC_CURVES = [1, 2, 4, 6, 8, 12, 16]  # 阶段 B · 并发档位
     CONC_WINDOW_SEC = 10                 # 并发扫描窗口
