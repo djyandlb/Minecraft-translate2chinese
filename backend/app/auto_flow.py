@@ -189,6 +189,12 @@ def _is_legit_keep_by_source(source: str) -> bool:
     # 是按键绑定不该翻译——审查判「不合格」强制重翻无意义且浪费 token。判合理保留。
     if _is_key_combo(s):
         return True
+    # v1.3.4（用户「同批 10 条占位符格式全失败」）：占位符格式串（%s/%d/%0.3f/%1$d +
+    # 短标签如 "Exp: %0.3f"）——AI 保留占位符是正确行为，审查判「非目标语言」强制重翻
+    # 徒劳（重翻仍原文 → 记 failed）。短格式串（≤40 字符、无 ≥4 字母实词）判合理保留。
+    # 长实词标签（"Damage: %s" 的 Damage）仍走翻译（该翻成「伤害：%s」）。
+    if "%" in s and len(s) <= 40 and not re.search(r"[A-Za-z]{4,}", s):
+        return True
     # 移除 %xx 占位符（%s/%d/%%/%1$s/%n 等）与 Minecraft § 颜色码（§e=黄/§r=重置，
     # 其字母是格式码非实词）后无英文字母 → 纯占位符/格式串（如 (%1$s): %2$s、
     # §e>§r %s §e<§r）→ 保留
@@ -530,9 +536,8 @@ class AutoFlow:
         for s in self.state.stages:
             if s["name"] == self.state.stage:
                 s["done"] += n
-                # v1.3.3 防御：done 超 total（双计/少算）时 total 跟随，进度不超 100%
-                if s["total"] < s["done"]:
-                    s["total"] = s["done"]
+                # v1.3.4：去掉 total 跟随（用户「total 随时涨」）——total 已改为全部值条目
+                #（含已汉化/记忆），done 恒 ≤ total；若仍超说明双计，应查根因而非掩盖
                 break
 
     def _bump_stage_only(self, n: int = 1) -> None:
@@ -2951,6 +2956,11 @@ class AutoFlow:
                 scans = await asyncio.to_thread(scan_jar, self.path, self.source_lang,
                                                 self.req.target_lang)
             self.state_jobs = build_jobs(scans, self.req.target_lang)
+            # v1.3.4（用户「total 随时涨 1312→1611」）：语言文件 total 应为**全部值条目**
+            #（含已汉化/记忆命中的），不是缺口 len(state_jobs)——记忆/CFPA/skip 命中在
+            # pipeline 也 bump done 但不在缺口里 → done 超缺口 total → 此前 total 跟随掩盖
+            #（total 乱涨）。全部值条目做 total，done（含记忆/CFPA/skip/翻译）恒 ≤ total。
+            self._lang_total = sum(len(s.source_entries) for s in scans)
             # 扫描完成汇总（用户诉求：明确知道读取成功与否）
             self.state.progress.append({"status": "done", "key": "扫描整合包",
                                         "source": f"{len(self.jars)} 个 mod",
@@ -3066,7 +3076,8 @@ class AutoFlow:
             # 硬编码阶段 done 按候选数推进（可见翻译或 exclude 判定都算「已处理」）；
             # build 阶段在产物组织前补入（total 依赖阶段 1-3 的实际产出）。
             self.state.stages = [
-                {"name": "lang", "total": len(self.state_jobs), "done": 0},
+                # v1.3.4：lang total 用全部值条目（含已汉化/记忆），done 恒 ≤ total，不再乱涨
+                {"name": "lang", "total": getattr(self, "_lang_total", 0) or len(self.state_jobs), "done": 0},
                 {"name": "json", "total": sum(
                     len(s.entries) for srcs in self.text_sources_by_jar.values() for s in srcs), "done": 0},
                 {"name": "pack", "total": sum(len(s.entries) for s in self.pack_sources), "done": 0},

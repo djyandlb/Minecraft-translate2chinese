@@ -96,6 +96,19 @@ def test_key_combo_kept_not_retranslated():
     assert not _is_key_combo("This is a sentence to translate")
 
 
+def test_placeholder_format_kept_not_failed():
+    """v1.3.4（用户「同批 10 条占位符格式全失败」）：%s/%d/%0.3f 占位符格式串（含短标签
+    如 Exp: %0.3f）判合理保留——AI 保留占位符是正确行为，审查不再打回强制重翻记 failed。"""
+    from app.auto_flow import _is_legit_keep_by_source
+    assert _is_legit_keep_by_source("%s (%s)")
+    assert _is_legit_keep_by_source("Exp: %0.3f")
+    assert _is_legit_keep_by_source("%d %s")
+    assert _is_legit_keep_by_source("%1$d / %2$d")
+    # 长实词标签仍该翻
+    assert not _is_legit_keep_by_source("Damage: %s")
+    assert not _is_legit_keep_by_source("Sprint")
+
+
 def test_json_should_translate_skips_switch_literals():
     """v1.2.9/1.3.0：jar 内 json 的纯布尔 true/false 不翻译（用户实测
     components[3].link_recipe 的 "true" 被翻成「是」）；

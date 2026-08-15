@@ -25,6 +25,11 @@ _PLACEHOLDER_RE = re.compile(
     r"|(?<![:/])/[A-Za-z0-9_@.-]+:[A-Za-z0-9_./@-]+"          # 注册名路径：/modid:key
     r"|(?<![:/])/[A-Za-z0-9_@.-]+(?:/[A-Za-z0-9_@.-]+)+"      # 多级路径（≥2 段 /）：config/jei/jei.toml
     r"|(?<![A-Za-z0-9_])/[a-z][a-z0-9-]+(?:\s+[A-Za-z0-9_@:./{}\[\]<>+-]+)*"  # 命令：/give @p diamond
+    # v1.3.5（用户「all Matter Energy→石"+technology"+" 乱码」）：Markdown **加粗**标记
+    # 单独保护——AI 把 `**` 输出成 `"+"` 破坏结构；保护后 AI 翻中间文本、restore 还原 `**`
+    #（mc_translator 格式保护思路）。链接 [text](url)/图片 ![alt](url) 由 prompt markdown
+    # 规则（保留语法、只翻文字）处理。
+    r"|\*\*"
     r"|#(?:[0-9a-fA-F]{3}){1,2}"      # #FFF / #FFFFFF
     r"|\{[^{}]*\}"                    # {var} / {0}
     r"|<[^<>]*>"                      # <item:iron_ingot>
