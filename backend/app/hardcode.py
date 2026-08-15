@@ -1127,11 +1127,11 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
         candidates[k:k + _judge_page]
         for k in range(0, len(candidates), _judge_page)
     ]
-    # v1.2.8：硬编码判断单条请求轻量、数量大，并发封顶 _AI_JUDGE_CONCURRENCY(5)——
-    # 不独占翻译全局并发池（避免小请求抢满池挤掉主翻译吞吐），也不无脑满配引擎并发。
-    # 独立小池 + 共享 RPM 预算闸（rate_gate）双保险：速率不超配额、瞬时并发受控。
-    sem = asyncio.Semaphore(
-        min(max(1, int(getattr(engine, "concurrency", _AI_JUDGE_CONCURRENCY))), _AI_JUDGE_CONCURRENCY))
+    # v1.3.2（用户「用 RPM 算硬编码批次」）：并发跟随引擎并发——引擎并发本就是 Little's Law
+    #（并发 = RPM/60 × W）按 RPM 预算算出的满速档位，硬编码判断阶段**独占运行**（翻译不并行）
+    # 可吃满；原封顶 5 低估高并发档（RPM 允许时白浪费）→ 慢。共享 rate_gate 仍保证不超 RPM 配额。
+    # 批大小跟随 batch_size（_judge_page），吞吐 ≈ RPM × 批大小（非逐条单发）。
+    sem = asyncio.Semaphore(max(1, int(getattr(engine, "concurrency", _AI_JUDGE_CONCURRENCY) or 1)))
 
     async def run_batch(batch: list[dict]) -> AiJudgeResult:
         async with sem:
@@ -1157,17 +1157,24 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
         unresolved_set = set(merged.unresolved)
         retry_cands = [c for c in candidates if c["text"] in unresolved_set]
         still: list[str] = []
-        for cand in retry_cands:
-            verdict, payload = await _ai_judge_single(
-                engine, client, cand, target_lang, known_translations,
-                silly_mode=silly_mode)   # 重判保持胡言乱语模式一致
-            if verdict == "translate":
-                merged.translations[cand["text"]] = (payload.replace("\\n", "\n")
-                              if "\n" in cand["text"] else payload)
-            elif verdict == "exclude":
-                merged.excluded.append(cand["text"])
-            else:
-                # 仍模棱两可 → 不翻译（保留 unresolved 返回，由调用方提示并保持原文）
-                still.append(cand["text"])
+        # v1.3.2 修复（用户「硬编码 1 条 1s」）：unresolved 重判原**逐条 _ai_judge_single 串行**——
+        # 每条 1 个请求排队，RPM 限速下 ~1.3 条/s（几百条 unresolved 重判要几分钟）。
+        # 改**批量重判**（_ai_judge_batch 每请求多条、走并发池），RPM 利用率提几十倍：
+        # 每请求判断 _judge_page 条，吞吐 ≈ RPM × _judge_page（非逐条单发）。
+        # 仍 unresolved → 不翻译（保持原文），与原「仍模棱两可→不翻译」语义一致。
+        _rejudge_sem = asyncio.Semaphore(max(1, int(getattr(engine, "concurrency", _AI_JUDGE_CONCURRENCY) or 1)))
+        rejudge_batches = [retry_cands[k:k + _judge_page]
+                           for k in range(0, len(retry_cands), _judge_page)]
+
+        async def _rejudge_batch(batch: list[dict]) -> AiJudgeResult:
+            async with _rejudge_sem:
+                return await _ai_judge_batch(engine, client, batch, target_lang,
+                                             known_translations, silly_mode=silly_mode)
+
+        for rr in await asyncio.gather(*(_rejudge_batch(b) for b in rejudge_batches)):
+            for text, tr in rr.translations.items():
+                merged.translations[text] = tr.replace("\\n", "\n") if "\n" in text else tr
+            merged.excluded.extend(rr.excluded)
+            still.extend(rr.unresolved)
         merged.unresolved = still
     return merged

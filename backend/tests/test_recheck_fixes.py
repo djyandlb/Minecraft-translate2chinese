@@ -56,6 +56,31 @@ def test_has_english_leak_catches_markdown_with_paths(tmp_path):
     assert not flow._has_english_leak("这是一段完全中文的内容介绍如何使用这个物品。")
 
 
+@pytest.mark.asyncio
+async def test_author_key_skipped_not_translated(tmp_path):
+    """v1.3.2：painting.*.author / 任务 author 字段（作者名）跳过翻译——
+    用户实测 Minimaxi（作者名/MC 用户名）被 AI 意译成「迷你极巨」。"""
+    from types import SimpleNamespace
+    from app.auto_flow import AutoFlow
+    from app.tasks import TaskState, TaskStore
+    store = TaskStore(tmp_path / "tasks")
+    store.save(TaskState(id="t1"))
+    req = SimpleNamespace(target_lang="zh_cn", source_lang="en_us", path=str(tmp_path / "p"))
+    flow = AutoFlow("t1", req, None, store, tmp_path / "w", tmp_path / "o", None)
+    flow.engine = SimpleNamespace(concurrency=4, batch_size=40)
+    flow.same_script = False
+    called: list[str] = []
+
+    async def fake_translate(texts, reasons=None):
+        called.extend(texts)
+        return texts, {}
+
+    items = [{"key": "painting.kubejs.project_infinity_logo_1.author",
+              "text": "Minimaxi", "sink": {}}]
+    await flow._translate_batch_pipeline(items, fake_translate, 40)
+    assert called == []   # author key 跳过，不调翻译（Minimaxi 保留原文）
+
+
 def test_json_should_translate_skips_switch_literals():
     """v1.2.9/1.3.0：jar 内 json 的纯布尔 true/false 不翻译（用户实测
     components[3].link_recipe 的 "true" 被翻成「是」）；

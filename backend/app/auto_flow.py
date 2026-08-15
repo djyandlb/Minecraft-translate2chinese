@@ -980,8 +980,12 @@ class AutoFlow:
             # 否则几千条 key 全无归属，用户看到的就是笼统的「翻译 config / 翻译 mod」）
             src_mod = item.get("mod", "")
             src_file = item.get("file", "")
-            if not force_engine and not self.same_script and not skip_fn(text, self.req.target_lang):
-                # 已汉化（含 CJK）/ 技术串：跳过翻译，计 done，不入产物。
+            # v1.3.2 修复（用户「Minimaxi→迷你极巨」）：painting.*.author / ftbquests 任务
+            # author 字段是**作者名（MC 用户名/专名）**，不该翻译——AI 把 "Minimaxi" 意译成
+            # 「迷你极巨」。跳过翻译（不入产物 → 游戏保留原作者名）；画作标题 .title 照常翻。
+            if not force_engine and not self.same_script and (
+                    not skip_fn(text, self.req.target_lang) or str(key).endswith(".author")):
+                # 已汉化（含 CJK）/ 技术串 / 作者名：跳过翻译，计 done，不入产物。
                 # 注意：same_script（简繁互转）时中文源文本必须保留翻译，跳过会漏转繁体。
                 self._skipped_n += 1   # 跳过翻译计数（覆盖率分母扣：可翻译量 = 总文本 - 跳过）
                 if count_done:

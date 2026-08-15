@@ -669,7 +669,9 @@ async def test_ai_judge_translate_invalid_json_not_translated():
     result = await ai_judge_translate(engine, [{"text": "Hello", "context": []}], "zh_cn")
     assert result.translations == {}        # 严格策略：判断不了 → 不翻译
     assert result.unresolved == ["Hello"]
-    assert calls["n"] == 3   # 1 批量 + 1 逐条降级 + 1 单条重判
+    # v1.3.2：unresolved 重判改批量（_ai_judge_batch）——非法 JSON 时批量重判内部也逐条降级
+    # → 4 次（1 主判断 + 1 逐条降级 + 1 批量重判 + 1 重判内降级）；正常 JSON 不降级更快
+    assert calls["n"] == 4
     await engine._client.aclose()
 
 

@@ -100,8 +100,9 @@ async def test_review_reuses_engine_global_conc_sem(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ai_judge_concurrency_capped_at_5(monkeypatch):
-    """v1.2.8：硬编码判断并发封顶 _AI_JUDGE_CONCURRENCY(5)，不无脑满配引擎并发(14)。"""
+async def test_ai_judge_concurrency_follows_engine(monkeypatch):
+    """v1.3.2：硬编码判断并发跟随引擎并发（按 RPM/Little's Law 算出），不再封顶 5——
+    用户「硬编码 1 条/s」根因：原封顶 5 + unresolved 逐条单发被 RPM 卡死。"""
     peak, cur = {"v": 0}, {"v": 0}
     release = asyncio.Event()
 
@@ -116,9 +117,9 @@ async def test_ai_judge_concurrency_capped_at_5(monkeypatch):
     engine = SimpleNamespace(
         concurrency=14, batch_size=40, _get_client=lambda: None)
     monkeypatch.setattr(hc, "_ai_judge_batch", fake_judge)
-    cands = [{"text": f"s{i}", "context": []} for i in range(250)]  # 7 批 > 5
+    cands = [{"text": f"s{i}", "context": []} for i in range(250)]  # 7 批
     task = asyncio.create_task(hc.ai_judge_translate(engine, cands, "zh_cn"))
     await asyncio.sleep(0.05)   # 等并发展开
     release.set()
     await task
-    assert 1 < peak["v"] <= 5    # 有并发、但被 5 封顶
+    assert 1 < peak["v"] <= 14    # 有并发、吃满引擎档（不封顶 5）
