@@ -63,8 +63,13 @@ class RateGate:
         # 修复（recheck）：rpm=0 + auto=False 时 _target=0 → _rate=0，acquire() 超配额
         # sleep 除零抛 ZeroDivisionError——取极小速率兜底（实际路径 rpm<=0 走 auto，防御公共类）
         self._rate = max(1e-9, self._target / 60.0)
-        # v1.2.9：桶容量 ≥ min_cap（并发数）——并发突发不被令牌桶憋死
-        self._cap = max(float(self._min_cap), self._target / 10.0)
+        # v1.2.9：桶容量 ≥ min_cap（并发数）——并发突发不被令牌桶憋死（auto 模式撞 429 会退档自愈）
+        # 修复（Agent recheck）：**固定模式（auto=False）突发不超 RPM 配额**——cap 钳
+        # min(min_cap, RPM)，否则 RPM=15/并发=16 时 burst 16 > 整个 60s 窗口配额必撞 429，
+        # 且固定模式 report_ratelimit 直接 return 无自愈 → 持续撞。
+        _cap_burst = (min(float(self._min_cap), self._target) if not self.auto
+                      else float(self._min_cap))
+        self._cap = max(1.0, _cap_burst, self._target / 10.0)
         self._tokens = self._cap
         self._last = time.monotonic()
 
@@ -90,6 +95,10 @@ class RateGate:
         self._target = max(1.0, self._target * _AUTO_BACKOFF)
         self._ok_streak = 0
         self._reset_bucket()
+        # v1.2.9 修复（Agent recheck）：退档后**清空桶令牌**——_reset_bucket 满桶 + min_cap
+        # 会让退档后立即放行 min_cap 个请求（又撞 429，冷却失效）。空桶 → 按新速率补充
+        #（target=1 时约 60s 才放 1 个，真正冷却）。
+        self._tokens = 0.0
 
     async def acquire(self) -> None:
         """等待并消耗 1 个令牌。超配额时本地睡到下一令牌，不发请求给 API。"""

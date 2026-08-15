@@ -800,10 +800,14 @@ async def test_throughput(payload: dict = None):
     if rpm_auto:
         rpm_eff, rpm_secs, rpm_hit = await _find_auto_rpm()   # 60s 滑窗灌满校准（10-65s）
         # v1.2.9：校准值存 config.calibrated_rpm，下次 create_engine 用它做 rate_gate
-        # auto 初始目标（否则 auto 从 30 爬坡、1000 条 <50 批永不升档，动态测试白测）
+        # auto 初始目标（否则 auto 从 30 爬坡、1000 条 <50 批永不升档，动态测试白测）。
+        # v1.3.0（Agent recheck）：加 _config_lock + 重新加载最新 cfg——原用开头快照
+        # save 整个 config，测试 10-65s 期间用户改的设置会被旧快照覆盖（lost update）
         try:
-            cfg.set("calibrated_rpm", rpm_eff)
-            cfg.save()
+            with _config_lock:
+                _cfg2 = AppConfig(CONFIG_PATH)
+                _cfg2.set("calibrated_rpm", rpm_eff)
+                _cfg2.save()
         except Exception:
             pass
     # ===== 方程（Little's Law）：并发 = 每分钟配额 × 单批耗时 / 60，封顶滑块上限 =====

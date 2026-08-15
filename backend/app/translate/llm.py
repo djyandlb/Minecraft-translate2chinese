@@ -201,6 +201,11 @@ class LLMClient:
             if _c != self.concurrency:
                 self.concurrency = _c
                 self._conc_sem = None      # 旧池废弃，下次按新值懒重建
+                # v1.2.9（Agent recheck）：热更新并发同步 rate_gate 桶容量（min_cap）——
+                # 否则初始并发 4 热更新 16 后桶容量仍 4 → 并发又被限回 4（「×16 显示但串行」复现）
+                if self.rate_gate is not None and hasattr(self.rate_gate, "_min_cap"):
+                    self.rate_gate._min_cap = _c
+                    self.rate_gate._reset_bucket()
                 _changed = True
         if batch_size is not None:
             _b = max(1, int(batch_size))
@@ -364,7 +369,10 @@ class LLMClient:
                 # v1.2.9 关键：RPM 令牌**先取、sem 后取**——等待令牌的请求不占全局并发池，
                 # 否则并行场景（翻译+审查同跑 _dual_pipeline）翻译 16 chunk 占满 sem 排队
                 # 等令牌，审查完全拿不到 sem 被挤死（用户实测「审查卡、翻译慢」）。
-                # 递归/单条兜底透传 gate_acquired 避免双扣配额。
+                # 修复（Agent recheck）：fatal 后其余 chunk 不再白等令牌（auto 低速率时
+                # 每个 acquire 等 60s，batch 收尾被拉长数十分钟）——acquire 前先查 fatal
+                if ctx["fatal"]:
+                    return
                 if self.rate_gate is not None:
                     await self.rate_gate.acquire()
                 async with sem:
@@ -546,12 +554,15 @@ class LLMClient:
                 if len(todo) > 1 and depth < _MAX_SPLIT_DEPTH:
                     await asyncio.sleep(0.5 * random.uniform(0.8, 1.2))  # 抖动退避防惊群
                     half = len(todo) // 2
+                    # v1.2.9 修复（Agent recheck）：递归切批是**独立 HTTP 请求**，每个都要独立
+                    # acquire 令牌——透传 gate_acquired=True 会让整个降级链（最坏 15 请求）只扣
+                    # 1 个令牌、免费重试撞 429。改传 False（默认）让子请求各自扣令牌。
                     await self._request_chunk(client, todo[:half], masked_list[:half], markers_list[:half],
                                               target_lang, results, ctx, forced=forced, feedback=feedback,
-                                              depth=depth + 1, gate_acquired=gate_acquired)
+                                              depth=depth + 1)
                     await self._request_chunk(client, todo[half:], masked_list[half:], markers_list[half:],
                                               target_lang, results, ctx, forced=forced, feedback=feedback,
-                                              depth=depth + 1, gate_acquired=gate_acquired)
+                                              depth=depth + 1)
                 else:
                     # 深度封顶：剩余整块不再递归，记 failed 交上层攒批重试
                     for _i, _t in todo:
@@ -562,10 +573,10 @@ class LLMClient:
                     results[i] = restore(clean_translation(parsed[n]), markers[n])
                 else:
                     # 该条漏标 → 逐条降级 _translate_single，不静默保留原文（P0 根因 2）。
+                    # v1.2.9（Agent recheck）：单条兜底是独立请求，各自 acquire 令牌
                     results[i] = await self._translate_single(
                         client, todo[n][1], masked[n], markers[n], target_lang, ctx,
-                        forced=forced, feedback=(fb_by_idx.get(todo[n][0], "") if feedback else ""),
-                        gate_acquired=gate_acquired)
+                        forced=forced, feedback=(fb_by_idx.get(todo[n][0], "") if feedback else ""))
             return
         # 请求失败 → 降级：有界切批（v1.2.3 深度封顶，不再无限切到单条——指数爆炸）。
         # 网络类错误（timeout/network/ratelimit/server）是瞬态，切批无助于定位毒丸，
@@ -577,22 +588,23 @@ class LLMClient:
             if depth < _max_depth:
                 await asyncio.sleep(0.5 * random.uniform(0.8, 1.2))
                 half = len(todo) // 2
+                # v1.2.9 修复（Agent recheck）：递归切批独立请求各自 acquire 令牌
                 await self._request_chunk(client, todo[:half], masked_list[:half], markers_list[:half],
                                           target_lang, results, ctx, forced=forced, feedback=feedback,
-                                          depth=depth + 1, gate_acquired=gate_acquired)
+                                          depth=depth + 1)
                 await self._request_chunk(client, todo[half:], masked_list[half:], markers_list[half:],
                                           target_lang, results, ctx, forced=forced, feedback=feedback,
-                                          depth=depth + 1, gate_acquired=gate_acquired)
+                                          depth=depth + 1)
             else:
                 # 深度封顶：剩余整块不再递归，逐条记 failed（交上层 _flush 攒批重试）
                 for _i, _t in todo:
                     ctx["failed"].add(_t)
         else:
             i, t = todo[0]
+            # v1.2.9（Agent recheck）：单条兜底是独立请求，各自 acquire 令牌
             results[i] = await self._translate_single(
                 client, t, masked[0], markers[0], target_lang, ctx,
-                forced=forced, feedback=(fb_by_idx.get(i, "") if feedback else ""),
-                gate_acquired=gate_acquired)
+                forced=forced, feedback=(fb_by_idx.get(i, "") if feedback else ""))
 
     async def _translate_single(self, client, text, masked, markers, target_lang, ctx: dict,
                                 forced: bool = False, feedback: str = "", gate_acquired: bool = False):

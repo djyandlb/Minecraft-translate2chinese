@@ -890,8 +890,11 @@ class AutoFlow:
                     _real_fail = (text in _failed) if _failed is not None else False
                     # 修复（recheck #1）：请求失败判定必须**逐条**——_batch_err 是整批级标记，
                     # 批内部分失败时成功译文会被误标 request_failed → 审查写回原文 + failed（好译文丢失）。
-                    # 该条失败 = 真失败（failed 集合命中）或「返回原文且批有错误」；翻出译文的条目标成功。
-                    _req_fail = _real_fail or (translated == text and bool(_batch_err))
+                    # v1.2.9 再修（Agent recheck）：`translated == text and bool(_batch_err)` 会误伤
+                    # 「AI 故意保留原文」的专有名词条目（同批其他条目失败时被误判 request_failed →
+                    # 记 failed）。_failed 集合已精确记录失败原文，**只基于 _real_fail** 判定——
+                    # AI 保留原文由审查判「合理保留 or 漏翻重翻」，不因批内他条失败背锅。
+                    _req_fail = _real_fail
                     # sink：审查管道写回目标（lang=by_mod[modid]，json/pack=该文本源 out dict）
                     await enqueue_fn({"key": key, "modid": p.get("mod", ""),
                                       "source": text, "translated": translated,
@@ -1014,12 +1017,14 @@ class AutoFlow:
                 if enqueue_fn is not None:
                     await enqueue_fn({"key": key, "modid": src_mod,
                                       "source": text, "translated": translated, "sink": sink})
+                    # v1.2.9 修复（recheck 双计）：简繁直转入审查队列也不提前 bump——
+                    # 审查过关写回 _write_reviewed 统一 bump，否则同一条目 done 加 2 次
                 else:
                     self.memory.set(text, self.req.target_lang, translated)
                     sink[key] = translated
-                if count_done:
-                    # 续联：简繁直转只推进 stage 明细（全局基准已含）
-                    self._bump_stage() if not self._resume else self._bump_stage_only()
+                    if count_done:
+                        # 续联：简繁直转只推进 stage 明细（全局基准已含）
+                        self._bump_stage() if not self._resume else self._bump_stage_only()
                 if enqueue_fn is None:
                     self.state.progress.append({"key": key, "source": text,
                                                 "translated": translated, "status": "done",
@@ -1322,11 +1327,10 @@ class AutoFlow:
                                     "mod": it["modid"], "reviewed": True})
         # v1.2.9 用户诉求：翻译 done 计数**只在审查过关写回时增加**（翻译阶段 enqueue 不再
         # 提前 bump）——读数 = 已过审成品，翻译与审查对齐，审查完一批读数同步进下一轮。
-        # 续联用 _bump_stage_only（全局基准已含，防翻倍）。
-        if not self._resume:
-            self._bump_stage()
-        else:
-            self._bump_stage_only()
+        # 修复（recheck 续联漏计）：统一 _bump_stage——_write_reviewed 的条目都是**本次新
+        # 翻译/重翻**（skip/记忆命中走 pipeline 其他分支用 _bump_stage_only，基准已含），
+        # 续联时新翻译条目也应加全局 done，不能只加 stage 明细。
+        self._bump_stage()
 
     def _add_project_term(self, source: str, decision: str) -> None:
         """项目级专有名词对照记录（用户诉求：Zeno→泽诺 这类决策写词汇表，后续统一沿用）。
@@ -1951,7 +1955,11 @@ class AutoFlow:
         for modid, entries in self.by_mod.items():
             src = self.source_by_mod.get(modid, {})
             for issue in audit_invariants(src, entries):
-                if issue["severity"] == "error" and issue["key"] not in _failed_keys:
+                if issue["severity"] == "error" and issue["key"] not in _failed_keys \
+                        and (modid, issue["key"]) not in self._req_fail_keys:
+                    # v1.2.9（Agent recheck）：request_failed 条目的 failures 记录不带 key 字段
+                    #（_failed_keys 含不到），其键名命中 audit 语义规则时被再计 failed → 双计；
+                    # _req_fail_keys 精确记录 request_failed 的 (modid,key)，审计跳过
                     self.state.failed += 1
                     self.failures.append({"text": src.get(issue["key"], "")[:50],
                                           "reason": f"审计不通过：{issue['message']}"})

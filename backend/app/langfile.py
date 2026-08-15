@@ -62,16 +62,24 @@ _LANG_VALUE_MEANING_RE = re.compile(
     r"Ѐ-ӿ가-힯Α-ω฀-๿]")
 
 
+# v1.3.0（Agent recheck）：语言文件值若整体是布尔/开关字面量（`xxx.enabled=true` 的 "true"）
+# 是配置显示不是文本，跳过翻译（对齐 _SWITCH_LITERALS）。真实文本按钮 "True" 概率极低可接受。
+_SWITCH_LITERALS = {"true", "false", "yes", "no", "on", "off", "null", "none",
+                    "enabled", "disabled", "enable", "disable"}
+
+
 def lang_value_ok(value: str) -> bool:
-    """语言文件的值是否值得翻译：仅「长度 2-500 + 含字母/汉字」。
+    """语言文件的值是否值得翻译：仅「长度 2-500 + 含字母/汉字」，且非布尔/开关字面量。
 
     语言文件的值本就是可翻译文本（键才是标识符），因此不走 should_translate
     的技术标识符规则——"Requires_Armor" 这类 snake_case 形态是真实英文短语，
-    不能被当 iron_ingot 那样的技术串滤掉。只排除过短/纯数字/纯符号值。
+    不能被当 iron_ingot 那样的技术串滤掉。只排除过短/纯数字/纯符号/开关字面量。
     长度上限 500（修复：长段工具提示/说明 >200 字符被旧上限误过滤 → 漏翻，
     MC 语言文件说明最长约 400-500 字符）。
     """
     if not (2 <= len(value) <= 500):
+        return False
+    if value.strip().lower() in _SWITCH_LITERALS:
         return False
     return _LANG_VALUE_MEANING_RE.search(value) is not None
 

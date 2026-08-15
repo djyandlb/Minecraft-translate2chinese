@@ -369,6 +369,11 @@ watch(() => props.taskId, (newId) => {
     reviewVisible.value = false
     hadReview = false
     clearTimeout(reviewTimer)
+    // v1.3.0（Agent recheck）：切任务重置速率统计——旧任务 done（如 5000）与新任务
+    // done（从 0 起）相减得巨大负值/虚假高值，速率显示失真
+    _lastDone = null
+    _lastT = 0
+    rateText.value = ''
     refresh()                 // 连接即拉一次快照（SSE 端点也会发首帧，双保险）
     startStreaming(newId)     // 用 SSE 实时推送
   } else {
