@@ -401,6 +401,8 @@ class AutoFlow:
         # 请求失败（request_failed）的 (modid, key) 集合（v1.2.8）：审查写回原文后被
         # 漏翻闭环误收集重翻——请求/服务失败重翻无意义且浪费 token、报告失败重复
         self._req_fail_keys: set[tuple[str, str]] = set()
+        # v1.2.8 并发生效可视化：当前在飞的并发 chunk 数（聚合「正在翻译 40 条 × N」）
+        self._active_chunks: int = 0
         self.json_lines_translations: dict[Path, list[tuple[TextSource, dict[str, str]]]] = {}
         self.pack_translations: list[tuple[TextSource, dict[str, str]]] = []
         self.hard_mappings: dict[Path, dict[str, str]] = {}
@@ -662,20 +664,56 @@ class AutoFlow:
         """
         pending: list[dict] = []          # 待引擎条目 {key, text, sink, reason?}
 
+        def _push_chunk_status(n: int) -> None:
+            """聚合一条「正在翻译 N 条 × 当前并发」：明细只显示最新一条（前端去重）。"""
+            self.state.progress.append({"status": "translating", "count": n,
+                                        "active": self._active_chunks, "key": "@active_chunks"})
+            self.store.save(self.state)
+
+        def _chunk_start_cb(n: int) -> None:
+            """每并发 chunk 请求开始：在飞计数 +1 → 聚合提示递增。
+
+            **嵌套函数**（非实例方法）：作为 engine.on_chunk_start 回调被调（只收 n），
+            self 走闭包——写成 `def _chunk_start_cb(self, n)` 会 AttributeError 整批失败。
+            """
+            self._active_chunks += 1
+            _push_chunk_status(n)
+
+        def _chunk_done_cb(n: int) -> None:
+            """每并发 chunk 完成（成败都）：在飞计数 -1 → 聚合提示递减。"""
+            self._active_chunks = max(0, self._active_chunks - 1)
+            _push_chunk_status(n)
+
         async def _flush() -> None:
             """攒满一批 → 一次批量翻译 → 逐条写回记忆/产物/进度。"""
             if not pending:
                 return
             texts = [p["text"] for p in pending]
-            # 批开始：先给前端「正在翻译 N 条」反馈（批量请求期间 done 不更新，
-            # 不加这行会让进度条/明细看起来像卡死——用户反馈）
-            self.state.progress.append({"status": "translating", "count": len(pending)})
+            # v1.2.8：进度反馈改为「聚合一条『正在翻译 N 条 × 当前并发』」——LLM 引擎
+            # 每 chunk 开始/完成更新在飞计数，明细只显示最新一条（并发 16 → 「正在翻译
+            # 40 条 × 16」→ 随完成递减，不是 16 条刷屏）；无该能力的引擎（machine）退回
+            # 整批「正在翻译 N 条」提示（原行为，批量请求期间进度条也有反馈）
+            _eng = getattr(self, "engine", None)
+            _chunk_ok = bool(_eng is not None and hasattr(_eng, "on_chunk_start"))
+            if not _chunk_ok:
+                self.state.progress.append({"status": "translating", "count": len(pending)})
             self.store.save(self.state)
             try:
                 # translate_fn(texts, reasons)：reasons 与 texts 对齐，供 AI 审查反馈重翻
                 # （每条携带上次审查不合格原因，AI 针对原因修正——用户诉求「翻译到合格」）
-                _translated = await translate_fn(
-                    texts, [p.get("reason", "") for p in pending])
+                if _chunk_ok:
+                    _s0, _d0 = _eng.on_chunk_start, _eng.on_chunk_done
+                    _eng.on_chunk_start = _chunk_start_cb    # 闭包引用（非 self.xxx）
+                    _eng.on_chunk_done = _chunk_done_cb
+                    try:
+                        _translated = await translate_fn(
+                            texts, [p.get("reason", "") for p in pending])
+                    finally:
+                        _eng.on_chunk_start, _eng.on_chunk_done = _s0, _d0
+                        self._active_chunks = 0   # 本次 flush 结束，清零防跨批残留
+                else:
+                    _translated = await translate_fn(
+                        texts, [p.get("reason", "") for p in pending])
                 # 修复：translate_fn 返回 (results, meta)（per-call 失败状态）或 list（mock/旧引擎）
                 if (isinstance(_translated, tuple) and len(_translated) == 2
                         and isinstance(_translated[1], dict)):

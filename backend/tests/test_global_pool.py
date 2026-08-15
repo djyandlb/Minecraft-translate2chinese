@@ -39,6 +39,26 @@ async def test_translate_batch_uses_shared_conc_sem():
 
 
 @pytest.mark.asyncio
+async def test_translate_batch_chunk_callbacks_fire_per_chunk():
+    """v1.2.8：每并发 chunk 请求开始/完成触发 on_chunk_start/on_chunk_done——
+    聚合「正在翻译 40 条 × N」的数据源（并发 2、80 条 → 2 chunk 各 40 条）。"""
+    starts, dones = [], []
+
+    def handler(req):
+        content = "\n".join(f"[i{i}] 译{i}" for i in range(40))
+        return Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    client = LLMClient("https://x", "k", "m", concurrency=2, batch_size=40)
+    client._client = AsyncClient(transport=MockTransport(handler))
+    client.on_chunk_start = lambda n: starts.append(n)
+    client.on_chunk_done = lambda n: dones.append(n)
+    await client.translate_batch([f"text number {i}" for i in range(80)], "zh_cn")
+    assert len(starts) == 2 and set(starts) == {40}   # 2 chunk，各 40 条
+    assert len(dones) == 2                             # 都触发 done（计数器归零）
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_set_throughput_rebuilds_conc_sem():
     """v1.2.8：set_throughput 改并发 → 置空全局池，下次懒重建为新值。"""
     client = _client_with(lambda req: _OK)

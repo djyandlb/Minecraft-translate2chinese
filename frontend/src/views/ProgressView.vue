@@ -164,9 +164,24 @@ const warnInfo = computed(() => lastProgress(p => p.status === 'warn')?.error ||
 // 阻塞 SSE/轮询事件 → 「翻译中右栏不实时」）。未翻译明细（untranslated）在终态置顶不受影响。
 // 修复：未翻译汇总（untranslated）不再在明细里显示——大整合包失败几百条放不下，
 // 具体原因见「翻译报告」弹窗（任务完成后点「阅读翻译报告」查看全部失败明细）
-const rows = computed(() => (task.value?.progress || [])
-  .filter(p => !p.untranslated)
-  .slice(-100).reverse())
+const rows = computed(() => {
+  const arr = task.value?.progress || []
+  const out = []
+  let sawActive = false
+  // 倒序遍历（最新在前）：v1.2.8 聚合的 @active_chunks（正在翻译 40 条 × N）只保留
+  // 最新一条，其余旧值跳过——不刷 16 条、只看当前并发在飞数
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const p = arr[i]
+    if (p.untranslated) continue
+    if (p.status === 'translating' && p.key === '@active_chunks') {
+      if (sawActive) continue
+      sawActive = true
+    }
+    out.push(p)
+    if (out.length >= 100) break
+  }
+  return out
+})
 // 文件归属短化：jar 内路径 assets/jei/models/foo.json → models/foo.json；config/foo.json 保留两段
 function shortFile(p) {
   const parts = String(p || '').split('/')
@@ -611,8 +626,10 @@ onUnmounted(() => {
                 <template v-if="r.status === 'translating'">
                   <!-- 批量翻译/判断/下载进行中：给用户「在干活」反馈，避免进度条/明细像卡死。
                        语言文件阶段 note 为空 → 默认「正在翻译」；硬编码/词库阶段 note 有具体说明。
-                       count=0（词库下载）时不再显示「0 条」 -->
-                  <div class="row-key">⏳ {{ r.note || '正在翻译' }}{{ r.count ? ` ${r.count} 条…` : '…' }}</div>
+                       count=0（词库下载）时不再显示「0 条」。
+                       v1.2.8 聚合：r.active>1 → 「正在翻译 40 条 × 16」（16 个并发 chunk 在飞）；
+                       active<=1 → 「正在翻译 40 条」 -->
+                  <div class="row-key">⏳ {{ r.note || '正在翻译' }}{{ r.count ? ` ${r.count} 条` : '' }}{{ r.active > 1 ? ` × ${r.active}` : '' }}…</div>
                 </template>
                 <template v-else-if="r.error">
                   <!-- 警告/失败条目：优先显示 error 内容（warn+key 条目走常规分支会渲染空箭头丢信息） -->

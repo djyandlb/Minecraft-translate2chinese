@@ -181,6 +181,10 @@ class LLMClient:
         # concurrency 建池；set_throughput 改并发时置 None，下次按新值重建（asyncio
         # 单线程，无 await 的检查+赋值是原子的，不会竞态）。
         self._conc_sem: asyncio.Semaphore | None = None
+        # v1.2.8 并发生效可视化：每并发 chunk 请求开始/完成回调（pipeline 据此聚合显示
+        # 「正在翻译 N 条 × 当前并发数」，不是每 chunk 刷一条）。None = 不回调。
+        self.on_chunk_start = None
+        self.on_chunk_done = None
 
     def set_throughput(self, concurrency: int | None = None, batch_size: int | None = None) -> bool:
         """热更新吞吐档位（v1.2.8）：改并发/批次，下次批量即生效。
@@ -355,11 +359,19 @@ class LLMClient:
 
             async def run_chunk(chunk):
                 async with sem:
+                    # v1.2.8 并发生效可视化：每 chunk 请求开始回调（pipeline 聚合 ×N）
+                    if self.on_chunk_start is not None:
+                        self.on_chunk_start(len(chunk))
                     masked_list = [(i, protected[i][0]) for i, _ in chunk]
                     markers_list = [(i, protected[i][1]) for i, _ in chunk]
-                    await self._request_chunk(client, chunk, masked_list, markers_list,
-                                              target_lang, results, ctx, forced=forced,
-                                              feedback=feedback)
+                    try:
+                        await self._request_chunk(client, chunk, masked_list, markers_list,
+                                                  target_lang, results, ctx, forced=forced,
+                                                  feedback=feedback)
+                    finally:
+                        # 完成回调（不论成败都 -1 在飞计数）
+                        if self.on_chunk_done is not None:
+                            self.on_chunk_done(len(chunk))
 
             await asyncio.gather(*(run_chunk(c) for c in chunks))
         # 修复（recheck fatal 短路）：meta 必须**先 update 再 raise**——原代码 raise 在前，
