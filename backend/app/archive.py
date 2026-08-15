@@ -85,16 +85,22 @@ def safe_extract(zf: zipfile.ZipFile, dest: Path,
         if not clean:
             continue   # 全非法条目跳过
         target = dest / clean
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with zf.open(info) as src, open(target, "wb") as out:
-            while True:
-                chunk = src.read(1024 * 1024)
-                if not chunk:
-                    break
-                _written += len(chunk)
-                if _written > _MAX_TOTAL:
-                    raise ValueError("解压实际体积超限，疑似 zip 炸弹")
-                out.write(chunk)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, open(target, "wb") as out:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    _written += len(chunk)
+                    if _written > _MAX_TOTAL:
+                        raise ValueError("解压实际体积超限，疑似 zip 炸弹")
+                    out.write(chunk)
+        except OSError as e:
+            # 修复（recheck）：恶意/脏 zip 可构造「目录条目 a/ + 同名文件条目 a」——
+            # open(target) 抛 IsADirectoryError 中断整个解压；逐条跳过继续（zip 炸弹
+            # ValueError 不在此捕获，仍需冒泡）
+            continue
         if on_progress and (i % 50 == 0 or i == n - 1):
             on_progress(i + 1, n)
 

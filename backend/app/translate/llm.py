@@ -362,10 +362,13 @@ class LLMClient:
                                               feedback=feedback)
 
             await asyncio.gather(*(run_chunk(c) for c in chunks))
-            if ctx["fatal"]:
-                raise ValueError(ctx["fatal"])
+        # 修复（recheck fatal 短路）：meta 必须**先 update 再 raise**——原代码 raise 在前，
+        # auto_flow 的 _meta 永远 None → 落到读死属性 _fatal_error → 收不到 fatal，401 整批
+        # 静默记 failed、任务继续跑完所有阶段每批白打一次 401。先同步 meta 再抛异常。
         if meta is not None:
             meta.update(ctx)
+        if ctx["fatal"]:
+            raise ValueError(ctx["fatal"])
         return results
 
     async def _request_chunk(self, client, todo, masked_list, markers_list, target_lang, results,
@@ -611,13 +614,15 @@ class LLMClient:
             "temperature": 0.2,
             "max_tokens": 8192,   # 防默认上限截断输出（单条长句也要完整译出）
         }
+        if ctx["fatal"]:
+            # 修复（recheck）：致命错误检查移到 acquire **之前**——原顺序下 auto 低 RPM 时
+            # 每条先白等令牌（退档 1 RPM ≈60s/个）才发现 401，整批收尾极慢。致命后不再
+            # 发请求、不排队，立即标记失败回原文（auto_flow 据此整批失败）
+            ctx["failed"].add(text)
+            return text
         # v1.2.4 请求前 RPM 预算闸：与批量请求共享同一配额，单条兜底不偷偷绕过
         if self.rate_gate is not None:
             await self.rate_gate.acquire()
-        if ctx["fatal"]:
-            # 鉴权致命错误后：不再发请求，标记失败并回原文（auto_flow 据此整批失败）
-            ctx["failed"].add(text)
-            return text
         try:
             resp = await client.post(f"{self.base_url}/chat/completions", json=body)
             resp.raise_for_status()

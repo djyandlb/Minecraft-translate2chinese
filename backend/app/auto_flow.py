@@ -398,6 +398,9 @@ class AutoFlow:
         self._circuit_initial_b: int | None = None   # 初始批次（同上）
         # 阶段产物（阶段方法写入，run 组织导出）
         self.by_mod: dict[str, dict[str, str]] = {}
+        # 请求失败（request_failed）的 (modid, key) 集合（v1.2.8）：审查写回原文后被
+        # 漏翻闭环误收集重翻——请求/服务失败重翻无意义且浪费 token、报告失败重复
+        self._req_fail_keys: set[tuple[str, str]] = set()
         self.json_lines_translations: dict[Path, list[tuple[TextSource, dict[str, str]]]] = {}
         self.pack_translations: list[tuple[TextSource, dict[str, str]]] = []
         self.hard_mappings: dict[Path, dict[str, str]] = {}
@@ -851,7 +854,9 @@ class AutoFlow:
                     await enqueue_fn({"key": key, "modid": p.get("mod", ""),
                                       "source": text, "translated": translated,
                                       "sink": sink, "request_failed": _req_fail})
-                    if count_done:
+                    # 修复（recheck 双计）：request_failed 条目不 bump done——审查阶段会
+                    # failed+1，done 已含它会导致 done+failed>total、覆盖率虚高
+                    if count_done and not _req_fail:
                         self._bump_stage()
                     continue
                 if translated == text:
@@ -863,6 +868,8 @@ class AutoFlow:
                         # AI 故意保留原文（专有名词/命令/代码标识）→ 不算失败，写回原文
                         # 供审查判漏翻（该翻的会被审查抓出重翻；专有名词审查豁免）
                         sink[key] = translated
+                        if count_done:
+                            self._bump_stage()
                     else:
                         # 失败回原文：仅主轮（count_done）计 failed——重翻轮不重复计，
                         # 终审 _record_residual_failures 统一判（修复：同一失败条目计 4-6 次）
@@ -870,10 +877,12 @@ class AutoFlow:
                         # 不覆盖好译文——审查重翻失败时旧译文还在，不被击穿成漏翻）
                         if count_done:
                             self.state.failed += 1
-                        # 记录 key（修复 Agent 审查）：_record_residual_failures 据此跳过已计
-                        # failed 的 key，消除「流水线真失败 + 审计缺译文」双计
-                        self.failures.append({"key": key, "text": text[:50],
-                                              "reason": _batch_err or ("翻译服务失败" if _real_fail else "LLM 未返回译文")})
+                            # 记录 key（修复 Agent 审查）：_record_residual_failures 据此跳过
+                            # 已计 failed 的 key，消除「流水线真失败 + 审计缺译文」双计
+                            # 修复（recheck 双计）：failures 进 count_done 块——重翻轮失败
+                            # 不再重复 append，报告条目数与顶部 failed 计数对得上
+                            self.failures.append({"key": key, "text": text[:50],
+                                                  "reason": _batch_err or ("翻译服务失败" if _real_fail else "LLM 未返回译文")})
                 else:
                     # 真译文：名称归一化（第一定义/后续跟随）→ 写 sink + 写记忆。
                     # 无审查管道的引擎（machine/兜底）在此也做归一化，保证全引擎统一。
@@ -881,8 +890,10 @@ class AutoFlow:
                     self.memory.set(text, self.req.target_lang, translated)
                     self._record_consistency(text, translated)   # 一致性统计（兜底归一化用）
                     sink[key] = translated
-                if count_done:
-                    self._bump_stage()
+                    if count_done:
+                        self._bump_stage()
+                # 修复（recheck 双计）：done 只在成功/保留原文分支 bump——失败条目仅计 failed，
+                # 否则 done+failed>total、覆盖率分子含失败条目虚高
                 self.state.progress.append({"key": key, "source": text,
                                             "translated": translated, "status": "done"})
                 if self.state.done % 10 == 0:
@@ -1109,6 +1120,8 @@ class AutoFlow:
                 if sink is None:
                     sink = it["sink"] = self.by_mod.setdefault(it.get("modid", ""), {})
                 sink[it["key"]] = it["source"]
+                # v1.2.8 修复：记录失败 key，漏翻闭环据此排除（请求/服务失败重翻无意义）
+                self._req_fail_keys.add((it.get("modid", ""), it["key"]))
                 self.state.failed += 1
                 self.failures.append({"text": it.get("source", "")[:50],
                                       "reason": "翻译服务失败（请求异常）"})
@@ -1814,7 +1827,8 @@ class AutoFlow:
             for key, trans in entries.items():
                 s = src.get(key)
                 if (s and trans == s and not str(key).startswith("effect.")
-                        and (modid, key) not in self._legit_kept):   # 修复：初审过审的保留原文不重复审
+                        and (modid, key) not in self._legit_kept
+                        and (modid, key) not in self._req_fail_keys):   # v1.2.8：请求失败不重翻
                     leak_pairs.append({"key": key, "source": s, "translated": trans})
         if not leak_pairs:
             return
@@ -2315,6 +2329,12 @@ class AutoFlow:
                                                 "error": f"渲染 jar 文本失败：{e}"})
                     continue
                 for rel, content in rendered:
+                    # 修复（recheck zip-slip）：rel 来自 jar 条目名，恶意条目可含 ../../ 段
+                    # 逃逸 build_dir 写盘（解压层有净化，此处渲染落盘环节没有）——拼接前
+                    # 拒绝绝对路径与 .. 段，对齐 _build_patch_pack 的净化逻辑
+                    _rp = PurePosixPath(rel)
+                    if _rp.is_absolute() or ".." in _rp.parts:
+                        continue
                     # 落盘用 target_path（译文目标路径，lines 的 zh_cn/），非 source_path
                     f = (build_dir / "resourcepacks" / "模组汉化资源包" / rel
                          if rel.startswith("assets/") else build_dir / rel)
@@ -2478,6 +2498,10 @@ class AutoFlow:
                 eng.set_throughput(concurrency=concurrency, batch_size=batch_size)
             except Exception:
                 pass
+            # 修复（recheck）：有 set_throughput（LLM/machine）就到此为止——不再 fallback
+            # 直改属性，否则 machine 的并发 cap 5 会被下面的 `eng.concurrency = max(1, int())`
+            # 覆盖绕过（Google 免费通道高并发全 429）
+            return
         if concurrency:
             if hasattr(eng, "concurrency"):
                 eng.concurrency = max(1, int(concurrency))

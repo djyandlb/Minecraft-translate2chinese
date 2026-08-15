@@ -9,9 +9,11 @@ from pathlib import Path
 def _dirs() -> list[str]:
     """返回本机路径前缀（正斜杠 + 反斜杠两个变体）。
     修复（recheck）：Windows 异常消息（PermissionError 等）用反斜杠路径，
-    只生成正斜杠变体无法匹配 → 脱敏失效、本机目录结构泄露给前端。"""
+    只生成正斜杠变体无法匹配 → 脱敏失效、本机目录结构泄露给前端。
+    v1.2.8 修复：追加 cwd——用户自定义 cache_dir 不在 temp/home 下时（如 D:\\MyCache），
+    异常消息里的该路径前缀也能被替换，不泄露自定义目录结构。"""
     out = []
-    for d in (tempfile.gettempdir(), str(Path.home())):
+    for d in (tempfile.gettempdir(), str(Path.home()), str(Path.cwd())):
         if d:
             out.append(d.replace("\\", "/"))
             out.append(d.replace("/", "\\"))

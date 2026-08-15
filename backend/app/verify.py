@@ -58,15 +58,17 @@ def verify_translated_jar(jar: Path, target_lang: str = "zh_cn") -> dict:
                     continue
                 try:
                     if n.endswith(".json"):
-                        data = json.loads(zf.read(n).decode("utf-8"))
+                        # 修复（recheck）：剥 BOM——utf-8-sig 解码，带 BOM 的 json 不再被
+                        # json.loads 误判「语言文件损坏」→ 整 jar 不输出（对齐 scanner/langfile）
+                        data = json.loads(zf.read(n).decode("utf-8-sig"))
                     else:
                         from app.langfile import parse_lang, parse_properties
-                        txt = zf.read(n).decode("utf-8")
+                        txt = zf.read(n).decode("utf-8-sig")
                         data = parse_lang(txt) if n.endswith(".lang") else parse_properties(txt)
                 except Exception:
                     # 修复：非 UTF-8（GBK 老汉化 jar）尝试宽松解码，能解析则软提示不误杀产物
                     try:
-                        txt = zf.read(n).decode("utf-8", errors="replace")
+                        txt = zf.read(n).decode("utf-8-sig", errors="replace")
                         if n.endswith(".json"):
                             data = json.loads(txt)
                         else:

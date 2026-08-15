@@ -6,7 +6,11 @@ _UUID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 _PURE_ALPHA_RE = re.compile(r"^[a-zA-Z]+$")
 _IDENT_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
 # 有实际含义的字符：拉丁字母或汉字（纯数字/符号串如 "123" 不含，跳过）
-_HAS_MEANING_RE = re.compile(r"[a-zA-Z一-鿿]")
+# v1.2.8 修复（recheck）：补假名/西里尔/谚文/希腊/泰文——非拉丁源（日文/俄文/韩文）的
+# json/lines/硬编码文本不再被 needs_translation 全部跳过静默漏翻
+_HAS_MEANING_RE = re.compile(
+    r"[a-zA-Z一-鿿㐀-䶿ぁ-んァ-ヶ"
+    r"Ѐ-ӿ가-힯Α-ω฀-๿]")
 # 带点无空格（类路径/域名/版本号/带点标识符）：com.example.Mod / path.to.x / v1.2.3。
 # 用户判定「中间带这么多点又不是句号怎么可能是文本」——句号后跟空格才是句子
 # （Hello. This is...）；点后无空格是代码标识 → 跳过。

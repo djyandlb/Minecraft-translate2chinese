@@ -45,7 +45,9 @@ class RateGate:
         self._reset_bucket()
 
     def _reset_bucket(self) -> None:
-        self._rate = self._target / 60.0
+        # 修复（recheck）：rpm=0 + auto=False 时 _target=0 → _rate=0，acquire() 超配额
+        # sleep 除零抛 ZeroDivisionError——取极小速率兜底（实际路径 rpm<=0 走 auto，防御公共类）
+        self._rate = max(1e-9, self._target / 60.0)
         self._cap = max(1.0, self._target / 10.0)
         self._tokens = self._cap
         self._last = time.monotonic()

@@ -352,8 +352,8 @@ def discover_text_sources(jar: Path, target_lang: str = "zh_cn") -> list[TextSou
                 try:
                     raw = zf.read(name).decode("utf-8-sig")
                     data = json.loads(raw)
-                except (UnicodeDecodeError, ValueError):
-                    continue   # 单个 json 损坏/非 json：跳过该文件
+                except (UnicodeDecodeError, ValueError, RecursionError):
+                    continue   # 单个 json 损坏/非 json/深嵌套超限：跳过该文件（不中断整个 jar）
                 entries: dict[str, str] = {}
                 # easing 枚举白名单（_json_should_translate）：教程书/进度里散落的
                 # 枚举值（linear/step/bounce 等）也拦截，产物保留原文。

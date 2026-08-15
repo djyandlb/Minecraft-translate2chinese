@@ -48,16 +48,26 @@ def _scan_one_jar(jar: Path, source_lang: str, target_lang: str) -> list[ModScan
                 if info["lang"] != source_lang:
                     continue
                 tgt_path = f"assets/{info['modid']}/lang/{target_lang}.{info['format']}"
-                src = _read_entries(zf, info["path"], info["format"])
-                tgt = _read_entries(zf, tgt_path, info["format"]) if tgt_path in zf.namelist() else {}
+                # 修复（recheck）：单文件损坏只跳过该文件——原逻辑整循环包在 try 里，
+                # 一个坏 json/编码异常会让整个 jar 的所有 mod 语言文件全丢弃（静默漏翻放大）
+                try:
+                    src = _read_entries(zf, info["path"], info["format"])
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+                    print(f"[警告] 跳过损坏语言文件 {info['path']}: {e}", file=sys.stderr)
+                    continue
+                tgt = {}
+                if tgt_path in zf.namelist():
+                    try:
+                        tgt = _read_entries(zf, tgt_path, info["format"])
+                    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                        pass
                 results.append(ModScan(jar_path=jar, modid=info["modid"],
                                        source_entries=src, target_entries=tgt,
                                        lang_format=info["format"]))
         return results
-    except (zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError,
-            zlib.error, EOFError) as e:
-        # 损坏的 jar / 语言文件 / 压缩流异常（zlib.error、EOFError）：跳过该 mod，
-        # 不让一个坏文件炸掉整包扫描
+    except (zipfile.BadZipFile, zlib.error, EOFError) as e:
+        # 损坏的 jar / 压缩流异常（zlib.error、EOFError）：跳过该 mod，
+        # 不让一个坏 jar 炸掉整包扫描（语言文件损坏已在上面 per-file 兜底）
         print(f"[警告] 跳过损坏的 mod: {jar} - {e}", file=sys.stderr)
         return []
 

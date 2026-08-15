@@ -57,6 +57,23 @@ class MachineClient:
         self._batch_failed_texts: set[str] = set()
         self._last_error_kind: str = "other"
 
+    def set_throughput(self, concurrency: int | None = None, batch_size: int | None = None) -> bool:
+        """热更新吞吐档位（v1.2.8）：machine 免费通道并发硬封顶 5（Google 免费限流，
+        并发过高全 429 反而更慢）——改并发时也 cap，不因热更新绕过构造时的上限。
+        与 LLMClient.set_throughput 同协议，供 auto_flow.set_throughput 统一调用。"""
+        _changed = False
+        if concurrency is not None:
+            _c = min(max(1, int(concurrency)), 5)
+            if _c != self.concurrency:
+                self.concurrency = _c
+                _changed = True
+        if batch_size is not None:
+            _b = max(1, int(batch_size))
+            if _b != int(getattr(self, "batch_size", 0) or 0):
+                self.batch_size = _b
+                _changed = True
+        return _changed
+
     async def translate_batch(self, texts: list[str], target_lang: str) -> list[str]:
         # 修复（recheck）：每次批处理清空失败标记——原实例属性跨批残留，同文本前批失败
         # 后批成功，残留标记会让上层 any(...) 误判把成功译文标 failed（LLM 已用 per-call ctx）
@@ -91,6 +108,9 @@ class MachineClient:
                             None, deep_translator.GoogleTranslator(source="auto", target=lang).translate, masked),
                         timeout=30)
                 results[i] = restore(translated, markers)
+                # 修复（recheck）：成功重置错误类别——原代码只写失败分支，上批 timeout
+                # 残留到本批，上层误显示「网络超时等待恢复」
+                self._last_error_kind = "other"
             except asyncio.TimeoutError:
                 # 修复：超时归 timeout（上层可重试）——原来全归 other 机翻网络失败零重试机会
                 self._batch_failed_texts.add(t)

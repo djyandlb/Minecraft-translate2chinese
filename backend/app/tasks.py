@@ -55,8 +55,11 @@ class TaskStore:
 
     def save(self, state: TaskState) -> None:
         # P1-6：落盘时截断 progress（保留最近 1000 条），防几千条 dict 全量序列化膨胀。
-        # 修复：对 asdict 副本截断，不污染内存 state（否则任务条目 >1000 时早期翻译
-        # 明细被永久丢弃，SSE 推送的也是截断后状态）
+        # 修复（recheck 内存增长）：同时截断内存副本——大整合包数万条 progress 全量常驻
+        # 内存翻倍 OOM 风险；前端只显示最近 100、SSE/轮询读的都是截断后状态，内存保留
+        # 全量没有消费者（原「不污染内存 state」设计导致内存随条目数无限增长）
+        if isinstance(state.progress, list) and len(state.progress) > 1000:
+            state.progress = state.progress[-1000:]
         data = asdict(state)
         # 修复（recheck）：损坏任务 json（progress 显式 null）load 得 progress=None →
         # 截断前判空，否则 save 抛 TypeError 冒泡到 pause/cancel 端点

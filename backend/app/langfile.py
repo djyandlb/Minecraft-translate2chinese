@@ -55,7 +55,11 @@ def _strip_comments(text: str) -> str:
 # 语言文件值「含实际含义」判定：拉丁字母或汉字（纯数字/纯符号串不含，跳过）
 # 含「有实际含义」的字符：拉丁字母、汉字（含扩展 A 区 㐀-䶿）、假名（日文源语言文件纯假名值
 # 不被误判「无意义」漏翻——修复：旧正则只有一-鿿，不含平假名/片假名）
-_LANG_VALUE_MEANING_RE = re.compile(r"[a-zA-Z一-鿿㐀-䶿ぁ-んァ-ヶ]")
+# v1.2.8 修复（recheck）：补西里尔（俄/乌）、谚文（韩）、希腊、泰文——非拉丁源
+#（ru_ru/ko_kr/uk_ua/bg_bg 等）语言文件值全西里尔/谚文时不再被整个滤掉静默漏翻
+_LANG_VALUE_MEANING_RE = re.compile(
+    r"[a-zA-Z一-鿿㐀-䶿ぁ-んァ-ヶ"
+    r"Ѐ-ӿ가-힯Α-ω฀-๿]")
 
 
 def lang_value_ok(value: str) -> bool:
