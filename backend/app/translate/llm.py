@@ -175,6 +175,32 @@ class LLMClient:
         # auto_flow._flush 据此自动降并发/批次——保护慢 API 不被高并发拖死（适配所有 API）。
         # 主请求成功清零；请求失败 +1。
         self._consec_fails: int = 0
+        # 全局 in-flight 并发池（v1.2.8）：翻译/审查/硬编码判断共享同一信号量，
+        # 任意时刻在途请求 ≤ concurrency——RPM 预算闸只锁「速率」，锁不住「瞬时并发」，
+        # 各模块独立满配会叠加（翻译 14 + 审查 14 同时飞）。懒创建：首次访问按当前
+        # concurrency 建池；set_throughput 改并发时置 None，下次按新值重建（asyncio
+        # 单线程，无 await 的检查+赋值是原子的，不会竞态）。
+        self._conc_sem: asyncio.Semaphore | None = None
+
+    def set_throughput(self, concurrency: int | None = None, batch_size: int | None = None) -> bool:
+        """热更新吞吐档位（v1.2.8）：改并发/批次，下次批量即生效。
+
+        并发变化时置空全局并发池——懒创建下次按新值重建。auto_flow.set_throughput
+        及翻译中切换档位走这里，避免直接改属性留下旧信号量（旧池没人持有，安全）。
+        """
+        _changed = False
+        if concurrency is not None:
+            _c = max(1, int(concurrency))
+            if _c != self.concurrency:
+                self.concurrency = _c
+                self._conc_sem = None      # 旧池废弃，下次按新值懒重建
+                _changed = True
+        if batch_size is not None:
+            _b = max(1, int(batch_size))
+            if _b != self.batch_size:
+                self.batch_size = _b
+                _changed = True
+        return _changed
 
     def _err_kind(self, exc: Exception) -> str:
         """异常分类（修复：4xx/5xx 曾一律归 other → 被 auto_flow 当网络超时无限等待）。
@@ -320,7 +346,11 @@ class LLMClient:
                 if (not self.filter_technical) or should_translate(t)]
         if todo:
             client = self._get_client()
-            sem = asyncio.Semaphore(self.concurrency)
+            # v1.2.8 全局并发池：翻译/审查/硬编码判断共享同一 in-flight 信号量，
+            # 懒创建（无 await 的检查+赋值在事件循环内原子），set_throughput 改并发后置空重建
+            if self._conc_sem is None:
+                self._conc_sem = asyncio.Semaphore(max(1, self.concurrency))
+            sem = self._conc_sem
             chunks = [todo[k:k + self.batch_size] for k in range(0, len(todo), self.batch_size)]
 
             async def run_chunk(chunk):

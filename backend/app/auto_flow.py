@@ -2467,17 +2467,24 @@ class AutoFlow:
 
     def set_throughput(self, concurrency: int | None = None, batch_size: int | None = None) -> None:
         """运行中热更新吞吐档位（用户诉求：翻译中切换档位立即生效）。
-        LLMClient 每次 translate_batch 都新建 Semaphore(concurrency) 并按 batch_size
-        切块——改属性后**下一次批量**就按新档位跑，无需重启任务。"""
+        LLMClient 每次 translate_batch 都按全局并发池切块——改档位后**下一次批量**
+        即按新值跑，无需重启任务。v1.2.8：走 engine.set_throughput（同步重建并发池），
+        无该方法的老引擎（machine）退回改属性。"""
+        eng = getattr(self, "engine", None)
+        if eng is None:
+            return
+        if hasattr(eng, "set_throughput"):
+            try:
+                eng.set_throughput(concurrency=concurrency, batch_size=batch_size)
+            except Exception:
+                pass
         if concurrency:
-            eng = getattr(self, "engine", None)
-            if eng is not None and hasattr(eng, "concurrency"):
+            if hasattr(eng, "concurrency"):
                 eng.concurrency = max(1, int(concurrency))
         if batch_size:
             bs = max(1, int(batch_size))
             self._batch_size = bs
-            eng = getattr(self, "engine", None)
-            if eng is not None and hasattr(eng, "batch_size"):
+            if hasattr(eng, "batch_size"):
                 eng.batch_size = bs
 
     # ---------- 编排骨架 ----------

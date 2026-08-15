@@ -819,15 +819,19 @@ async def test_throughput(payload: dict = None):
                       f"已知真实配额可直接在设置页填写更精确，如 {rpm_eff}+）")
     else:
         _auto_note = ""
+    # v1.2.8：审查/硬编码判断并发也从 RPM 方程推导（共享预算，不各自满配）
+    review_conc = _final_c          # 审查共享翻译全局并发池（阶段独占跑满该档）
+    judge_conc = min(_final_c, 5)   # 硬编码判断单条轻量，5 封顶不挤占主池
     return {"ok": True, "preset": "auto",
             "concurrency": _final_c, "batch_size": batch,
             "scan_concurrency": scan_ok,
+            "review_concurrency": review_conc, "judge_concurrency": judge_conc,
             "rpm": rpm_eff,
-            "message": (f"预算闸方案：RPM≈{rpm_eff}{_auto_note} → 方程算得并发 {_final_c}（单批基准 {round(w, 1)}s）"
-                        f"· 批 {batch} · 扫描 {scan_ok}，全速且不触发限流"),
+            "message": (f"预算闸方案：RPM≈{rpm_eff}{_auto_note} → 并发 {_final_c}（单批 {round(w, 1)}s）"
+                        f"· 批 {batch} · 扫描 {scan_ok} · 审查/判断共享该并发，全速不触发限流"),
             "results": {"w_sec": round(w, 1), "rpm": rpm_eff, "rpm_auto": rpm_auto,
-                        "rpm_hit_limit": rpm_hit,
-                        "verified_conc": _final_c}}
+                        "rpm_hit_limit": rpm_hit, "verified_conc": _final_c,
+                        "review_concurrency": review_conc, "judge_concurrency": judge_conc}}
 
 
 def _check_resume(path_str: str) -> dict:

@@ -161,10 +161,15 @@ async def review_translations(engine, pairs: list[dict], target_lang: str,
     # 并发跑满更有效）；上限 40 防输出截断（审查输出是不合格条目列表，prompt 翻倍长度）
     _page = max(_REVIEW_PAGE, min(int(getattr(engine, "batch_size", 0) or _REVIEW_PAGE), 40))
     batches = [pairs[k:k + _page] for k in range(0, len(pairs), _page)]
-    # 审查并发跟随用户设置（engine.concurrency，设置页「并发数」）——之前写死 4，
-    # 用户改并发数审查部分不变（用户反馈「改了看不出差别」）；engine 是 LLMClient 有
-    # concurrency 属性，machine 不走审查。
-    sem = asyncio.Semaphore(getattr(engine, "concurrency", _REVIEW_CONCURRENCY))
+    # v1.2.8：审查与翻译/硬编码判断共享**同一全局并发池**（engine._conc_sem）——
+    # 任意时刻在途请求 ≤ 翻译档位并发，阶段串行下审查独占跑满该并发，不叠加。
+    # 懒提升：无池时按引擎并发新建并写回共享（asyncio 单线程，赋值原子）。
+    _conc_sem = getattr(engine, "_conc_sem", None)
+    if _conc_sem is None:
+        _conc_sem = asyncio.Semaphore(max(1, int(getattr(engine, "concurrency", _REVIEW_CONCURRENCY))))
+        if hasattr(engine, "_conc_sem"):
+            engine._conc_sem = _conc_sem
+    sem = _conc_sem
 
     async def run_batch(batch: list[dict]) -> dict[int, str]:
         async with sem:

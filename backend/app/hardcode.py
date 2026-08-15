@@ -1127,9 +1127,11 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
         candidates[k:k + _judge_page]
         for k in range(0, len(candidates), _judge_page)
     ]
-    # ai_judge 并发跟随用户设置（engine.concurrency，设置页「并发数」）——之前写死 5，
-    # 用户改并发数硬编码判断部分不变（用户反馈「改了看不出差别」）；machine 不走 ai_judge。
-    sem = asyncio.Semaphore(getattr(engine, "concurrency", _AI_JUDGE_CONCURRENCY))
+    # v1.2.8：硬编码判断单条请求轻量、数量大，并发封顶 _AI_JUDGE_CONCURRENCY(5)——
+    # 不独占翻译全局并发池（避免小请求抢满池挤掉主翻译吞吐），也不无脑满配引擎并发。
+    # 独立小池 + 共享 RPM 预算闸（rate_gate）双保险：速率不超配额、瞬时并发受控。
+    sem = asyncio.Semaphore(
+        min(max(1, int(getattr(engine, "concurrency", _AI_JUDGE_CONCURRENCY))), _AI_JUDGE_CONCURRENCY))
 
     async def run_batch(batch: list[dict]) -> AiJudgeResult:
         async with sem:
