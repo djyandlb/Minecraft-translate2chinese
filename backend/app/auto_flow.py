@@ -143,6 +143,28 @@ def _is_proper_noun(text: str) -> bool:
     return False                           # 全小写词/短语（light/right/of the orb）→ 常用词，不归一化
 
 
+def _is_key_combo(s: str) -> bool:
+    """按键组合判定（v1.3.3，用户「ALT+S 被打回」）：ALT+S / CTRL+SHIFT+X / F5 / <None>
+    是按键绑定不该翻译——审查判「不合格」重翻无意义且浪费 token。匹配即保留原文。"""
+    t = s.strip()
+    # v1.3.4（Agent recheck）：只保留 <None>（按键绑定的「无绑定」占位）——裸 "None"
+    # 是 UI 选项文本（「无」）该翻译，不误判保留
+    if t in ("<None>", "<none>"):
+        return True
+    # 大写键名 + 字母组合：ALT+S、CTRL+SHIFT+S、CMD+S（+ 连接）
+    if re.fullmatch(r"(?:[A-Z][A-Z0-9]*\+)+[A-Z0-9]+", t):
+        return True
+    # F1-F12 功能键
+    if re.fullmatch(r"F(?:1[0-2]|[1-9])", t):
+        return True
+    # 单键名
+    if t in ("ESC", "TAB", "SPACE", "ENTER", "SHIFT", "CTRL", "ALT", "CMD",
+             "COMMAND", "SUPER", "BACKSPACE", "DELETE", "INSERT", "HOME", "END",
+             "PAGEUP", "PAGEDOWN"):
+        return True
+    return False
+
+
 def _is_legit_keep_by_source(source: str) -> bool:
     """按**原文文本**判定「保留原文是正确决策」（审查前分流，防 AI 审查误杀）。
 
@@ -162,6 +184,10 @@ def _is_legit_keep_by_source(source: str) -> bool:
         return True
     # 纯罗马数字（I/II/III/IV/V/VI/VII/VIII/IX/X…）→ 保留（用户诉求；_is_roman 校验合法序列）
     if _is_roman(s):
+        return True
+    # v1.3.3 修复（用户「ALT+S 被打回」）：按键组合（ALT+S / CTRL+SHIFT+X / F5 / <None>）
+    # 是按键绑定不该翻译——审查判「不合格」强制重翻无意义且浪费 token。判合理保留。
+    if _is_key_combo(s):
         return True
     # 移除 %xx 占位符（%s/%d/%%/%1$s/%n 等）与 Minecraft § 颜色码（§e=黄/§r=重置，
     # 其字母是格式码非实词）后无英文字母 → 纯占位符/格式串（如 (%1$s): %2$s、
@@ -497,11 +523,16 @@ class AutoFlow:
         """推进全局 done 与当前 stage 的 done（进度条阶段明细同步）。
 
         stages 里找不到当前 stage（老任务/兼容路径）时只加全局 done，不崩。
+        v1.3.3 防御（用户「1,934/1,383 超 100%」）：done 偶超 total（双计/旧任务 total 少算）
+        时 total 跟随 done——进度条绝不显示 >100%（percent 已防回退，数字不再溢出）。
         """
         self.state.done += n
         for s in self.state.stages:
             if s["name"] == self.state.stage:
                 s["done"] += n
+                # v1.3.3 防御：done 超 total（双计/少算）时 total 跟随，进度不超 100%
+                if s["total"] < s["done"]:
+                    s["total"] = s["done"]
                 break
 
     def _bump_stage_only(self, n: int = 1) -> None:
@@ -1679,11 +1710,14 @@ class AutoFlow:
             _g, _m = await self._engine_translate(_srcs, _reasons, forced=True)
             _mf = (_m or {}).get("failed") or set()
             _mk = (_m or {}).get("kind") or "other"
-            _net = (_mk in ("timeout", "network", "ratelimit", "server")
-                    or any(x in _mf for x in _srcs))
+            # v1.3.4 修复（Agent recheck）：_net 只反映「整批网络/服务错误」——原 `any(x in _mf)`
+            # 让**单条失败**设整批 _net=True → 首循环 `not _net` 守卫把同批成功译文也弃写原文、
+            # _still 也不记账。去掉 any，单条失败（_mf 精确到文本）由逐条逻辑处理。
+            _net = _mk in ("timeout", "network", "ratelimit", "server")
         except Exception:
             _g = list(_srcs)
             _net = True
+        _still: list[tuple[dict, str]] = []
         for it, tr in zip(items, _g):
             src_full = it.get("source") or ""
             src = src_full[:50]
@@ -1693,7 +1727,9 @@ class AutoFlow:
                 sink = it["sink"] = self.by_mod.setdefault(it.get("modid", ""), {})
             # 尽力输出：翻出非原文、目标语言、且无英文残留的译文 → 输出写回（覆盖率优先）。
             # _has_english_leak 拦截中英混杂/整段英文残留（原 AI 再审防线，裁剪后规则兜底）
-            if (not _net) and tr and tr != src_full \
+            # v1.3.4（Agent recheck）：去掉 `not _net` 守卫——_net 只反映整批网络错误，
+            # 单条失败（_mf）不再拖累；tr 有效（目标语言）就写回，成功译文不被弃
+            if tr and tr != src_full \
                     and self._is_target_lang(tr, self.req.target_lang) \
                     and not self._has_english_leak(tr):
                 self._write_reviewed(it, tr)
@@ -1706,8 +1742,43 @@ class AutoFlow:
                 self.memory.set(src_full, self.req.target_lang, src_full)
                 self._add_project_term(src_full, src_full)
             else:
-                self.state.failed += 1
-                self.failures.append({"text": src, "reason": f"漏翻未译出：{reason}"})
+                # v1.3.3 优化（用户「AE2 教程长 markdown 明明有内容却没法汉化」）：
+                # 该翻没翻 → 收集进二次重试（不立即记 failed）——长 markdown AI 整批返回
+                # 原文偷懒，二次批量重试（forced 更强指令）给最后机会翻出，仍失败才记 failed
+                _still.append((it, reason))
+        # v1.3.4（Agent recheck）：_still 分支不能因 _net 丢失记账——
+        # _net（整批网络/服务失败）时二次重试大概率也失败，直接记 failed（不再白等）；
+        # 否则二次批量重试（forced 更强指令）给最后机会翻出，仍失败才记 failed。
+        if _still:
+            if _net:
+                for it, reason in _still:
+                    src_full = it.get("source") or ""
+                    src = src_full[:50]
+                    sink = it.get("sink")
+                    if sink is None:
+                        sink = it["sink"] = self.by_mod.setdefault(it.get("modid", ""), {})
+                    self.state.failed += 1
+                    self.failures.append({"text": src, "reason": f"漏翻未译出：{reason}"})
+            else:
+                _again_srcs = [it["source"] for it, _ in _still]
+                _again_reasons = [r for _, r in _still]
+                try:
+                    _g2, _m2 = await self._engine_translate(_again_srcs, _again_reasons, forced=True)
+                except Exception:
+                    _g2 = list(_again_srcs)
+                for (it, reason), tr2 in zip(_still, _g2):
+                    src_full = it.get("source") or ""
+                    src = src_full[:50]
+                    sink = it.get("sink")
+                    if sink is None:
+                        sink = it["sink"] = self.by_mod.setdefault(it.get("modid", ""), {})
+                    if tr2 and tr2 != src_full \
+                            and self._is_target_lang(tr2, self.req.target_lang) \
+                            and not self._has_english_leak(tr2):
+                        self._write_reviewed(it, tr2)
+                    else:
+                        self.state.failed += 1
+                        self.failures.append({"text": src, "reason": f"漏翻未译出：{reason}"})
 
     async def _final_judge_leak(self, it: dict, reason: str = "") -> None:
         """终审单条（v1.2.3 保留为薄包装，兼容外部调用）：委托 _final_judge_batch。"""

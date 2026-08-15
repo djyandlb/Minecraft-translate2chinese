@@ -81,6 +81,21 @@ async def test_author_key_skipped_not_translated(tmp_path):
     assert called == []   # author key 跳过，不调翻译（Minimaxi 保留原文）
 
 
+def test_key_combo_kept_not_retranslated():
+    """v1.3.3（用户「ALT+S 被打回」）：按键组合（ALT+S/CTRL+SHIFT+X/F5/<None>）
+    判合理保留——审查不再当「不合格」打回强制重翻。"""
+    from app.auto_flow import _is_key_combo
+    assert _is_key_combo("ALT+S")
+    assert _is_key_combo("CTRL+SHIFT+S")
+    assert _is_key_combo("CMD+1")
+    assert _is_key_combo("F5")
+    assert _is_key_combo("<None>")
+    assert _is_key_combo("ESC")
+    # 真实文本不误判
+    assert not _is_key_combo("Sprint")
+    assert not _is_key_combo("This is a sentence to translate")
+
+
 def test_json_should_translate_skips_switch_literals():
     """v1.2.9/1.3.0：jar 内 json 的纯布尔 true/false 不翻译（用户实测
     components[3].link_recipe 的 "true" 被翻成「是」）；
