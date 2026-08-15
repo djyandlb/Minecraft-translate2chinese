@@ -896,10 +896,9 @@ class AutoFlow:
                     await enqueue_fn({"key": key, "modid": p.get("mod", ""),
                                       "source": text, "translated": translated,
                                       "sink": sink, "request_failed": _req_fail})
-                    # 修复（recheck 双计）：request_failed 条目不 bump done——审查阶段会
-                    # failed+1，done 已含它会导致 done+failed>total、覆盖率虚高
-                    if count_done and not _req_fail:
-                        self._bump_stage()
+                    # v1.2.9 用户诉求：翻译 done **不在翻译时加**——等审查过关写回才加
+                    # （_write_reviewed 里 bump）——进度条读数 = 已过审成品，翻译与审查对齐，
+                    # 审查完一批读数同步、直接进下一轮。request_failed 条目由审查计 failed。
                     continue
                 if translated == text:
                     # 区分「AI 故意保留原文」vs「请求失败回原文」：llm 在请求失败/超时把原文
@@ -1101,13 +1100,10 @@ class AutoFlow:
                 pass
 
     def _push_review_status(self, n: int) -> None:
-        """聚合一条「静默审查中 N 条 × 当前并发」：**独立 key @active_review**——语言文件
-        阶段翻译与审查并行跑，共用 @active_chunks 会让审查提示顶掉翻译的 ×N（用户实测
-        「第一批 40×16 后翻译的都不显示了」），前端按 key 各留最新一条。"""
-        self.state.progress.append({"status": "translating", "count": n,
-                                    "active": self._active_review, "key": "@active_review",
-                                    "note": "静默审查中"})
-        self.store.save(self.state)
+        """v1.2.9：审查进度不再单独 push 计数条——done 已由审查写回时推进（_write_reviewed
+        bump），读数即审查进度，无需额外「静默审查中」提示（用户诉求）。保留回调接口占位
+        （_review_chunk_start_cb/done 仍维护 _active_review 计数，无显示用途）。"""
+        pass
 
     def _review_chunk_start_cb(self, n: int) -> None:
         """审查批请求开始（v1.2.9）：在飞审查批数 +1 → 聚合递增（审查也并发 40×16）。"""
@@ -1324,6 +1320,13 @@ class AutoFlow:
         self.state.progress.append({"key": it["key"], "source": it["source"],
                                     "translated": translated, "status": "done",
                                     "mod": it["modid"], "reviewed": True})
+        # v1.2.9 用户诉求：翻译 done 计数**只在审查过关写回时增加**（翻译阶段 enqueue 不再
+        # 提前 bump）——读数 = 已过审成品，翻译与审查对齐，审查完一批读数同步进下一轮。
+        # 续联用 _bump_stage_only（全局基准已含，防翻倍）。
+        if not self._resume:
+            self._bump_stage()
+        else:
+            self._bump_stage_only()
 
     def _add_project_term(self, source: str, decision: str) -> None:
         """项目级专有名词对照记录（用户诉求：Zeno→泽诺 这类决策写词汇表，后续统一沿用）。

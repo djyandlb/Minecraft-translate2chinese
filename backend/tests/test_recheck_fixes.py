@@ -167,7 +167,7 @@ async def test_review_chunk_callback_pushes_aggregate(tmp_path):
     assert flow._active_review == 3
     flow._review_chunk_done_cb(40)
     assert flow._active_review == 2
+    # v1.2.9：审查不再 push 聚合提示（用户诉求：去掉「静默审查中」计数条，
+    # done 计数改由审查写回 _write_reviewed 推进，读数即审查进度）
     acts = [p for p in flow.state.progress if p.get("key") == "@active_review"]
-    assert acts[-1]["active"] == 2
-    assert acts[-1]["count"] == 40
-    assert acts[-1]["note"] == "静默审查中"
+    assert acts == []
