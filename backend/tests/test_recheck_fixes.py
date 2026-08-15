@@ -35,6 +35,27 @@ def test_mixed_long_english_caught_by_review(tmp_path):
     assert not flow._has_english_leak("这是一段完全中文的翻译内容，介绍如何使用这个物品。")
 
 
+def test_has_english_leak_catches_markdown_with_paths(tmp_path):
+    """v1.3.1：AE2 教程 markdown 含链接路径（/ .md）不再被路径豁免——大段英文判泄漏；
+    纯路径/命令/命名空间仍豁免。"""
+    from types import SimpleNamespace
+    from app.auto_flow import AutoFlow
+    from app.tasks import TaskState, TaskStore
+    store = TaskStore(tmp_path / "tasks")
+    store.save(TaskState(id="t1"))
+    req = SimpleNamespace(target_lang="zh_cn", source_lang="en_us", path=str(tmp_path / "p"))
+    flow = AutoFlow("t1", req, None, store, tmp_path / "w", tmp_path / "o", None)
+    ae2 = ("Pattern providers are the primary way in which items are moved, "
+           "[subnets](.../ae2-mechanics/subnetworks.md) if the interface is unmodified")
+    assert flow._has_english_leak(ae2)          # 长 markdown → 泄漏（拦截）
+    # 纯路径/命令/命名空间仍豁免
+    assert not flow._has_english_leak("config/jei/jei.toml")
+    assert not flow._has_english_leak("/give @p diamond")
+    assert not flow._has_english_leak("minecraft:diamond")
+    # 纯中文无残留
+    assert not flow._has_english_leak("这是一段完全中文的内容介绍如何使用这个物品。")
+
+
 def test_json_should_translate_skips_switch_literals():
     """v1.2.9/1.3.0：jar 内 json 的纯布尔 true/false 不翻译（用户实测
     components[3].link_recipe 的 "true" 被翻成「是」）；

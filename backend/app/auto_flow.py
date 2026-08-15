@@ -1393,8 +1393,16 @@ class AutoFlow:
         """
         if not text or _is_legit_keep_by_source(text):
             return False
-        if re.search(r"[/\\:]", text):      # 路径/命令/命名空间 → 非界面文本，豁免
-            return False
+        if re.search(r"[/\\:]", text):
+            # v1.3.1 修复（用户 AE2 教程 markdown 大段英文判过）：原「含 / 或 : 就豁免」太宽——
+            # 长 markdown 链接路径 (.../ae2-mechanics/subnetworks.md) 含斜杠被误判「路径」→
+            # 大段英文逃逸写回。只有**整段是纯路径/命令/命名空间形态**才豁免：
+            #   纯路径（无空格、/ 分隔）| / 开头的命令 | namespace:key（无空格）
+            t = text.strip()
+            if (re.fullmatch(r"(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]+", t)
+                    or t.startswith("/")
+                    or re.fullmatch(r"[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+", t)):
+                return False
         return len(re.findall(r"\b[A-Za-z]{3,}\b", text)) >= 3
 
     async def _prebuild_terms(self, texts: list[str]) -> None:
