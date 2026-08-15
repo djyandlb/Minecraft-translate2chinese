@@ -403,6 +403,8 @@ class AutoFlow:
         self._req_fail_keys: set[tuple[str, str]] = set()
         # v1.2.8 并发生效可视化：当前在飞的并发 chunk 数（聚合「正在翻译 40 条 × N」）
         self._active_chunks: int = 0
+        # v1.2.9 审查并发生效可视化：当前在飞的并发审查批数（聚合「静默审查中 N 条 × M」）
+        self._active_review: int = 0
         self.json_lines_translations: dict[Path, list[tuple[TextSource, dict[str, str]]]] = {}
         self.pack_translations: list[tuple[TextSource, dict[str, str]]] = []
         self.hard_mappings: dict[Path, dict[str, str]] = {}
@@ -1052,7 +1054,7 @@ class AutoFlow:
         （用户诉求：审查攒批跟翻译同数量）→ 审查通过才写回各 item 的 sink。审查是初审；
         漏翻/重翻后仍保留原文的条目留给源终审判定（终审只审漏翻，不重复审合格译文）。
         """
-        review_queue = asyncio.Queue(maxsize=200)
+        review_queue = asyncio.Queue(maxsize=1000)   # v1.2.9：200 → 1000，审查慢时减少 producer 阻塞
         done_event = asyncio.Event()
         producer = asyncio.create_task(self._translate_batch_pipeline(
             items, self._engine_translate, self._batch_size, skip_fn=skip_fn,
@@ -1091,6 +1093,25 @@ class AutoFlow:
                 self.store.save(self.state)
             except Exception:
                 pass
+
+    def _push_review_status(self, n: int) -> None:
+        """聚合一条「静默审查中 N 条 × 当前并发」：**独立 key @active_review**——语言文件
+        阶段翻译与审查并行跑，共用 @active_chunks 会让审查提示顶掉翻译的 ×N（用户实测
+        「第一批 40×16 后翻译的都不显示了」），前端按 key 各留最新一条。"""
+        self.state.progress.append({"status": "translating", "count": n,
+                                    "active": self._active_review, "key": "@active_review",
+                                    "note": "静默审查中"})
+        self.store.save(self.state)
+
+    def _review_chunk_start_cb(self, n: int) -> None:
+        """审查批请求开始（v1.2.9）：在飞审查批数 +1 → 聚合递增（审查也并发 40×16）。"""
+        self._active_review += 1
+        self._push_review_status(n)
+
+    def _review_chunk_done_cb(self, n: int) -> None:
+        """审查批请求完成（成败都）：在飞审查批数 -1 → 聚合递减。"""
+        self._active_review = max(0, self._active_review - 1)
+        self._push_review_status(n)
 
     async def _review_pipeline(self, queue, done_event, review_batch: int = 30) -> None:
         """审查管道消费者：从翻译队列取已翻译条目，攒批审查 → 写回。
@@ -1151,7 +1172,9 @@ class AutoFlow:
         issues: list[dict] = []
         try:
             issues = await review_translations(self.engine, pairs, self.req.target_lang,
-                                               silly_mode=self.silly)
+                                               silly_mode=self.silly,
+                                               on_batch_start=self._review_chunk_start_cb,
+                                               on_batch_done=self._review_chunk_done_cb)
         except Exception:
             issues = []   # 审查故障不误伤不中断：初审视为全部通过
         # 初审：不合格 key → 重审；其余 → 写最终产物
@@ -1883,7 +1906,9 @@ class AutoFlow:
         issues = []
         _review_failed = False
         try:
-            issues = await review_translations(self.engine, leak_pairs, self.req.target_lang)
+            issues = await review_translations(self.engine, leak_pairs, self.req.target_lang,
+                                               on_batch_start=self._review_chunk_start_cb,
+                                               on_batch_done=self._review_chunk_done_cb)
         except Exception:
             issues = []
             _review_failed = True   # 修复（recheck）：审查故障时不判合理保留，全部残留进重翻——

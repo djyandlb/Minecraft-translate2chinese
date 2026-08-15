@@ -17,6 +17,8 @@ DEFAULT_CONFIG = {
     "batch_size": None,
     "pack_format": 15,
     "rpm_limit": 0,                        # 0 = 不限
+    "calibrated_rpm": 0,                   # v1.2.9：动态测试校准的该 API 建议 RPM，作为
+                                           # rate_gate auto 模式的初始目标（避免从 30 爬坡）
     "api_key_ref": "mc-translator",        # keyring 服务名：key 走系统 keyring，绝不落盘
 }
 

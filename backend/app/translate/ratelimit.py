@@ -36,11 +36,15 @@ class RateGate:
 
     __slots__ = ("rpm", "auto", "_rate", "_cap", "_tokens", "_last", "_target", "_ok_streak")
 
-    def __init__(self, rpm: float = 0.0, auto: bool | None = None):
+    def __init__(self, rpm: float = 0.0, auto: bool | None = None, auto_init_rpm: float = 0.0):
         rpm = float(max(0.0, rpm))
         self.auto = auto if auto is not None else (rpm <= 0)
         self.rpm = rpm if not self.auto else 0.0
-        self._target = _AUTO_INIT_RPM if self.auto else self.rpm
+        # v1.2.9：auto 初始目标 = 校准值（动态测试测得该 API ≈80）>0 时用它起步，否则
+        # 保守 _AUTO_INIT_RPM(30)——原固定 30 在翻译 1000 条（<50 批，未达升档门槛）时
+        # 永不升档，动态测试校准白测（用户实测「翻译慢」的根因之一）
+        self._target = (float(auto_init_rpm) if self.auto and float(auto_init_rpm or 0) > 0
+                        else _AUTO_INIT_RPM if self.auto else self.rpm)
         self._ok_streak = 0
         self._reset_bucket()
 

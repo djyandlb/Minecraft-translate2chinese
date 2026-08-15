@@ -116,10 +116,9 @@ async def _review_batch(engine, client, batch: list[dict], target_lang: str,
         "temperature": 0.0,      # 审查要稳定一致，低温
         "max_tokens": 4096,
     }
-    # v1.2.4 请求前 RPM 预算闸：审查与翻译共享同一配额（避免各类请求合计超配额）
+    # v1.2.9：RPM 令牌已在 review_translations.run_batch 的 sem 外取过，这里不重复
+    # acquire——成功/429 的 report 信号仍喂回（共享配额撞了闸就该退档）
     _gate = getattr(engine, "rate_gate", None)
-    if _gate is not None:
-        await _gate.acquire()
     try:
         resp = await client.post(f"{engine.base_url}/chat/completions", json=body)
         resp.raise_for_status()
@@ -157,9 +156,11 @@ async def review_translations(engine, pairs: list[dict], target_lang: str,
     if not pairs:
         return []
     client = engine._get_client()
-    # 统一吞吐：审查批次跟随引擎 batch_size（吞吐档位放大时审查也 30+ 条/批，请求数减半、
-    # 并发跑满更有效）；上限 40 防输出截断（审查输出是不合格条目列表，prompt 翻倍长度）
-    _page = max(_REVIEW_PAGE, min(int(getattr(engine, "batch_size", 0) or _REVIEW_PAGE), 40))
+    # 统一吞吐：审查批次跟随引擎 batch_size。**v1.2.9 上限 40 → 20**：审查 prompt 是
+    # 「N 条 源 ||| 译」翻倍长度，慢 API（mimo 等）单批 40 条生成可达 40-60s，审查
+    # consumer 跟不上翻译 producer 会把翻译队列堵死（用户实测 1000 条 10 分钟+）。
+    # 减到 20 条/批 → 单批耗时近半、与翻译并行下吞吐提升（RPM 充足时并发覆盖请求数翻倍）。
+    _page = max(16, min(int(getattr(engine, "batch_size", 0) or _REVIEW_PAGE), 20))
     batches = [pairs[k:k + _page] for k in range(0, len(pairs), _page)]
     # v1.2.8：审查与翻译/硬编码判断共享**同一全局并发池**（engine._conc_sem）——
     # 任意时刻在途请求 ≤ 翻译档位并发，阶段串行下审查独占跑满该并发，不叠加。
@@ -172,6 +173,11 @@ async def review_translations(engine, pairs: list[dict], target_lang: str,
     sem = _conc_sem
 
     async def run_batch(batch: list[dict]) -> dict[int, str]:
+        # v1.2.9：RPM 令牌**先取、sem 后取**（对齐翻译 run_chunk）——等待令牌的审查批
+        # 不占全局并发池，翻译与审查并行（_dual_pipeline）时审查不被翻译的 chunk 挤死
+        _gate = getattr(engine, "rate_gate", None)
+        if _gate is not None:
+            await _gate.acquire()
         async with sem:
             if on_batch_start:
                 on_batch_start(len(batch))

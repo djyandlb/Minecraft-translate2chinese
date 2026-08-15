@@ -134,3 +134,27 @@ async def test_pipeline_flush_threshold_single_retranslation_keeps_1(tmp_path):
     items = [{"key": f"k{i}", "text": f"Lonely leak {i}", "sink": {}} for i in range(3)]
     await flow._translate_batch_pipeline(items, fake_translate, batch_size=1)
     assert received == [1, 1, 1], received   # 逐条，不攒 4 条
+
+
+@pytest.mark.asyncio
+async def test_review_chunk_callback_pushes_aggregate(tmp_path):
+    """v1.2.9：审查批开始/完成推聚合「静默审查中 N 条 × M」——审查也并发（40×16）的可视化。"""
+    from types import SimpleNamespace
+    from app.auto_flow import AutoFlow
+    from app.tasks import TaskState, TaskStore
+
+    store = TaskStore(tmp_path / "tasks")
+    store.save(TaskState(id="t1"))
+    req = SimpleNamespace(target_lang="zh_cn", source_lang="en_us",
+                          path=str(tmp_path / "pack.zip"))
+    flow = AutoFlow("t1", req, None, store, tmp_path / "work", tmp_path / "out", None)
+    flow._review_chunk_start_cb(40)
+    flow._review_chunk_start_cb(40)
+    flow._review_chunk_start_cb(40)
+    assert flow._active_review == 3
+    flow._review_chunk_done_cb(40)
+    assert flow._active_review == 2
+    acts = [p for p in flow.state.progress if p.get("key") == "@active_review"]
+    assert acts[-1]["active"] == 2
+    assert acts[-1]["count"] == 40
+    assert acts[-1]["note"] == "静默审查中"

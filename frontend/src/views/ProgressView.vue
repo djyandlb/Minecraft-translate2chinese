@@ -167,15 +167,16 @@ const warnInfo = computed(() => lastProgress(p => p.status === 'warn')?.error ||
 const rows = computed(() => {
   const arr = task.value?.progress || []
   const out = []
-  let sawActive = false
-  // 倒序遍历（最新在前）：v1.2.8 聚合的 @active_chunks（正在翻译 40 条 × N）只保留
-  // 最新一条，其余旧值跳过——不刷 16 条、只看当前并发在飞数
+  const seenKeys = new Set()
+  // 倒序遍历（最新在前）：聚合提示按 key 分组各留最新一条——翻译 @active_chunks
+  //（正在翻译 40 条 × N）与审查 @active_review（静默审查中 40 条 × M）并行时
+  // 两条都显示各自最新，互不顶掉；其余旧值跳过，不刷屏
   for (let i = arr.length - 1; i >= 0; i--) {
     const p = arr[i]
     if (p.untranslated) continue
-    if (p.status === 'translating' && p.key === '@active_chunks') {
-      if (sawActive) continue
-      sawActive = true
+    if (p.status === 'translating' && (p.key === '@active_chunks' || p.key === '@active_review')) {
+      if (seenKeys.has(p.key)) continue
+      seenKeys.add(p.key)
     }
     out.push(p)
     if (out.length >= 100) break

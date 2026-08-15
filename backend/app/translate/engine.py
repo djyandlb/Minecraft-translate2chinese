@@ -60,6 +60,9 @@ def create_engine(cfg: AppConfig):
             # 请求前 RPM 预算闸（v1.2.4b）：0 = 自动校准（推荐，RateGate 自学习配额）；
             # >0 = 固定精确配额放行。API 永不 429。
             rpm=float(_clamp_int(cfg.get("rpm"), 0, 0, 100000)),
+            # v1.2.9：auto 模式的初始目标用动态测试校准值（config.calibrated_rpm），
+            # 不再从 30 爬坡（1000 条 <50 批永不升档 → 白测）
+            auto_init_rpm=float(_clamp_int(cfg.get("calibrated_rpm"), 0, 0, 100000)),
         )
     return MachineClient(cfg.get("machine", {}).get("provider", "google"),
                          concurrency=_clamp_int(cfg.get("concurrency"), 5, 1, 5))

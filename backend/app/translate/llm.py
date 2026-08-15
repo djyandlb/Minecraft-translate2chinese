@@ -139,7 +139,8 @@ class LLMClient:
                  on_usage: Callable[[int, int], None] | None = None,
                  glossary_prompt: str = "",
                  silly_mode: bool = False,
-                 rpm: float = 0):
+                 rpm: float = 0,
+                 auto_init_rpm: float = 0):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
@@ -150,7 +151,7 @@ class LLMClient:
         # 请求前 RPM 预算闸（v1.2.4b）：rpm<=0 = 自动校准（RateGate 自学习嘴择配额，
         # 撞 429 退、稳定升，无需手动设置）；rpm>0 = 固定精确。翻译请求超配额在本地排队
         # → API 永不触发 429（限流保底）。
-        self.rate_gate = RateGate(float(rpm or 0))
+        self.rate_gate = RateGate(float(rpm or 0), auto_init_rpm=float(auto_init_rpm or 0))
         # TPM 配额（v1.2.7+）：从响应头 x-ratelimit-limit-tokens 自动读取，供
         # 动态测试用「批 = TPM/1000」约束每批条数（防单批烧爆每分钟 token 配额）。
         # 0 = 未知（平台没给头）。
@@ -358,6 +359,12 @@ class LLMClient:
             chunks = [todo[k:k + self.batch_size] for k in range(0, len(todo), self.batch_size)]
 
             async def run_chunk(chunk):
+                # v1.2.9 关键：RPM 令牌**先取、sem 后取**——等待令牌的请求不占全局并发池，
+                # 否则并行场景（翻译+审查同跑 _dual_pipeline）翻译 16 chunk 占满 sem 排队
+                # 等令牌，审查完全拿不到 sem 被挤死（用户实测「审查卡、翻译慢」）。
+                # 递归/单条兜底透传 gate_acquired 避免双扣配额。
+                if self.rate_gate is not None:
+                    await self.rate_gate.acquire()
                 async with sem:
                     # v1.2.8 并发生效可视化：每 chunk 请求开始回调（pipeline 聚合 ×N）
                     if self.on_chunk_start is not None:
@@ -367,7 +374,7 @@ class LLMClient:
                     try:
                         await self._request_chunk(client, chunk, masked_list, markers_list,
                                                   target_lang, results, ctx, forced=forced,
-                                                  feedback=feedback)
+                                                  feedback=feedback, gate_acquired=True)
                     finally:
                         # 完成回调（不论成败都 -1 在飞计数）
                         if self.on_chunk_done is not None:
@@ -385,7 +392,7 @@ class LLMClient:
 
     async def _request_chunk(self, client, todo, masked_list, markers_list, target_lang, results,
                              ctx: dict, forced: bool = False, feedback: list[str] | None = None,
-                             depth: int = 0):
+                             depth: int = 0, gate_acquired: bool = False):
         """对一批 todo 发一次请求；失败则有界切批重试（v1.2.3 深度封顶），最终逐条。
 
         todo 元素为 (原索引, 原文)，masked_list/markers_list 为
@@ -478,7 +485,9 @@ class LLMClient:
             "max_tokens": 8192,   # 防默认上限截断输出（截断会让后半批缺失/句子切半，触发「未返回文本」）
         }
         # v1.2.4 请求前 RPM 预算闸：超配额本地排队，绝不让 API 撞 429
-        if self.rate_gate is not None:
+        # v1.2.9：run_chunk 已在 sem 外取过令牌（gate_acquired=True）时不再重复——递归
+        # 降级/单条兜底透传，避免双扣配额
+        if not gate_acquired and self.rate_gate is not None:
             await self.rate_gate.acquire()
         try:
             resp = await client.post(f"{self.base_url}/chat/completions", json=body)
@@ -537,10 +546,10 @@ class LLMClient:
                     half = len(todo) // 2
                     await self._request_chunk(client, todo[:half], masked_list[:half], markers_list[:half],
                                               target_lang, results, ctx, forced=forced, feedback=feedback,
-                                              depth=depth + 1)
+                                              depth=depth + 1, gate_acquired=gate_acquired)
                     await self._request_chunk(client, todo[half:], masked_list[half:], markers_list[half:],
                                               target_lang, results, ctx, forced=forced, feedback=feedback,
-                                              depth=depth + 1)
+                                              depth=depth + 1, gate_acquired=gate_acquired)
                 else:
                     # 深度封顶：剩余整块不再递归，记 failed 交上层攒批重试
                     for _i, _t in todo:
@@ -553,7 +562,8 @@ class LLMClient:
                     # 该条漏标 → 逐条降级 _translate_single，不静默保留原文（P0 根因 2）。
                     results[i] = await self._translate_single(
                         client, todo[n][1], masked[n], markers[n], target_lang, ctx,
-                        forced=forced, feedback=(fb_by_idx.get(todo[n][0], "") if feedback else ""))
+                        forced=forced, feedback=(fb_by_idx.get(todo[n][0], "") if feedback else ""),
+                        gate_acquired=gate_acquired)
             return
         # 请求失败 → 降级：有界切批（v1.2.3 深度封顶，不再无限切到单条——指数爆炸）。
         # 网络类错误（timeout/network/ratelimit/server）是瞬态，切批无助于定位毒丸，
@@ -567,10 +577,10 @@ class LLMClient:
                 half = len(todo) // 2
                 await self._request_chunk(client, todo[:half], masked_list[:half], markers_list[:half],
                                           target_lang, results, ctx, forced=forced, feedback=feedback,
-                                          depth=depth + 1)
+                                          depth=depth + 1, gate_acquired=gate_acquired)
                 await self._request_chunk(client, todo[half:], masked_list[half:], markers_list[half:],
                                           target_lang, results, ctx, forced=forced, feedback=feedback,
-                                          depth=depth + 1)
+                                          depth=depth + 1, gate_acquired=gate_acquired)
             else:
                 # 深度封顶：剩余整块不再递归，逐条记 failed（交上层 _flush 攒批重试）
                 for _i, _t in todo:
@@ -579,10 +589,11 @@ class LLMClient:
             i, t = todo[0]
             results[i] = await self._translate_single(
                 client, t, masked[0], markers[0], target_lang, ctx,
-                forced=forced, feedback=(fb_by_idx.get(i, "") if feedback else ""))
+                forced=forced, feedback=(fb_by_idx.get(i, "") if feedback else ""),
+                gate_acquired=gate_acquired)
 
     async def _translate_single(self, client, text, masked, markers, target_lang, ctx: dict,
-                                forced: bool = False, feedback: str = ""):
+                                forced: bool = False, feedback: str = "", gate_acquired: bool = False):
         """逐条兜底：单条请求，失败回原文。
 
         forced/feedback（审查反馈重翻）：与 _request_chunk 一致——强制翻译界面文本、
@@ -633,7 +644,8 @@ class LLMClient:
             ctx["failed"].add(text)
             return text
         # v1.2.4 请求前 RPM 预算闸：与批量请求共享同一配额，单条兜底不偷偷绕过
-        if self.rate_gate is not None:
+        # v1.2.9：run_chunk 已取令牌（gate_acquired=True）时透传不重复
+        if not gate_acquired and self.rate_gate is not None:
             await self.rate_gate.acquire()
         try:
             resp = await client.post(f"{self.base_url}/chat/completions", json=body)

@@ -799,6 +799,13 @@ async def test_throughput(payload: dict = None):
     rpm_hit = False
     if rpm_auto:
         rpm_eff, rpm_secs, rpm_hit = await _find_auto_rpm()   # 60s 滑窗灌满校准（10-65s）
+        # v1.2.9：校准值存 config.calibrated_rpm，下次 create_engine 用它做 rate_gate
+        # auto 初始目标（否则 auto 从 30 爬坡、1000 条 <50 批永不升档，动态测试白测）
+        try:
+            cfg.set("calibrated_rpm", rpm_eff)
+            cfg.save()
+        except Exception:
+            pass
     # ===== 方程（Little's Law）：并发 = 每分钟配额 × 单批耗时 / 60，封顶滑块上限 =====
     conc = min(MAX_CONC, max(1, round((max(1, rpm_eff) / 60.0) * w)))
     # ===== 批大小按 TPM 约束（v1.2.7+ 用户方案）：没拿到 TPM → 40；
