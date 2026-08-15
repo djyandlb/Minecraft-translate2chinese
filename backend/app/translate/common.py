@@ -50,7 +50,10 @@ def should_translate(text: str, max_len: int = 1000) -> bool:
         return False
     # 带点无空格（类路径/域名/版本号/带点标识符）→ 跳过，如 "com.example.Mod"、
     # "path.to.model"、"v1.2.3"。句号后跟空格才是句子（"Hello. This is..." → 翻译）。
-    if "." in text and _DOTTED_IDENT_RE.search(text) and not _SENTENCE_DOT_RE.search(text):
+    # v1.3.0 修复（用户「含版本号的句子全英文」）：**含空格的句子即使带点也不跳过**——
+    # "Welcome to Project Infinity 0.1" 的版本号 ".1" 会被 _DOTTED_IDENT_RE 命中误跳过；
+    # 只有无空格的纯标识符形态（com.example.Mod / 1.2.3）才是代码/版本，跳过。
+    if "." in text and " " not in text and _DOTTED_IDENT_RE.search(text):
         return False
     # 短编码（≤6 全大写+数字，如 BB/B0PB）→ 代码/键码跳过（对照 mc_translator skip_rules）
     if len(text) <= 6 and re.fullmatch(r"[A-Z0-9]+", text):

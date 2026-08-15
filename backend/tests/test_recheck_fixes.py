@@ -18,15 +18,36 @@ from app.translate.machine import MachineClient
 from app.translate.ratelimit import RateGate
 
 
+def test_mixed_long_english_caught_by_review(tmp_path):
+    """v1.3.0（用户「大段英文连着还判过」）：大段英文 + 零星中文——_is_target_lang 含 1
+    汉字判「目标语言」，但 _has_english_leak 判残留 → ok_items 初审补的拦截会把它送进重翻。"""
+    from types import SimpleNamespace
+    from app.auto_flow import AutoFlow
+    from app.tasks import TaskState, TaskStore
+    store = TaskStore(tmp_path / "tasks")
+    store.save(TaskState(id="t1"))
+    req = SimpleNamespace(target_lang="zh_cn", source_lang="en_us", path=str(tmp_path / "pack.zip"))
+    flow = AutoFlow("t1", req, None, store, tmp_path / "work", tmp_path / "out", None)
+    mixed = "This is a very long English description about how to use this item in your base. 使用这个物品"
+    assert flow._is_target_lang(mixed, "zh_cn")   # 含汉字 → 目标语言
+    assert flow._has_english_leak(mixed)          # 但大段英文 → 残留（拦截依据）
+    # 纯中文无残留
+    assert not flow._has_english_leak("这是一段完全中文的翻译内容，介绍如何使用这个物品。")
+
+
 def test_json_should_translate_skips_switch_literals():
-    """v1.2.9：jar 内 json 的 true/false/开关字面量不再被当文本翻译（用户实测
-    components[3].link_recipe 的 "true" 被翻成「是」）。"""
+    """v1.2.9/1.3.0：jar 内 json 的纯布尔 true/false 不翻译（用户实测
+    components[3].link_recipe 的 "true" 被翻成「是」）；
+    v1.3.0 修复：enabled/on/none/yes 等真实按钮文本**恢复翻译**（原 _SWITCH_LITERALS 误杀
+    「Enabled」→ 保留英文，用户「全英文」根因之一）。"""
     from app.text_sources import _json_should_translate
     assert not _json_should_translate("true")
     assert not _json_should_translate("false")
-    assert not _json_should_translate("enabled")
-    assert not _json_should_translate("none")
-    assert not _json_should_translate("yes")
+    # 真实文本按钮恢复翻译（v1.3.0 修复误杀）
+    assert _json_should_translate("enabled")
+    assert _json_should_translate("on")
+    assert _json_should_translate("none")
+    assert _json_should_translate("yes")
     # 真实文本载体仍正常提取
     assert _json_should_translate("This is a real recipe description")
 

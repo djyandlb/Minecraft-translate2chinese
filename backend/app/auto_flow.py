@@ -908,7 +908,14 @@ class AutoFlow:
                     # 记入 _batch_failed_texts。真失败必须记 failed，否则 keep_original_ok
                     # 会把原文当「AI 保留」放行 → 覆盖率为 0 的假成功。
                     _real_fail = (text in _failed) if _failed is not None else False
-                    if keep_original_ok and not _batch_err and not _real_fail:
+                    # v1.3.0 修复（用户「不含汉字的大段英文判过」）：keep_original_ok 只放行
+                    # **无英文残留**的原文（专名 Xaero/Balm、短词、%s 占位符、命令——用
+                    # _has_english_leak 判，其内部已豁免合理保留/路径/命令）——否则 json/pack
+                    # 阶段（无审查管道）AI 偷懒返回**大段英文**被当「AI 故意保留」写回英文、
+                    # 不 failed（整批英文判过根因）。大段英文（≥3 词）走 failed（不写 sink →
+                    # 产物缺该 key，游戏回退原文）。单专名不受影响。
+                    if keep_original_ok and not _batch_err and not _real_fail \
+                            and not self._has_english_leak(text):
                         # AI 故意保留原文（专有名词/命令/代码标识）→ 不算失败，写回原文
                         # 供审查判漏翻（该翻的会被审查抓出重翻；专有名词审查豁免）
                         sink[key] = translated
@@ -1223,7 +1230,12 @@ class AutoFlow:
                 # 修复（recheck）：审查通过的译文也过**目标语言关**——审查故障（issues=[]）
                 # 时 translated≠source 的假译文（AI 只改大小写/措辞，仍是纯英文）会被当
                 # 「过」放行进产物。非目标语言且非合理保留 → 并入强制重翻。
-                if self._is_target_lang(it["translated"], self.req.target_lang) \
+                # v1.3.0 再修（用户「大段英文连着还判过了」）：_is_target_lang 只要含 1 个
+                # 汉字就判「目标语言」——AI 在长段里插几个中文词、大量英文残留的「中英混杂」
+                # 被放行写回产物。补 _has_english_leak 拦截（≥3 英文词 → 进强制重翻），
+                # 与重翻/终审的英文残留防线对齐，杜绝大段英文写进汉化产物。
+                if (self._is_target_lang(it["translated"], self.req.target_lang)
+                        and not self._has_english_leak(it["translated"])) \
                         or _is_legit_keep_by_source(it["source"]):
                     self._write_reviewed(it, it["translated"])
                 else:
@@ -1253,9 +1265,11 @@ class AutoFlow:
                 _net = True   # 重翻异常：按网络失败处理
             if _net:
                 # 网络/服务失败：初次有真译文（目标语言）保留写回；否则进终审
+                # v1.3.0 再修：初次译文也查英文残留——大段英文 + 零星中文词不保留，进终审
                 for it, tr in zip(retrans_items, _g):
                     if it["translated"] != it["source"] \
-                            and self._is_target_lang(it["translated"], self.req.target_lang):
+                            and self._is_target_lang(it["translated"], self.req.target_lang) \
+                            and not self._has_english_leak(it["translated"]):
                         self._write_reviewed(it, it["translated"])
                     else:
                         _final.append(it)
