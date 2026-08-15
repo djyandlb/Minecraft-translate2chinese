@@ -80,3 +80,57 @@ def test_scanner_single_bad_lang_file_keeps_other_mods(tmp_path):
     results = scan_jar(jar, "en_us", "zh_cn")
     assert len(results) == 1      # mod a 保留，mod b 跳过
     assert results[0].modid == "a"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_flush_threshold_scales_with_concurrency(tmp_path, monkeypatch):
+    """v1.2.8 修复：flush 阈值 = batch_size×并发 → 一次 translate_batch 收到多 chunk 总量
+    （并发真正施展）。原阈值=batch_size(40) → 每次只发 1 个请求（用户实测「一批一批上传」）。"""
+    from types import SimpleNamespace
+    from app.auto_flow import AutoFlow
+    from app.tasks import TaskState, TaskStore
+
+    store = TaskStore(tmp_path / "tasks")
+    store.save(TaskState(id="t1"))
+    req = SimpleNamespace(target_lang="zh_cn", source_lang="en_us",
+                          path=str(tmp_path / "pack.zip"))
+    flow = AutoFlow("t1", req, None, store, tmp_path / "work", tmp_path / "out", None)
+    flow.engine = SimpleNamespace(concurrency=4, batch_size=40)   # 4×40=160 阈值
+    flow.same_script = False
+    received: list[int] = []
+
+    async def fake_translate(texts, reasons=None):
+        received.append(len(texts))
+        return [f"译{i}" for i in range(len(texts))], {}
+
+    items = [{"key": f"k{i}", "text": f"Item number {i} description here", "sink": {}}
+             for i in range(200)]
+    await flow._translate_batch_pipeline(items, fake_translate, batch_size=40)
+    # 200 条 → 首 flush 160（=40×4 并发阈值，translate_batch 内部切 4 chunk 并发），
+    # 收尾 flush 剩余 40。原逻辑会是 [40,40,40,40,40]（一次只 1 请求）。
+    assert received == [160, 40], received
+
+
+@pytest.mark.asyncio
+async def test_pipeline_flush_threshold_single_retranslation_keeps_1(tmp_path):
+    """v1.2.8：batch_size=1 的漏翻逐条重翻不放大阈值（保持逐条专注语义）。"""
+    from types import SimpleNamespace
+    from app.auto_flow import AutoFlow
+    from app.tasks import TaskState, TaskStore
+
+    store = TaskStore(tmp_path / "tasks")
+    store.save(TaskState(id="t1"))
+    req = SimpleNamespace(target_lang="zh_cn", source_lang="en_us",
+                          path=str(tmp_path / "pack.zip"))
+    flow = AutoFlow("t1", req, None, store, tmp_path / "work", tmp_path / "out", None)
+    flow.engine = SimpleNamespace(concurrency=4, batch_size=40)
+    flow.same_script = False
+    received: list[int] = []
+
+    async def fake_translate(texts, reasons=None):
+        received.append(len(texts))
+        return [f"译{i}" for i in range(len(texts))], {}
+
+    items = [{"key": f"k{i}", "text": f"Lonely leak {i}", "sink": {}} for i in range(3)]
+    await flow._translate_batch_pipeline(items, fake_translate, batch_size=1)
+    assert received == [1, 1, 1], received   # 逐条，不攒 4 条
