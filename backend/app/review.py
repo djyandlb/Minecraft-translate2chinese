@@ -156,11 +156,11 @@ async def review_translations(engine, pairs: list[dict], target_lang: str,
     if not pairs:
         return []
     client = engine._get_client()
-    # 统一吞吐：审查批次跟随引擎 batch_size。**v1.2.9 上限 40 → 20**：审查 prompt 是
-    # 「N 条 源 ||| 译」翻倍长度，慢 API（mimo 等）单批 40 条生成可达 40-60s，审查
-    # consumer 跟不上翻译 producer 会把翻译队列堵死（用户实测 1000 条 10 分钟+）。
-    # 减到 20 条/批 → 单批耗时近半、与翻译并行下吞吐提升（RPM 充足时并发覆盖请求数翻倍）。
-    _page = max(16, min(int(getattr(engine, "batch_size", 0) or _REVIEW_PAGE), 20))
+    # 统一吞吐：审查批次**跟随前端/动态测试设置的批大小**（engine.batch_size，受 TPM 约束）
+    # ——用户要求「跟着 tpm 设置的批一起变」，不硬编码。上限 40 防审查输出截断（审查
+    # prompt 是「N 条 源 ||| 译」翻倍，输出是不合格列表）。批大请求数少、省 RPM；慢 API
+    # 下由并发（min_cap ≥ 并发）覆盖单批耗时，不再靠缩小批。
+    _page = max(_REVIEW_PAGE, min(int(getattr(engine, "batch_size", 0) or _REVIEW_PAGE), 40))
     batches = [pairs[k:k + _page] for k in range(0, len(pairs), _page)]
     # v1.2.8：审查与翻译/硬编码判断共享**同一全局并发池**（engine._conc_sem）——
     # 任意时刻在途请求 ≤ 翻译档位并发，阶段串行下审查独占跑满该并发，不叠加。

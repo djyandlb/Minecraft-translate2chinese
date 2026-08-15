@@ -77,8 +77,12 @@ def _json_should_translate(text: str) -> bool:
     """结构化 JSON 值判定：动画 easing 枚举精确命中 → 跳过（保留原文）。
     只在值整体是单个枚举词时跳过（防误伤普通文本里的 linear/step 等词）。
     max_len 放宽到 5000：本过滤只用于明确文本载体（Patchouli 教程书 text / advancements
-    description）——长教程正文（>1000 字符）修复 recheck 前被当超长漏提。"""
-    if text.strip().lower() in _EASING_KEYWORDS:
+    description）——长教程正文（>1000 字符）修复 recheck 前被当超长漏提。
+    v1.2.9：补 _SWITCH_LITERALS（true/false/yes/no 等开关字面量）跳过——jar 内 recipe/
+    数据 json 的 `"link_recipe": "true"` 字符串值被当英文文本翻成「是」（用户实测），
+    对齐 _pack_should_translate（目录文本源）已有行为。"""
+    t = text.strip().lower()
+    if t in _EASING_KEYWORDS or t in _SWITCH_LITERALS:
         return False
     return should_translate(text, max_len=5000)
 

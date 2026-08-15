@@ -852,8 +852,10 @@ class AutoFlow:
                             self._circuit_healthy = 0
                             if (_new_c, _new_b) == (_ic, _ib):
                                 self._circuit_reduced = False   # 回到初始档，退出降档态
-                # 触发降档：连续失败 ≥3 次
-                if self.engine._consec_fails >= 3:
+                # 触发降档（v1.2.9 弱化为兜底）：RateGate 请求前限速已保证 API 永不 429，
+                # 「撞限流→降档」主触发源消失（动态测试校准后 RateGate 更稳）——仅当网络/
+                # 服务**持续故障**（连续失败 ≥8 次）才降并发保护，作为极端兜底而非常驻机制。
+                if self.engine._consec_fails >= 8:
                     _cur_c = getattr(self.engine, "concurrency", 5) or 5
                     _cur_b = getattr(self.engine, "batch_size", 20) or 20
                     _new_c = max(1, _cur_c // 2)
@@ -1059,8 +1061,12 @@ class AutoFlow:
         producer = asyncio.create_task(self._translate_batch_pipeline(
             items, self._engine_translate, self._batch_size, skip_fn=skip_fn,
             enqueue_fn=review_queue.put, **kw))
+        # v1.2.9：审查攒批 = 翻译 flush 阈值（batch×并发）——review_translations 内部按
+        # batch_size 分页 gather 并发（每页 1 请求），审查也吃满并发档。原 review_batch=20
+        # → consumer 每 20 条串行发 1 个审查请求、250 请求一个接一个（用户「审查慢」根因）
+        _rb_conc = max(1, int(getattr(self.engine, "concurrency", 1) or 1))
         consumer = asyncio.create_task(self._review_pipeline(
-            review_queue, done_event, review_batch=max(20, self._batch_size)))
+            review_queue, done_event, review_batch=max(20, self._batch_size * _rb_conc)))
         # 审查状态灯：审查管道活跃 → 前端红灯「静默审查中…」；全部审查完成 → 绿灯「审查完成」
         self.state.reviewing = True
         self.store.save(self.state)

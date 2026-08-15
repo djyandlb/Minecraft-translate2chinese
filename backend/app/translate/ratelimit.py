@@ -23,7 +23,11 @@ _AUTO_INIT_RPM = 30.0     # 自动校准起点（保守，绝不出发即撞限�
 _AUTO_MAX_RPM = 300.0     # 自动校准上限（防失控打到天价用量）
 _AUTO_BACKOFF = 0.6       # 撞 429 退幅（×0.6）
 _AUTO_RAMPUP = 1.15       # 稳定后微升（×1.15）
-_AUTO_OK_STREAK = 50      # 连续成功批次达到后微升一次
+_AUTO_OK_STREAK = 15      # 连续成功批次达到后微升一次（v1.2.9：50→15 爬坡加快）——
+                          # RateGate 请求前限速保证永不 429，auto 撞不到 report_ratelimit，
+                          # 只能靠成功累计升档；原 50 批在翻译 1000 条（25 批）内永不升，
+                          # auto 卡死 30 RPM。15 批升 15% → 每 600 条升一次，逼近真实配额。
+                          # 主路径仍是动态测试校准值起步（auto_init_rpm），此为无校准兜底。
 
 
 class RateGate:
@@ -34,9 +38,11 @@ class RateGate:
     - auto 模式：目标速率由 report_ok/report_429 动态校准（撞限流退、稳定升）。
     """
 
-    __slots__ = ("rpm", "auto", "_rate", "_cap", "_tokens", "_last", "_target", "_ok_streak")
+    __slots__ = ("rpm", "auto", "_rate", "_cap", "_tokens", "_last", "_target", "_ok_streak",
+                 "_min_cap")
 
-    def __init__(self, rpm: float = 0.0, auto: bool | None = None, auto_init_rpm: float = 0.0):
+    def __init__(self, rpm: float = 0.0, auto: bool | None = None, auto_init_rpm: float = 0.0,
+                 min_cap: int = 1):
         rpm = float(max(0.0, rpm))
         self.auto = auto if auto is not None else (rpm <= 0)
         self.rpm = rpm if not self.auto else 0.0
@@ -45,6 +51,11 @@ class RateGate:
         # 永不升档，动态测试校准白测（用户实测「翻译慢」的根因之一）
         self._target = (float(auto_init_rpm) if self.auto and float(auto_init_rpm or 0) > 0
                         else _AUTO_INIT_RPM if self.auto else self.rpm)
+        # v1.2.9 关键：桶容量 ≥ 并发数（min_cap）——原 cap = RPM/10（6 秒配额），RPM=30
+        # 时只有 3 个令牌突发 → 并发 16 全堵在 acquire 排队、实际同时飞 ≤3（压测实测
+        # peak=3，用户「×16 显示但串行」根因）。cap 抬到并发数，让并发请求能突发；
+        # auto 模式撞 429 仍会退 target（cap 跟着小），自适应安全。
+        self._min_cap = max(1, int(min_cap))
         self._ok_streak = 0
         self._reset_bucket()
 
@@ -52,7 +63,8 @@ class RateGate:
         # 修复（recheck）：rpm=0 + auto=False 时 _target=0 → _rate=0，acquire() 超配额
         # sleep 除零抛 ZeroDivisionError——取极小速率兜底（实际路径 rpm<=0 走 auto，防御公共类）
         self._rate = max(1e-9, self._target / 60.0)
-        self._cap = max(1.0, self._target / 10.0)
+        # v1.2.9：桶容量 ≥ min_cap（并发数）——并发突发不被令牌桶憋死
+        self._cap = max(float(self._min_cap), self._target / 10.0)
         self._tokens = self._cap
         self._last = time.monotonic()
 

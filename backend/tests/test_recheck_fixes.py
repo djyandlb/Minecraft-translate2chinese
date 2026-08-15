@@ -18,6 +18,19 @@ from app.translate.machine import MachineClient
 from app.translate.ratelimit import RateGate
 
 
+def test_json_should_translate_skips_switch_literals():
+    """v1.2.9：jar 内 json 的 true/false/开关字面量不再被当文本翻译（用户实测
+    components[3].link_recipe 的 "true" 被翻成「是」）。"""
+    from app.text_sources import _json_should_translate
+    assert not _json_should_translate("true")
+    assert not _json_should_translate("false")
+    assert not _json_should_translate("enabled")
+    assert not _json_should_translate("none")
+    assert not _json_should_translate("yes")
+    # 真实文本载体仍正常提取
+    assert _json_should_translate("This is a real recipe description")
+
+
 def test_lang_value_ok_non_latin_scripts():
     """v1.2.8 修复：西里尔/谚文/希腊/泰文值不被滤掉（非拉丁源不漏翻）。"""
     assert lang_value_ok("Привет мир")          # 俄文

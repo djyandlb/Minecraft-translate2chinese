@@ -325,6 +325,24 @@ watch(() => task.value?.status, (st) => {
   if (st && ['done', 'failed', 'cancelled'].includes(st)) stopElapsedTimer()
   else if (st) startElapsedTimer()
 })
+
+// v1.2.9 实时吞吐显示：按 done 增长算「~X 条/s」，当场看出并发生没生效——
+// 全速（并发 16）应 ~850 条/分≈14 条/s；若只有 1-3 条/s 就是并发没飞
+const rateText = ref('')
+let _lastDone = null, _lastT = 0
+function updateRate(d) {
+  const now = Date.now()
+  if (_lastDone != null && _lastT && now - _lastT > 800) {
+    const dt = (now - _lastT) / 1000
+    if (dt > 0.3) {
+      const v = Math.round((d - _lastDone) / dt)
+      rateText.value = v > 0 ? String(v) : ''
+    }
+  }
+  _lastDone = d
+  _lastT = now
+}
+watch(() => task.value?.done, (d) => { if (typeof d === 'number') updateRate(d) })
 // 审查状态灯：红灯「静默审查中…」审查管道活跃时亮；绿灯「审查完成」只在审查结束
 // 短暂显示后消失（用户诉求：审查完成不是常态存在）。任务结束（非运行）灯整体隐藏。
 const reviewVisible = ref(false)
@@ -562,6 +580,7 @@ onUnmounted(() => {
               </span>
             </template>
             <span v-if="elapsed" class="timer">已运行 {{ elapsed }}</span>
+            <span v-if="rateText && isActive" class="timer rate">~{{ rateText }} 条/s</span>
             <span class="tokens" v-if="task.tokens_in || task.tokens_out">
               Token：进 {{ task.tokens_in }} / 出 {{ task.tokens_out }}
             </span>

@@ -151,7 +151,9 @@ class LLMClient:
         # 请求前 RPM 预算闸（v1.2.4b）：rpm<=0 = 自动校准（RateGate 自学习嘴择配额，
         # 撞 429 退、稳定升，无需手动设置）；rpm>0 = 固定精确。翻译请求超配额在本地排队
         # → API 永不触发 429（限流保底）。
-        self.rate_gate = RateGate(float(rpm or 0), auto_init_rpm=float(auto_init_rpm or 0))
+        # min_cap=并发数：RPM 桶容量 ≥ 并发，并发突发不被令牌桶憋死（压测 peak=3 根因）
+        self.rate_gate = RateGate(float(rpm or 0), auto_init_rpm=float(auto_init_rpm or 0),
+                                  min_cap=max(1, int(concurrency or 1)))
         # TPM 配额（v1.2.7+）：从响应头 x-ratelimit-limit-tokens 自动读取，供
         # 动态测试用「批 = TPM/1000」约束每批条数（防单批烧爆每分钟 token 配额）。
         # 0 = 未知（平台没给头）。

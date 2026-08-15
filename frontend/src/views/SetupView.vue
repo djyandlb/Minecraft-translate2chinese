@@ -190,7 +190,9 @@ async function runThroughputTest() {
       concurrency.value = r.concurrency
       batchSize.value = r.batch_size
       scanConcurrency.value = r.scan_concurrency
-      // RPM 保持用户选择（0=自动校准 或 手填值），不强制覆盖——测试给出的建议值在 message 里展示
+      // v1.2.9：动态测试测出的 RPM **直接应用**（填进 RPM 输入框 + 保存）——RPM 已实测
+      // 就用它固定跑，不从 30 爬坡（用户诉求）；想回自动校准可手动改回 0
+      if (Number(rpm.value) <= 0 && r.rpm > 0) rpm.value = r.rpm
       tpOk.value = true
       tpResult.value = r.message
       autoSave()   // 新档位即时保存
