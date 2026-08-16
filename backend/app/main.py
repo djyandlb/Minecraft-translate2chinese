@@ -873,15 +873,27 @@ def _check_resume(path_str: str) -> dict:
     # memory 同源）+ 记忆条数，取较大值；否则卡片显示 progress 的小进度（用户实测 11.6% vs 真实 89%）
     base_done = 0
     total_ref = 0
+    # v1.4.0 修复（用户「单 mod 输出产物后仍显示可断点续联」）：**completed 判定必须以
+    # progress 文件的 status 为准**（与 list_projects 同一套标准）——status=="done" 即产物
+    # 已生成、算完成，绝不可续联。旧逻辑只看 done>=total：任务成功后 done 虽被 _save_progress
+    # 写满 total，但「旧任务最大 done」叠加逻辑会用 tasks/ 里的旧值覆盖 base_done/total_ref，
+    # 若旧任务 done<total 就把已完成项目误判成「未完成」→ 续联按钮残留（用户实测根因）。
+    _prog_status = ""
     prog = WORK_DIR / "progress" / f"{proj}.json"
     if prog.exists():
         try:
             d = json.loads(prog.read_text(encoding="utf-8"))
             base_done = d.get("done", 0)
             total_ref = d.get("total", 0)
+            _prog_status = d.get("status") or ""
         except Exception:
             pass
-    # 旧任务最大 done（仅项目有记忆才计入，防跨项目混淆——与 run() 一致）
+    # status=="done"：任务成功完成、产物已生成 → 直接判已完成，不看任何叠加值
+    #（旧任务最大 done / 记忆兜底都会用旧进度覆盖新 status，导致已完成项目假可续联）
+    if _prog_status == "done":
+        return {"available": False, "memory_count": count, "progress_pct": None}
+    # 旧任务最大 done（仅项目有记忆才计入，防跨项目混淆——与 run() 一致）。
+    # 只取**未完成**任务（非 done 状态）的 done——已完成任务不算可续联进度。
     if count > 0:
         try:
             _tdir = WORK_DIR / "tasks"
@@ -889,6 +901,10 @@ def _check_resume(path_str: str) -> dict:
                 for _tf in _tdir.glob("*.json"):
                     try:
                         _td = json.loads(_tf.read_text(encoding="utf-8"))
+                        # v1.4.0：排除已完成任务（status=="done"）——否则上次成功产出后
+                        # 旧任务 done 又被计入，progress 未写满 total 时误判「未完成可续联」
+                        if _td.get("status") == "done":
+                            continue
                         if _td.get("done", 0) > base_done and _td.get("display_name"):
                             base_done = _td["done"]
                             total_ref = _td.get("total", 0)

@@ -2937,7 +2937,15 @@ class AutoFlow:
 
             # 聚 jar 列表前给反馈：解压后到扫描完成之间（rglob 遍历 573MB 解压目录可能几十秒）
             # 无任何 progress，右栏就停在「解压完成」干瞪眼（用户反馈）——先推「正在扫描」让流程有动静
-            await self._smart_status("正在扫描整合包文件…")
+            # v1.4.0 修复（用户「无论源文件什么类型都显示扫描整合包」）：文案按 kind 区分——
+            # modjar/map/shader 不是整合包，显示各自类型的扫描文案（原来统一「整合包」误导）
+            _kind_scan_text = {
+                "modpack": "正在扫描整合包文件…",
+                "modjar": "正在扫描 mod 文件…",
+                "map": "正在扫描地图存档…",
+                "shader": "正在扫描光影包…",
+            }.get(self.kind, "正在扫描文件…")
+            await self._smart_status(_kind_scan_text)
             # 聚 jar 列表（modpack: mods/**/*.jar；modjar: 该文件本身）
             # 聚 jar 列表（modpack: mods/**/*.jar；modjar: 该文件本身）。
             # 修复：rglob 遍历 573MB 解压目录可能几十秒，同步跑会阻塞事件循环（任务状态超时）→ to_thread
@@ -3007,7 +3015,10 @@ class AutoFlow:
             #（total 乱涨）。全部值条目做 total，done（含记忆/CFPA/skip/翻译）恒 ≤ total。
             self._lang_total = sum(len(s.source_entries) for s in scans)
             # 扫描完成汇总（用户诉求：明确知道读取成功与否）
-            self.state.progress.append({"status": "done", "key": "扫描整合包",
+            # v1.4.0：进度 key 按 kind 区分（「扫描整合包」对单 mod/地图/光影误导）
+            _scan_key = {"modpack": "扫描整合包", "modjar": "扫描 mod",
+                         "map": "扫描地图", "shader": "扫描光影"}.get(self.kind, "扫描")
+            self.state.progress.append({"status": "done", "key": _scan_key,
                                         "source": f"{len(self.jars)} 个 mod",
                                         "translated": f"发现 {len(self.state_jobs)} 条待翻译"})
             self.store.save(self.state)

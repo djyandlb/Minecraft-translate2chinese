@@ -170,9 +170,16 @@ def needs_lang_value_translation(text: str, target_lang: str) -> bool:
     elif target_lang == "ko_kr" and text:
         if re.search(r"[가-힯]", text):
             return False    # 已含谚文 → 已汉化
-    if ("." in text and re.search(r"\.[a-zA-Z0-9_]", text)
-            and not re.search(r"\.\s", text)):
-        return False    # 带点无空格类路径/标识符 → 非文本，跳过
+    # v1.4.0 修复（用户「光影翻译前两条被略过」）：**整文本必须无空格**才算技术串。
+    # 原条件（"." in text and 点后字母 and 无点后空格）把「See block.properties to
+    # adjust reflective blocks.」这种**含空格的英文句**也误杀——句中 .properties 命中
+    #「点后字母」，句末 blocks. 无空格 → 无「点后空格」豁免 → 光影 option.*.comment
+    # 引导句整条被跳过不翻译（用户实测前两条略过）。只有**纯技术标识符形态**（整串
+    # 无空格：com.example.Mod / path.to.x）才是非文本；含空格的句子即使内嵌路径引用
+    # 也是用户可见文本，必须翻译。
+    if ("." in text and not re.search(r"\s", text)
+            and re.search(r"\.[a-zA-Z0-9_]", text)):
+        return False    # 带点无空格的类路径/标识符（整串无空格）→ 非文本，跳过
     return True
 
 
