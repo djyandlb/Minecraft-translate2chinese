@@ -250,6 +250,55 @@ async def test_translate_batch_missing_tag_downgrades():
 
 
 @pytest.mark.asyncio
+async def test_translate_batch_cross_validate_downgrades():
+    """v1.3.6 翻译置换拦截（用户「幸运Ⅰ工错位到伐木斧说明」）：AI 输出 [iN] 标签与
+    内容错位（A 条目译文标到 B 标签上）时，该条「原文↔译文」占位符不一致（原文
+    $(item)...$() 译文无占位符，或反之）→ 交叉校验失败 → 降级单条重翻，杜绝
+    置换写进产物。"""
+    calls = []
+
+    def handler(request):
+        content = json.loads(request.content)["messages"][-1]["content"]
+        calls.append(content)
+        if "[i1]" in content:
+            # 批量错位返回：两条译文都标错了标签（i0 该是伐木斧说明、却标成幸运Ⅰ；
+            # i1 该是 Fortunate II、却标成强化可控爆破装药）
+            return Response(200, json={"choices": [{"message": {
+                "content": "[i0] 幸运Ⅰ\n[i1] $(item)强化可控爆破装药$()的作用效果和$(item)可控爆破装药$()完全一致"}}]})
+        # 单条降级：请求 content 是 protect 后的 masked 文本（含 %%MC_ 标记），
+        # 返回各自正确的译文（占位符保留）
+        if "%%MC_" in content:
+            return Response(200, json={"choices": [{"message": {"content": "%%MC_0%%伐木者充能%%MC_1%% is for felling trees"}}]})
+        return Response(200, json={"choices": [{"message": {"content": "幸运Ⅱ"}}]})
+
+    client = _client_with(handler)
+    out = await client.translate_batch(
+        ["$(item)Deforester Charge$() is for felling trees", "Fortunate II"], "zh_cn")
+    # 两条都被交叉校验拦截置换 → 单条重翻正确（占位符还原、内容对位）
+    assert out == ["$(item)伐木者充能$() is for felling trees", "幸运Ⅱ"]
+    assert len(calls) >= 3   # 1 批量 + 2 条单条降级
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_translate_batch_cross_validate_keeps_valid():
+    """v1.3.6 交叉校验不误伤：AI 正常按标签输出（译文占位符与原文一致）→ 直接写回，
+    不触发降级（保持原行为，不多发请求）。"""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return Response(200, json={"choices": [{"message": {"content": "[i0] $(item)伐木者充能$()\n[i1] $(item)幸运Ⅱ$()"}}]})
+
+    client = _client_with(handler)
+    out = await client.translate_batch(
+        ["$(item)Deforester$()", "$(item)Fortunate II$()"], "zh_cn")
+    assert out == ["$(item)伐木者充能$()", "$(item)幸运Ⅱ$()"]
+    assert calls["n"] == 1   # 单次批量，未触发降级
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_translate_batch_bad_format_half_split():
     """整批格式不符（无任何标签）→ 对半切批重试，逐条降级成功（P0 根因 2）。"""
     calls = {"n": 0}

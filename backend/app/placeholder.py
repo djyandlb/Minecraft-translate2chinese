@@ -6,6 +6,9 @@ import re
 #   - printf 完整格式说明符 %s / %1$s / %5.2f / %-10s / %+,.2f / %%
 #   - Minecraft 命令/路径 token（/give @p diamond、config/jei/jei.toml、modid:key）
 #   - 颜色 #FFF/#FFFFFF、{var}/{0}、<item:...>、{{...}}、\n
+#   - Parchment 富文本标记 $(item)/$()/$(bold)/$(o)（v1.3.6：Enigmatica/AE2 教程等
+#     mod 语言文件用它排版物品名/加粗/颜色——AI 会把 $() 破坏成 $O/$0（用户实测
+#     「$(item)强化可控爆破装药$O…」乱码），必须整体保护）
 #
 # / 分支要点（Xaero 审查修复：禁止「/token + 空格词组」贪婪吞掉英文句子）：
 #   world/server. You can read... 里的 /server 只是普通斜杠分隔（world 与 server 并列），
@@ -30,6 +33,10 @@ _PLACEHOLDER_RE = re.compile(
     #（mc_translator 格式保护思路）。链接 [text](url)/图片 ![alt](url) 由 prompt markdown
     # 规则（保留语法、只翻文字）处理。
     r"|\*\*"
+    # v1.3.6（用户「$O/$0 乱码」）：Parchment 富文本标记 $(item)/$()/$(bold)/$(o)
+    # 单独保护——AI 把 `$()` 输出成 `$O`/`$0` 破坏排版；保护后 AI 翻中间文本、restore
+    # 还原 `$(...)`（对齐 mc_translator 格式保护思路）。
+    r"|\$\([^()]*\)"
     r"|#(?:[0-9a-fA-F]{3}){1,2}"      # #FFF / #FFFFFF
     r"|\{[^{}]*\}"                    # {var} / {0}
     r"|<[^<>]*>"                      # <item:iron_ingot>

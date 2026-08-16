@@ -16,7 +16,7 @@ from typing import Callable
 import httpx
 
 from app.translate.common import should_translate
-from app.placeholder import protect, restore
+from app.placeholder import protect, restore, validate as validate_placeholders
 from app.translate.ratelimit import RateGate
 
 # 行首条目前缀：兼容 [iN]、**iN**、*iN* 与「数字. / 数字、 / 数字)」编号。
@@ -451,7 +451,9 @@ class LLMClient:
                     (self.glossary_prompt + "\n" if self.glossary_prompt else "") +
                     forced_note +
                     f"把 Minecraft 游戏文本翻译成 {target_lang}。输入每行以 [i数字] 开头，"
-                    f"你必须严格按输入行数逐行输出译文，一行对应一条，不得遗漏、不得合并、不得截断——"
+                    f"你必须严格按输入行数逐行输出译文，一行对应一条，**序号 [iN] 必须与输入"
+                    f"严格一一对应、不得调换条目顺序**（v1.3.6：串位=翻译失败），不得遗漏、"
+                    f"不得合并、不得截断——"
                     f"每条必须**完整翻译整段**：长句、多行文本（用 \\n 表示的换行）必须整段翻完，"
                     f"禁止只译开头就停止、禁止英文原文残留；译文**只允许目标语言**（专有名词/命令/"
                     f"占位符等前述豁免除外），不得把英文原文原样输出；多行原文的译文用 \\n 保持同样"
@@ -574,7 +576,20 @@ class LLMClient:
                 return
             for n, (i, _) in enumerate(todo):
                 if n in parsed:
-                    results[i] = restore(clean_translation(parsed[n]), markers[n])
+                    cand = restore(clean_translation(parsed[n]), markers[n])
+                    # v1.3.6（用户「翻译置换」）：占位符交叉校验——AI 输出 [iN] 标签
+                    # 与内容错位（A 条目译文被标到 B 条目标签上）时，该条「原文↔译文」
+                    # 占位符必然不一致（原文含的 $(item)/$()/%s 等译文里没有，或反过来
+                    # 混入他人占位符）→ 判定疑似置换 → 降级单条重翻（单条独立请求，
+                    # AI 只看到这一条原文，物理上无法再串位）。原文无占位符的纯文本
+                    # 交换 validate 恒通过，由审查「张冠李戴」规则（review.py）兜底。
+                    if validate_placeholders(todo[n][1], cand):
+                        results[i] = cand
+                    else:
+                        # 占位符不一致：疑似错位/占位符被破坏 → 单条重翻
+                        results[i] = await self._translate_single(
+                            client, todo[n][1], masked[n], markers[n], target_lang, ctx,
+                            forced=forced, feedback=(fb_by_idx.get(todo[n][0], "") if feedback else ""))
                 else:
                     # 该条漏标 → 逐条降级 _translate_single，不静默保留原文（P0 根因 2）。
                     # v1.2.9（Agent recheck）：单条兜底是独立请求，各自 acquire 令牌
