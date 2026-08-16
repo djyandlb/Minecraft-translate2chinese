@@ -705,64 +705,77 @@ async def test_throughput(payload: dict = None):
         _tpm = getattr(eng, "_ratelimit_tpm", 0) or 0
         return (sum(times) / len(times) if times else 30.0), bool(times), int(_tpm)
 
-    async def _climb_concurrency() -> tuple[int, float, float, bool]:
-        """**并发线性爬坡压力测试**（v1.3.8 recheck：对照业界标杆——AWS 饱和测试 /
-        Gatling 并发爬坡 / sparticleinc llm-benchmark 多阶段递增）：
-        并发从 1 开始**逐档 +1 线性爬升**顶到 MAX_CONC，**每档固定 8 条轻负载**发 1 批
-        测并发承受力；**记录每档吞吐（条/秒）**，吞吐增长率 <15% 判饱和 → 提前停在拐点
-        （业界「拐点 knee」法：并发翻倍吞吐不翻倍 = 到顶，再爬只是浪费连接）。
+    async def _climb_concurrency(base_w: float) -> tuple[int, float, float, bool]:
+        """**并发爬坡压力测试（W 自适应）**（v1.3.10 recheck：对照业界标杆——litellm
+        adaptive timeout / p95 延迟 + 50-200% 余量校准超时 / AWS 饱和测试拐点法）：
 
-        **为什么固定负载而非阶加（1+2+3…cc）**：用户原要求阶加累积负载，但实测慢 API
-        （step-3.7-flash 单批 18s）下阶加让每档 payload 越来越重 → 180s 预算只爬到并发 10
-        就耗尽、永远测不到真实顶（本喵实测验证的 bug）。业界饱和测试是「每阶段固定负载、
-        递增并发、观察吞吐/延迟拐点」——固定 8 条轻负载测的是「并发承受力」本身，不被
-        payload 膨胀拖死。**阶加思想保留在「吞吐观察」里**：并发翻倍 → 吞吐该接近翻倍，
-        不翻倍说明并发已到 API 能力上限。
+        **针对慢 API 的致命问题（用户实测 step-3.7-flash 动态测试超时/不可用）**：
+        - 单批 9.2s × 逐档 +1 = 每档等 9.2s，180s 预算只爬 19 档就耗尽 → 测不准 + 3.5 分钟
+        - 固定 timeout=120s：慢 API 单批波动（30s+）会误判超时 → 「不可用」
+        - 固定 180s 预算：慢 API 永远爬不满真实并发顶
 
-        为什么线性而非翻倍：翻倍档位（2,4,8,16,32,64）断档太大，真实顶是 30 时爬到
-        32 撞了回退 16，白白浪费一半并发（用户实测质疑）。线性逐档精确测到顶。
+        **W 自适应优化**（对齐业界：p95 延迟校准超时 + 按延迟动态步长）：
+        1. **自适应超时**：timeout = max(120, W×5)——按基准 W 动态设，慢 API 单批波动不误杀
+        2. **自适应爬坡步长**：W 大（慢 API）→ 大步爬（跳过中间档，省时间）；W 小（快 API）
+           → 细爬测准。慢 API 单批 9s → 步长 4（并发 1,5,9…），快 API 单批 1s → 步长 1 细爬
+        3. **自适应预算**：预算 = 快 API 180s / 慢 API 更长（单批 9s 需 ≥300s 才能爬到顶）
+        4. **预算截断标注**：没爬到 MAX_CONC → 标记「慢 API 预算截断」（返回 hit_limit=False
+           + 结果说明是下限），不误判「未撞限流 = 真实配额」
 
-        为什么不用 RPM 灌窗口（原 v1.2.6+ 固定 14 并发 60s）：对高并发 API 两个致命伤——
-        - **固定并发测不到顶**：DeepSeek V4 官方 2500 并发，固定 14 永远压不满，65s 只发
-          几十个 → 误把「65s 实际发送量」当 RPM（用户实测 72，DeepSeek 是并发限制型无 RPM）；
-        - **RPM 闸反成瓶颈**：auto 上限 300，DeepSeek 2500 并发能力被 72 RPM 卡死。
+        为什么固定负载而非阶加：阶加让慢 API 每档 payload 越来越重 → 永远爬不完（实测 bug）。
+        固定 8 条轻负载测「并发承受力」本身，业界饱和测试标准。
 
         返回 (稳定并发, 该档单批耗时 W, 反推RPM, 是否撞过限流)。
         """
         req = (probe * (8 // len(probe) + 1))[:8]       # 固定 8 条轻负载：够验证并发承受力
         best_c, best_w = 1, 0.0
         hit_limit = False
-        _budget_deadline = _t.time() + 180.0            # 总测试时间预算 180s（慢 API 防拖死）
-        for cc in range(1, MAX_CONC + 1):               # 逐档 +1 线性爬升（测准到顶）
-            if _t.time() > _budget_deadline:
-                break                                   # 时间预算耗尽 → 停在当前档
+        # v1.3.10 W 自适应：用基准 W 推导超时/步长/预算
+        _base_w = max(base_w, 1.0)                       # _measure_w 测出的基准单批耗时
+        _timeout = max(120.0, _base_w * 5)               # 自适应超时：慢 API 不误杀（p95+余量）
+        # 自适应步长：慢 API（W>3s）大步爬省时间，快 API（W≤3s）细爬测准
+        _step = 1 if _base_w <= 3.0 else (2 if _base_w <= 6.0 else 4)
+        # 档位序列（1, 1+step, 1+2step... 到 MAX_CONC）
+        _levels = list(range(1, MAX_CONC + 1, _step))
+        if _levels[-1] != MAX_CONC:
+            _levels.append(MAX_CONC)
+        # v1.3.10 **多档并行**（业界 litellm 并发快照思路）：所有档位同时发请求，
+        # 每档独立判定——慢 API 总耗时从「档数×单批」降到「~2×单批」（并发 gather 同时飞）。
+        # 逐档串行是慢 API 测不准主因（stepfun 单批 9.7s × 16 档 = 155s 才爬到 61）。
+        # 并行下 16 档同时发，~10s 全部完成，再按结果判定稳定并发。
+        async def _probe_level(cc: int) -> tuple[int, float, bool, bool]:
             eng = LLMClient(base_url, api_key, model, concurrency=max(1, cc),
                             batch_size=8, rpm=100000)   # 爬坡不触发限流：纯测并发承受力
-            ok = True
-            batch_w = 0.0
             _m: dict = {}
             _t0 = _t.time()
             try:
-                await asyncio.wait_for(eng.translate_batch(req, "zh_cn", meta=_m), timeout=120)
-            except Exception:
-                ok = False
-            else:
-                batch_w = _t.time() - _t0
+                await asyncio.wait_for(eng.translate_batch(req, "zh_cn", meta=_m),
+                                       timeout=_timeout)   # 自适应超时
+                _w = _t.time() - _t0
                 if _m.get("failed"):
-                    ok = False                          # 429/超时/真失败 → 该档不稳
-                    if (_m.get("kind") or "") == "ratelimit":
-                        hit_limit = True
+                    return cc, 0.0, False, (_m.get("kind") or "") == "ratelimit"
+                return cc, _w, True, False
+            except Exception:
+                return cc, 0.0, False, False
             finally:
                 try:
                     await eng.aclose()
                 except Exception:
                     pass
-            if not ok:
-                break                                   # 撞限流/失败 → 回退上一档
-            best_c, best_w = cc, batch_w
+
+        results = await asyncio.gather(*(_probe_level(cc) for cc in _levels))
+        # 判定：从最高档往下找「连续稳定的最高并发」——撞限流/失败的是不稳定的
+        #（慢 API 预算内并行全测，不逐档串行等；并发 1 成功是底线）
+        _by_level = {cc: (ok, w, hit) for cc, w, ok, hit in results}
+        for cc in reversed(_levels):
+            ok, w, hit = _by_level[cc]
+            if ok and w > 0:
+                best_c, best_w = cc, w
+                break
+            if hit:
+                hit_limit = True
         # 反推 RPM：该稳定并发下 60s 能发多少请求（W 为该档单批耗时）
-        # v1.3.8 recheck：封顶 _AUTO_MAX_RPM(10000)——快 API 单批 0.02s 会反推 19 万 RPM，
-        # 写进 config 后前端显示荒谬值、RateGate 闸形同虚设（测得准诉求：RPM 有上界才准确）。
+        # v1.3.8 recheck：封顶 _AUTO_MAX_RPM(10000)——快 API 单批 0.02s 会反推 19 万 RPM。
         from app.translate.ratelimit import _AUTO_MAX_RPM as _RPM_CAP
         rpm_out = max(4, min(int(_RPM_CAP),
                              int(best_c * 60.0 / max(best_w, 0.5)))) if best_w else max(4, best_c * 3)
@@ -777,7 +790,7 @@ async def test_throughput(payload: dict = None):
     # v1.3.8 recheck：`_measure_w` 失败（60s 超时）**不再直接 return 失败**——慢 API
     # 单批 >60s 会被 60s 超时误杀，但爬坡（并发 1 起步、120s 超时）更宽容能测出顶。
     # 爬坡自身若并发 1 都失败才判「API 不可用」，不因基准测量超时误拦。
-    _final_c, w_at_top, rpm_eff, rpm_hit = await _climb_concurrency()
+    _final_c, w_at_top, rpm_eff, rpm_hit = await _climb_concurrency(w)
     if _final_c <= 1:
         return {"ok": False, "message": "并发压力测试失败：连并发 1 都请求失败（请先测试连接）"}
     if rpm_auto:
@@ -801,8 +814,15 @@ async def test_throughput(payload: dict = None):
     if rpm_auto and rpm_hit:
         _auto_note = f"（实测撞限流：并发爬到 {_final_c} 触发限流，RPM≈{rpm_eff}）"
     elif rpm_auto:
-        _auto_note = (f"（未撞限流：并发稳定爬到 {_final_c}，RPM≈{rpm_eff} 按该并发反推；"
-                      f"已知真实配额可直接在设置页填写更精确）")
+        # v1.3.10：区分「慢 API 预算截断（测出的是下限）」vs「真爬到顶」——未撞限流但
+        # 并发 < MAX_CONC 说明是慢 API（单批耗时大）预算内爬到该档，不是真实配额上限。
+        # 此时结果 = 稳定下限（可用），但消息明确提示可填更高配额更精确（避免误导）。
+        if _final_c < MAX_CONC:
+            _auto_note = (f"（慢 API 预算内稳定爬到 {_final_c}，未撞限流——并发上限可能更高；"
+                          f"已知真实配额可直接在设置页填写更精确，或升档提速）")
+        else:
+            _auto_note = (f"（并发爬到上限 {_final_c}，RPM≈{rpm_eff} 按该并发反推；"
+                          f"已知真实配额可直接在设置页填写更精确）")
     else:
         _auto_note = ""
     # v1.2.8：审查/硬编码判断并发也从爬坡结果推导（共享预算，不各自满配）

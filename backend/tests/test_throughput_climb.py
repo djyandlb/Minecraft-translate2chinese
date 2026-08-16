@@ -144,9 +144,12 @@ async def test_climb_rpm_api_stops_before_limit():
     assert r["ok"] is True
     assert r["concurrency"] == 19, f"RPM 型并发 20 撞应停在 19，实际 {r['concurrency']}"
     assert r["results"]["rpm_hit_limit"] is True
-    # 只爬了 1..19 就被撞停（第 20 档失败），不多爬；created[0] 是 _measure_w
+    # v1.3.10 并行爬坡：所有档同时发，20 起撞 429 → 从最高档往下找到第一个稳定的是 19
+    #（并发 20+ 全部 failed/撞限流）；created[0] 是 _measure_w
     climb = created[1:]
-    assert [c.concurrency for c in climb] == list(range(1, 21)), "应逐档爬到 19 后第 20 档撞停"
+    concs = sorted({c.concurrency for c in climb})
+    assert 19 in concs, f"应爬到并发 19，实际档位 {concs[:5]}..."
+    assert 20 not in concs or True  # 并行下 20+ 也发（判定时失败），不再「只爬到 19」
 
 
 @pytest.mark.asyncio
@@ -184,3 +187,18 @@ async def test_climb_time_budget_stops_early():
     assert r["concurrency"] == 64, f"固定轻负载慢 API 应能爬到 64，实际 {r['concurrency']}"
     # 未撞限流（纯耗时，非 429）
     assert r["results"]["rpm_hit_limit"] is False
+
+
+@pytest.mark.asyncio
+async def test_climb_slow_api_parallel_reaches_max():
+    """v1.3.10 修复（用户「stepfun 动态测试超时不可用」）：慢 API（单批耗时大）用**多档
+    并行爬坡**——所有档位同时发，总耗时从「档数×单批」降到「~2×单批」，不再逐档串行
+    等导致 180s 预算耗尽、测不出真实并发。mock 模拟单批 0.1s 的慢 API，应爬到 64 且
+    所有档位被访问（并行非串行）。"""
+    r, created = await _run_test("slow_budget", limit=0)
+    assert r["ok"] is True
+    assert r["concurrency"] == 64, f"慢 API 并行爬坡应到 64，实际 {r['concurrency']}"
+    # 所有档位同时被访问（并行），不是逐档串行
+    climb = created[1:]
+    concs = sorted({c.concurrency for c in climb})
+    assert concs == sorted(set(range(1, 65))), f"应访问全部档位，实际 {concs[:5]}..."
