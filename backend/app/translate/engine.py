@@ -62,7 +62,9 @@ def create_engine(cfg: AppConfig):
             rpm=float(_clamp_int(cfg.get("rpm"), 0, 0, 100000)),
             # v1.2.9：auto 模式的初始目标用动态测试校准值（config.calibrated_rpm），
             # 不再从 30 爬坡（1000 条 <50 批永不升档 → 白测）
-            auto_init_rpm=float(_clamp_int(cfg.get("calibrated_rpm"), 0, 0, 100000)),
+            # v1.3.8 recheck：calibrated_rpm 封顶 _AUTO_MAX_RPM(10000)——爬坡反推已封顶，
+            # 此处双保险防旧 config 残留超大值（192000 会让 RateGate 闸形同虚设 + 前端荒谬）
+            auto_init_rpm=float(_clamp_int(cfg.get("calibrated_rpm"), 0, 0, 10000)),
         )
     return MachineClient(cfg.get("machine", {}).get("provider", "google"),
                          concurrency=_clamp_int(cfg.get("concurrency"), 5, 1, 5))
