@@ -124,10 +124,15 @@ def _is_pack_text_carrier(rel: str) -> bool:
     整合包自定义资源包/自带 lang（含 FTBQ 翻译键 ftbquestlocalizer、Create ponder 键等）
     全收，否则这些用户可见文本漏翻。"""
     p = PurePosixPath(rel)
-    # 语言文件 assets/<mod>/lang/en_us.*（含 kubejs/assets、自定义资源包）。
-    # 修复（recheck）：只收 en_us（大小写不敏感）——原不区分语言码，de_de/zh_cn 等
-    # 也被当源提取翻译并原地覆盖，破坏 mod 自带多语言（用户实测方向）。
-    if "assets" in p.parts and "lang" in p.parts and p.name.lower().startswith("en_us"):
+    # 语言文件 assets/<mod>/lang/*.（含 kubejs/assets、自定义资源包）。
+    # v1.3.9 修复（用户「FTB/KubeJS 没全量翻译」）：原只收 en_us（防破坏 mod 自带多语言），
+    # 但漏了「只有 zh_cn 无 en_us」的 mod（FTB localizer 直接把英文写进 zh_cn 占位，
+    # 如 ftbquestlocalizer/lang/zh_cn.json 3639 key 全英文）——它既不是语言文件源
+    # 也不被收集 → 完全漏翻、产物原样英文。**所有 assets/*/lang/ 都收**，翻译判定交给
+    # 值过滤（_pack_json_source 的 lang_value_ok / needs_lang_value_translation：
+    # 值含目标语言才跳过，纯英文该翻）。有 en_us 的翻 en_us 写 zh_cn；只有 zh_cn
+    # 英文占位的直接翻 zh_cn 覆盖——两者都覆盖，不破坏「值已是目标语言」的（跳过）。
+    if "assets" in p.parts and "lang" in p.parts:
         return True
     if "patchouli_books" in p.parts and "en_us" in p.parts:
         return True    # Patchouli 教程书
@@ -759,6 +764,23 @@ def _pack_modid(rel: str) -> str:
     return parts[0]
 
 
+def _has_target_chars(text: str, target_lang: str = "zh_cn") -> bool:
+    """值是否已含目标语言字符（已汉化判定）：zh 含汉字、ja 含假名、ko 含谚文。
+
+    v1.3.9（用户「FTB/KubeJS 没全量翻译」）：非 en_us 语言文件（如 ftbquestlocalizer 的
+    zh_cn.json 英文占位）的值若已是目标语言则跳过（正常已汉化 mod），纯英文则收集翻译。
+    """
+    if not text:
+        return False
+    if target_lang in ("zh_cn", "zh_tw"):
+        return any('一' <= ch <= '鿿' for ch in text)
+    if target_lang == "ja_jp":
+        return any(('぀' <= ch <= 'ゟ') or ('゠' <= ch <= 'ヿ') for ch in text)
+    if target_lang == "ko_kr":
+        return any('가' <= ch <= '힯' for ch in text)
+    return False
+
+
 def _pack_json_source(root: Path, p: Path, rel: str, target_lang: str = "zh_cn") -> TextSource | None:
     """config/data 下 json：递归字符串值，key_path 定位；技术串/开关值过滤。
     target_path 用 _zh_cn_path（en_us → 目标语言）——修复（v1.2.0）：原用 rel（==source）
@@ -769,7 +791,20 @@ def _pack_json_source(root: Path, p: Path, rel: str, target_lang: str = "zh_cn")
     # 修复（recheck）：语言文件（/lang/）用宽松过滤（lang_value_ok，同 jar 模式）——
     # _pack_should_translate 的 should_translate 会把 "Requires_Armor" 这类 snake_case 真实
     # 短语当技术标识滤掉（用户可见文本漏翻，与 jar 模式 lang 行为不一致）
-    _value_filter = (lambda v: lang_value_ok(v)) if "/lang/" in rel else _pack_should_translate
+    # v1.3.9 修复（用户「FTB/KubeJS 没全量翻译」）：现在 assets/*/lang/ 全收（含只有 zh_cn
+    # 无 en_us 的 mod，如 ftbquestlocalizer 英文占位）——对**非 en_us 语言文件**（zh_cn 等）
+    # 的值要判「是否已目标语言」：值含目标语言字符 → 已汉化跳过（不浪费翻译、不覆盖）；
+    # 纯英文值（FTB localizer 占位）→ 收集翻译并覆盖（target_path=原 zh_cn）。
+    if "/lang/" in rel:
+        _is_en_us_file = PurePosixPath(rel).name.lower().startswith("en_us")
+        if _is_en_us_file:
+            _value_filter = (lambda v: lang_value_ok(v))
+        else:
+            # 非 en_us 语言文件：值含目标语言字符 → 已汉化跳过；纯英文（占位）→ 收集
+            _value_filter = (lambda v: lang_value_ok(v)
+                             and not _has_target_chars(v, target_lang))
+    else:
+        _value_filter = _pack_should_translate
     # advancements 只收 display.title/description 文本，不收 criteria 触发条件（代码逻辑）
     _walk_json(data, "", entries, _value_filter,
                allow_keys=_ADV_TEXT_PATHS if _is_advancement_json(rel) else None)

@@ -38,12 +38,41 @@ def should_translate(text: str, max_len: int = 1000) -> bool:
     #   - 含大写（Raining/Snowing 天气选项）或含空格（world/server 句子）→ 是斜杠并列词
     #     或句子，必须翻译（Xaero "Raining/Snowing"、"world/server to teleport" 漏翻实测）
     if "/" in text or "\\" in text:
-        if "." in text:
-            return False
+        # v1.3.9 修复（用户「AE2 教程 markdown 没翻译」）：markdown 链接
+        # `[network's storage](.../ae2-mechanics/import-export-storage.md)` 含 / 和 . 被当
+        # 路径跳过 → 教程正文漏翻。只有**整行是纯路径/文件名形态**（无空格、每段是
+        # 标识符）才跳过；markdown 链接（含 []() 标记或空格）是文本，必须翻译。
+        if re.fullmatch(r"(?:[A-Za-z0-9_@.-]+/)+[A-Za-z0-9_@.-]+", text.strip()):
+            return False                                   # 纯路径 config/jei/jei.toml
+        if "." in text and " " not in text:
+            return False                                   # 含扩展名无空格文件路径
         if not re.search(r"[A-Z]", text) and " " not in text:
             return False
-    # 以 / @ # [ 开头的技术串 → 跳过
-    if text.startswith(("/", "@", "#", "[")):
+    # 以 / @ # [ 开头的技术串 → 跳过，但**语义判断**（v1.3.9 修复用户「AE2 教程没翻译」）：
+    # markdown 标题（# Wireless Terminal）、链接（[network's storage](url)）是用户可见
+    # 教程文本，不能因首字符跳过。只跳真正的技术指令：
+    #   - #version/#define/#include 等 shader/预处理指令（# 后无空格直接字母）
+    #   - /give /teleport 等命令（/ 后无空格）
+    #   - @param/@return 等 Javadoc 注解
+    #   - [i0] 行号标签、[内容] 代码下标
+    # markdown 标题「# 空格 + 单词」、链接「[文字](url)」（含空格或括号）是文本，翻译。
+    if text.startswith("#") and not re.match(r"^#+\s", text):
+        return False
+    if text.startswith("/") and not text.startswith("/ "):
+        return False
+    if text.startswith("@") and not text.startswith("@ "):
+        return False
+    if text.startswith("["):
+        # markdown 链接 [text](url) → 用户可见文本，翻译（AE2 教程链接文字）。
+        # [path.md] 后跟正文（含空格）→ 也是教程文本，翻译。
+        # [i0] / [iN] 行号标签前缀（[ 后紧跟 i数字]）→ 代码标注，即使后面有文字也跳过
+        if re.match(r"^\[i\d+\]", text):
+            return False
+        # 纯代码下标 [arr[0]] / 纯路径链接 [path.md]（无 ]( 且无空格）→ 技术串跳过
+        if re.search(r"\]\(", text):
+            return True
+        if " " in text:
+            return True
         return False
     # 命名空间/键值串（含冒号且无空格）→ 跳过，如 "abc:def"
     if ":" in text and " " not in text:

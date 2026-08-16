@@ -535,15 +535,20 @@ def test_guide_lines_skips_frontmatter_component():
 
 
 def test_pack_text_carrier_only_en_us_lang():
-    """整合包目录 lang 只收 en_us（大小写不敏感），zh_cn/de_de 不收（修复 recheck：
-    原不区分语言码，de_de 被当源翻译原地覆盖破坏 mod 自带多语言）。"""
-    from app.text_sources import _is_pack_text_carrier, _zh_cn_path
+    """整合包目录 lang 全收（v1.3.9 修复「FTB/KubeJS 没全量翻译」）：含只有 zh_cn 无 en_us
+    的 mod（ftbquestlocalizer 英文占位）——否则纯英文占位漏翻。已汉化值由
+    _has_target_chars / 值过滤跳过（不覆盖 mod 自带多语言）。"""
+    from app.text_sources import _is_pack_text_carrier, _zh_cn_path, _has_target_chars
     assert _is_pack_text_carrier("assets/mymod/lang/en_us.json")
     assert _is_pack_text_carrier("assets/mymod/lang/en_US.json")
-    assert not _is_pack_text_carrier("assets/mymod/lang/zh_cn.json")
-    assert not _is_pack_text_carrier("assets/mymod/lang/de_de.json")
+    # v1.3.9：zh_cn/de_de 也收（FTB localizer 只有 zh_cn 英文占位），值级过滤判已汉化
+    assert _is_pack_text_carrier("assets/mymod/lang/zh_cn.json")
+    assert _is_pack_text_carrier("assets/mymod/lang/de_de.json")
     assert _zh_cn_path("assets/mymod/lang/en_US.json", "zh_cn") == \
         "assets/mymod/lang/zh_cn.json"
+    # 值级判定：英文占位该翻，已汉化跳过
+    assert not _has_target_chars("ATM Alloy tools", "zh_cn")
+    assert _has_target_chars("钢铁合金工具", "zh_cn")
 
 
 def test_render_pack_json_keeps_structure(tmp_path):
@@ -781,3 +786,29 @@ def test_discover_skips_existing_target_lang_books(tmp_path):
     js = [s for s in srcs if s.kind == "json"]
     assert not any("book/" in s.source_path for s in js), "自带 zh_cn 的书应跳过"
     assert any("book2/" in s.source_path for s in js), "无 zh_cn 的书应正常提取"
+
+
+def test_pack_collects_zh_only_lang_placeholder():
+    """v1.3.9 修复（用户「FTB/KubeJS 没全量翻译」）：只有 zh_cn 无 en_us 的 mod
+    （ftbquestlocalizer 直接把英文写进 zh_cn 占位）——原只收 en_us 导致完全漏翻、
+    产物原样英文。现在 assets/*/lang/ 全收，英文占位值收集翻译、已汉化值跳过。"""
+    import tempfile
+    from pathlib import Path
+    from app.text_sources import _pack_json_source
+    data = {
+        "ftbquests.chapter.allthemodium.quest18F3B6750": "ATM Alloy tools",
+        "ftbquests.chapter.allthemodium.quest31BDF73F7": "Allthemodium Intro",
+        "key.already_zh": "钢铁合金工具",
+    }
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        rel = "kubejs/assets/ftbquestlocalizer/lang/zh_cn.json"
+        p = d / rel
+        p.parent.mkdir(parents=True)
+        p.write_text(__import__("json").dumps(data), encoding="utf-8")
+        src = _pack_json_source(d, p, rel, "zh_cn")
+        assert src is not None, "FTB 只有 zh_cn 英文占位的文件应被收集"
+        assert src.target_path == rel, "target 应为原 zh_cn 文件（覆盖翻译）"
+        assert "key.already_zh" not in src.entries, "已汉化值应跳过"
+        assert len(src.entries) == 2, f"英文占位应收集 2 条，实际 {len(src.entries)}"
+        assert src.entries["ftbquests.chapter.allthemodium.quest18F3B6750"] == "ATM Alloy tools"

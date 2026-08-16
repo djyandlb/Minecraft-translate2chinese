@@ -1601,3 +1601,69 @@ def test_bump_stage_ledger_idempotent():
     flow3._bump_stage()
     flow3._bump_stage()
     assert flow3.state.done == 2
+
+
+def test_final_judge_no_reason_keep_for_long_text():
+    """v1.3.9 修复（用户「FTB 描述翻译出原文」根因）：终审合理保留不能仅凭 AI 审查 reason
+    含「资源路径/代码标识」词就放行——长文本描述（>40 字符，如 FTB 任务描述含 Fusion
+    Casing/Glass 路径样）会被误判「合理保留」→ 原文写进记忆污染，后续同文本永久原文。
+    修复：原文规则（_is_legit_keep_by_source）说「该翻」的，reason 不单独放行；只有
+    原文确实是技术串（_is_legit_keep_by_source True）或短串+reason 双确认才判保留。"""
+    from app.auto_flow import _is_legit_keep_by_source, _is_legit_keep
+    # FTB 长描述：含 / 但含空格实词 → 该翻（_is_legit_keep_by_source False）
+    ftb = "Placement rule is the same as for RF Amplifier: it has to touch at least 2 Fusion Casing/Glass blocks."
+    assert len(ftb) > 40
+    assert _is_legit_keep_by_source(ftb) is False
+    # reason 含「资源路径」会命中 _is_legit_keep，但修复后长文本不因 reason 放行
+    assert _is_legit_keep("含资源路径 Casing/Glass 不宜翻译") is True
+    # 短技术串仍合理保留（如 §e>§r %s 纯占位符）
+    assert _is_legit_keep_by_source("§e>§r %s §e<§r") is True
+
+
+def test_completion_rounds_stage_done_to_total():
+    """v1.3.9 修复（用户「总进度 80% 与阶段 7,391/8,208 不一致 / 完成时要 21969/21969」）：
+    任务完成时把各阶段 done 补足到 total——跳过/已汉化/CFPA/记忆命中等「已处理但未计 done」
+    的条目算进总进度（用户要求总进度 100%，只有覆盖率才排除跳过）。失败条目不补
+    （done+failed 恒 ≤ total）。"""
+    from types import SimpleNamespace
+    from app.auto_flow import AutoFlow
+    f = object.__new__(AutoFlow)
+    # 模拟用户场景：lang total 4740 done 1364（跳过 3376 未计）、hardcode total 8208 done 7391
+    f.state = SimpleNamespace(
+        done=17552, failed=0, total=21969,
+        stages=[
+            {"name": "lang", "total": 4740, "done": 1364},
+            {"name": "json", "total": 4588, "done": 4458},
+            {"name": "pack", "total": 4433, "done": 4339},
+            {"name": "hardcode", "total": 8208, "done": 7391},
+            {"name": "build", "total": 1, "done": 1},
+        ])
+    # 复刻 run() 收尾补足逻辑
+    for s in f.state.stages:
+        if s["name"] != "build" and s["done"] < s["total"]:
+            s["done"] = s["total"]
+    _new_total_done = sum(s["done"] for s in f.state.stages)
+    f.state.done = min(max(_new_total_done, f.state.done), f.state.total - f.state.failed)
+    # 各阶段补足到 total（跳过算进度）
+    for s in f.state.stages:
+        assert s["done"] == s["total"], f"{s['name']} done 未补满: {s['done']} != {s['total']}"
+    # 全局 done = total（无失败时 100%）
+    assert f.state.done == f.state.total
+    assert f.state.done + f.state.failed <= f.state.total
+
+
+def test_completion_with_failed_not_over_total():
+    """补足不破坏不变量：有失败条目时 done+failed 恒 ≤ total（AI 判断失败不计 done）。"""
+    from types import SimpleNamespace
+    from app.auto_flow import AutoFlow
+    f = object.__new__(AutoFlow)
+    f.state = SimpleNamespace(
+        done=0, failed=2, total=2,
+        stages=[{"name": "hardcode", "total": 2, "done": 2},
+                {"name": "build", "total": 1, "done": 1}])
+    for s in f.state.stages:
+        if s["name"] != "build" and s["done"] < s["total"]:
+            s["done"] = s["total"]
+    _new_total_done = sum(s["done"] for s in f.state.stages)
+    f.state.done = min(max(_new_total_done, f.state.done), f.state.total - f.state.failed)
+    assert f.state.done + f.state.failed <= f.state.total

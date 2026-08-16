@@ -29,7 +29,7 @@ const LANGUAGES = [
 // keyring 已配置时的回显占位符：避免用户每次误以为要重输（保存时跳过该占位值）
 const API_KEY_PLACEHOLDER = '已配置（••••）'
 // 应用版本号：打包时同步更新（设置页「配置」标题右侧淡灰小字展示）
-const APP_VERSION = '1.3.8'
+const APP_VERSION = '1.3.9'
 
 const engine = ref('llm')            // llm(用户 API) | free(免费 API) | machine(机翻)，三选项互斥
 const provider = ref('DeepSeek')
@@ -41,7 +41,7 @@ const model = ref('')
 // 修复：不再用 localStorage 明文存 API Key（冗余且不安全）——真正生效靠后端 keyring，
 // 是否已配置由 /api/key/status 判定（onMounted 里回显占位符）
 const apiKey = ref('')
-const concurrency = ref(5)   // 并发数：同时进行的 AI 请求数（1-64，默认 5；v1.3.8 上限 16→64 高并发 API 顶满）
+const concurrency = ref(5)   // 并发数：同时进行的 AI 请求数（1-64，默认 5；v1.3.9 上限 16→64 高并发 API 顶满）
 const scanConcurrency = ref(4)   // 扫描并发数：同时解压/解析的 jar 数（1-16，默认 4）
 const batchSize = ref(null)      // 批量大小：一次请求翻译 N 条（5-60，空 = 厂商默认 25）
 // 吞吐控制（v1.2.3）：预设三档改为**可拖动滑动条**（并发/批次/扫描独立调节）——

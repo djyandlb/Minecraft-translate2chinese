@@ -1769,9 +1769,22 @@ class AutoFlow:
                 self._write_reviewed(it, tr)
                 continue
             sink[it["key"]] = src_full
-            # 合理保留也要过**规则关**（_is_legit_keep_by_source 优先 + _is_legit_keep 补充）——
-            # 否则 AI 把「该翻的界面英文」reason 写成「专有名词保留」就误放行（纯英文残留根因）
-            if _is_legit_keep_by_source(src_full) or _is_legit_keep(reason):
+            # 合理保留必须**原文规则为主**（v1.3.9 修复「翻译出原文」根因）：
+            # `_is_legit_keep_by_source(原文)` 已按原文形态判定——含空格/实词的句子（如
+            # FTB 描述 "Placement rule is the same as for RF Amplifier: it has to touch at
+            # least 2 Fusion Casing/Glass blocks."）**该翻**（返回 False）。
+            # 原 `or _is_legit_keep(reason)` 让 AI 审查措辞单独放行：reason 说「含资源路径
+            # Casing/Glass 不宜翻译」命中「资源路径」词 → 判合理保留 → **原文写记忆污染**，
+            # 后续同文本永久原文（用户反复「翻译出原文」元凶）。现在**必须原文规则先确认
+            # 是技术串**（_is_legit_keep_by_source 返回 True），reason 只作**补充佐证**——
+            # 原文规则说该翻的，reason 含任何词都不放行，进二次重试（forced 再翻一次）。
+            if _is_legit_keep_by_source(src_full):
+                self.failures.append({"text": src, "reason": f"保留原文：{reason}"})
+                self.memory.set(src_full, self.req.target_lang, src_full)
+                self._add_project_term(src_full, src_full)
+            elif _is_legit_keep(reason) and len(src_full) <= 40:
+                # 仅当原文短（≤40 字符，形如专名/命令/单 token）+ AI reason 确认技术类别
+                # 才判保留——长文本描述（>40）绝不因 reason 放行（防止长句被误判保留）
                 self.failures.append({"text": src, "reason": f"保留原文：{reason}"})
                 self.memory.set(src_full, self.req.target_lang, src_full)
                 self._add_project_term(src_full, src_full)
@@ -3203,6 +3216,23 @@ class AutoFlow:
                 if s["name"] == "build":
                     s["total"] = s["done"]
                     break
+            # v1.3.9 修复（用户「总进度 80% 与阶段 7,391/8,208 不一致」）：
+            # **任务完成时把各阶段 done 补足到 total**——跳过/已汉化/CFPA 命中/记忆命中等
+            # 「不真正调 AI 但已处理」的条目，用户要求算进总进度（总进度必须 100%），
+            # 只有**覆盖率**才用 `done - skipped` 排除跳过（report.py 已按 _skipped_n 扣）。
+            # 补足只调**当前 stage 的 done**（各阶段已完成，stage 已切到 build），
+            # 逐阶段补：lang/json/pack/hardcode 的 done 对齐各自 total，全局 done 同步。
+            # v1.3.9 补足（修正）：把「跳过/已处理但未计 done」的条目补进各阶段 done——
+            # 用户要求总进度到 100%（跳过只影响覆盖率，不影响总进度）。
+            # **但失败条目（failed）不补**：`done + failed` 恒 ≤ total（v1.3.7 不变量）。
+            # 各阶段按 total 补满，但全局 done 封顶 `total - failed`（保证 done+failed=total）；
+            # 无失败时 done = total（100%），有失败时显示真实完成度（诚实）。
+            for s in self.state.stages:
+                if s["name"] != "build" and s["done"] < s["total"]:
+                    s["done"] = s["total"]
+            _new_total_done = sum(s["done"] for s in self.state.stages)
+            self.state.done = min(max(_new_total_done, self.state.done),
+                                  self.state.total - self.state.failed)
 
             self.state.status = "done"
             # modjar 无资源包 zip：pack 字段仅 modpack 且语言文件非空时指向成品 zip，否则 None
