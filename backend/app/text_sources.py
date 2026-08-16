@@ -210,6 +210,43 @@ def _split_lines(text: str) -> tuple[list[str], dict]:
 
 _LINE_KEY_RE = re.compile(r"^line(\d+)$")
 
+# —— markdown 结构行跳过（v1.4.0 修复：AE2 指南等 .txt/.md 逐行采集时，把纯导航链接行/
+#    表格行/YAML 分隔线等 markdown **结构**收成翻译条目 → 低配模型逐个翻译必然破坏结构
+#    （链接 ]( 变 l、URL 截断、一页横线），failed 骤增。这些行不是内容，整行跳过）——
+
+# 纯导航链接行：`[text](url)` / `* [text](url)` / `- [text](url)` / `![alt](url)`。
+# 允许行内前后空白。正文内嵌链接（`See [Wireless](url) for details.` 含链接文字外的
+# 正文）**不**命中（fullmatch 要求整行纯链接结构），仍走正常翻译——链接文字该翻。
+_MD_NAV_LINK_RE = re.compile(r"^\s*(?:[-*+]\s+)?!?\[[^\]\n]*\]\([^)\n]*\)\s*$")
+# 表格行 `| a | b |`（含分隔线 `|---|---|`）：表格是排版结构，逐行翻译破坏结构。
+_MD_TABLE_RE = re.compile(r"^\s*\|.*\|\s*$")
+# YAML front matter 分隔线与正文分隔线：`---` / `***` / `___`（≥3 个重复符号）。
+_MD_HRULE_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+# 引用式链接定义 `[ref]: url` 或 `[ref]: <url>`：定义行不是内容，翻译破坏引用。
+_MD_REF_DEF_RE = re.compile(r"^\s*\[[^\]\n]*\]:\s*\S")
+
+
+def _is_md_structural_line(s: str) -> bool:
+    """是否为 markdown 结构行（导航链接/表格/分隔线/引用定义）——整行跳过翻译。
+
+    v1.4.0 修复（用户「AE2 指南翻译失败骤增 + 一页横线 + 字母链接被拆」）：逐行采集
+    md 不止要抓正文，还要**识别结构**。低配模型（stepfun flash 等）翻译结构行时把
+    `[Subnetworks](..ae2-` 破坏成 `l`、`]` 字符错位、表格被拆——这些行根本不该进
+    翻译管线。
+    """
+    s = s.strip()
+    if not s:
+        return True
+    if _MD_HRULE_RE.match(s):
+        return True                      # --- / *** / ___ 分隔线
+    if _MD_NAV_LINK_RE.match(s):
+        return True                      # 纯导航链接行
+    if _MD_REF_DEF_RE.match(s):
+        return True                      # [ref]: url 引用定义
+    if _MD_TABLE_RE.match(s):
+        return True                      # 表格行 / 表格分隔线
+    return False
+
 
 def _lines_entries(lines: list[str]) -> dict[str, str]:
     """非空行提取为条目，key=line{索引}（空行/空白行跳过）。
@@ -222,6 +259,8 @@ def _lines_entries(lines: list[str]) -> dict[str, str]:
         s = line.strip()
         if not s:
             continue
+        if _is_md_structural_line(s):
+            continue                     # v1.4.0：markdown 结构行（链接/表格/分隔线/引用定义）跳过
         if s.lower() in _EASING_KEYWORDS:
             continue
         out[f"line{i}"] = line
@@ -237,6 +276,8 @@ def _guide_lines_entries(lines: list[str]) -> dict[str, str]:
         s = line.strip()
         if not s:
             continue
+        if _is_md_structural_line(s):
+            continue                     # v1.4.0：markdown 结构行（导航链接/表格/分隔线/引用定义）跳过
         if s.lower() in _EASING_KEYWORDS:
             continue
         if re.match(r"^[A-Za-z_][\w-]*\s*:", s):

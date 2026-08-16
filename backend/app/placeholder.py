@@ -30,9 +30,19 @@ _PLACEHOLDER_RE = re.compile(
     r"|(?<![A-Za-z0-9_])/[a-z][a-z0-9-]+(?:\s+[A-Za-z0-9_@:./{}\[\]<>+-]+)*"  # 命令：/give @p diamond
     # v1.3.5（用户「all Matter Energy→石"+technology"+" 乱码」）：Markdown **加粗**标记
     # 单独保护——AI 把 `**` 输出成 `"+"` 破坏结构；保护后 AI 翻中间文本、restore 还原 `**`
-    #（mc_translator 格式保护思路）。链接 [text](url)/图片 ![alt](url) 由 prompt markdown
-    # 规则（保留语法、只翻文字）处理。
+    #（mc_translator 格式保护思路）。
     r"|\*\*"
+    # v1.4.0（用户「AE2 指南 ]( 变 l、URL 截断」）：Markdown 链接 `[text](url)` / 图片
+    # `![alt](url)` **整个链接**保护为一个 token——AI 低配模型把 `](` 输出成 `l`、把
+    # `..` 截成 `.`、吃 `.md)` 尾括号（用户实测 `[Subnetworksl../ae2-` 碎片）。整体
+    # token 化后 AI 物理上动不了结构；链接文字随结构保留原文（导航项名/专名 Subnetworks、
+    # Wireless Access，保留英文是安全常态——mc_translator 同款格式整体保护思路）。正文
+    # 段落内嵌链接同理整体保护，前后正文照翻。纯导航链接整行已由采集端
+    #（_is_md_structural_line）跳过，这里兜底正文内嵌链接。若 AI 动了 token（改 l/截 URL/
+    # 删括号）→ restore 后链接结构不完整 → validate 判失败降级单条。
+    # 注意：不能只保护 `](url)`——AI 会把 `[text]` 补成 `[text]` 再拼 `](url)` 变双 `]`，
+    # 结构照样坏（实测）。整链接保护后 restore 原样贴回，无补全机会。
+    r"|!?\[[^\]\n]*\]\([^)\n]*\)"
     # v1.3.6（用户「$O/$0 乱码」）：Parchment 富文本标记 $(item)/$()/$(bold)/$(o)
     # 单独保护——AI 把 `$()` 输出成 `$O`/`$0` 破坏排版；保护后 AI 翻中间文本、restore
     # 还原 `$(...)`（对齐 mc_translator 格式保护思路）。

@@ -534,6 +534,48 @@ def test_guide_lines_skips_frontmatter_component():
     assert "parent: index.md" not in vals
 
 
+def test_guide_lines_skips_markdown_structure_lines():
+    """v1.4.0（用户「AE2 指南翻译失败骤增 + [Subnetworksl../ae2- 碎片 + 一页横线」）：
+    GuideME 行提取跳过 markdown 结构行——纯导航链接/表格/YAML 分隔线/引用定义。
+    这些是结构不是内容，逐行翻译低配模型必然破坏（链接 ]( 变 l、表格被拆、分隔线
+    成横线），整行跳过（正文段落仍收集——正文内嵌链接由 placeholder 整链接保护）。"""
+    from app.text_sources import _guide_lines_entries
+    lines = [
+        "---",                                   # YAML 分隔线
+        "title: Wireless Terminals",
+        "parent: items-blocks-machines",
+        "---",
+        "",
+        "# Wireless Terminals",                  # 标题：保留
+        "Wireless terminals allow access.",      # 正文：保留
+        "[Subnetworks](../ae2-mechanics/subnetworks.md)",       # 纯导航链接：跳过
+        "[P2P Tunnels](../ae2-mechanics/machines/p2p_tunnels.md)",  # 纯导航链接：跳过
+        "---",                                   # 正文分隔线：跳过
+        "| Item | Cost |",                       # 表格：跳过
+        "|------|------|",                       # 表格分隔：跳过
+        "| Wire | 1 |",                          # 表格数据：跳过
+        "- [IO Port](machines/io_port.md)",      # 列表链接：跳过
+        "* [Level Emitter](machines/level_emitter.md)",  # 列表链接：跳过
+        "[ref]: https://example.com",            # 引用定义：跳过
+        "See [Wireless Access](wireless_access.md) for details.",  # 正文内嵌链接：保留（placeholder 保结构）
+    ]
+    entries = _guide_lines_entries(lines)
+    vals = entries.values()
+    assert "# Wireless Terminals" in vals
+    assert "Wireless terminals allow access." in vals
+    assert "See [Wireless Access](wireless_access.md) for details." in vals
+    for skip in [
+        "[Subnetworks](../ae2-mechanics/subnetworks.md)",
+        "[P2P Tunnels](../ae2-mechanics/machines/p2p_tunnels.md)",
+        "| Item | Cost |", "|------|------|", "| Wire | 1 |",
+        "- [IO Port](machines/io_port.md)", "* [Level Emitter](machines/level_emitter.md)",
+        "[ref]: https://example.com",
+    ]:
+        assert skip not in vals, f"结构行不该收集：{skip}"
+    # 纯链接整行只有一个元素时（无正文混合），历次收集不应有 '---' 分隔线单独成条
+    assert "---" not in vals
+
+
 def test_pack_text_carrier_only_en_us_lang():
     """整合包目录 lang 全收（v1.3.9 修复「FTB/KubeJS 没全量翻译」）：含只有 zh_cn 无 en_us
     的 mod（ftbquestlocalizer 英文占位）——否则纯英文占位漏翻。已汉化值由
