@@ -368,6 +368,10 @@ class AutoFlow:
         self.state = store.load(task_id)
         self.memory = MemoryStore(work_dir / "memory.json")
         self._resume = False               # 断点续联：True 时 skip/记忆命中不重复计 done（基准已含）
+        # v1.3.7 账本式防双计：记录所有已计入 done 的条目唯一键（(归属, key)，
+        # 归属=modid/file）。同一 key 重复 bump（记忆命中入队+审查写回、CFPA 命中+
+        # 审计等路径双计）直接忽略——从结构上保证 done ≤ total，进度条永不超 100%。
+        self._done_keys: set[tuple] = set()
         self._legit_kept: set = set()      # 初审过审的「合理保留原文」(modid,key)——漏翻兜底不再重复审查
         self.project_id = ""               # 项目指纹（run() 早期计算；提前初始化防 finally 收尾 AttributeError）
         # 术语统一（用户诉求：专有名词翻译必须统一，否则乱）：
@@ -525,19 +529,31 @@ class AutoFlow:
         self.state.stage = name
         self.store.save(self.state)
 
-    def _bump_stage(self, n: int = 1) -> None:
+    def _progress_key(self, modid: str = "", file: str = "", key: str = "") -> tuple:
+        """条目进度账本唯一键：(归属, key)。归属 = 文本源文件（json/pack，不同文件
+        同 key 是不同条目）或 modid（语言文件，不同 mod 同 key 是不同条目）。
+        双计路径（记忆命中入队+审查写回、CFPA 命中等）用同一 key → 账本去重。"""
+        return ((file or modid or ""), str(key))
+
+    def _bump_stage(self, n: int = 1, key: tuple | None = None) -> None:
         """推进全局 done 与当前 stage 的 done（进度条阶段明细同步）。
 
+        v1.3.7 账本式防双计（根治「done > total」）：调用方传 key（_progress_key 生成
+        的 (归属, key)）时，同一 key 重复 bump 直接忽略——记忆命中入队+审查写回、
+        CFPA 命中、skip 等多个路径不会再对同一条目计 2 次（用户实测 4,895/4,588
+        超 total 307 根因）。key=None 时无账本直接加（build 产物等单位，无条目 key）。
+
         stages 里找不到当前 stage（老任务/兼容路径）时只加全局 done，不崩。
-        v1.3.3 防御（用户「1,934/1,383 超 100%」）：done 偶超 total（双计/旧任务 total 少算）
-        时 total 跟随 done——进度条绝不显示 >100%（percent 已防回退，数字不再溢出）。
         """
+        if key is not None:
+            if key in self._done_keys:
+                return                       # 已计过，防双计
+            self._done_keys.add(key)
+            n = 1
         self.state.done += n
         for s in self.state.stages:
             if s["name"] == self.state.stage:
                 s["done"] += n
-                # v1.3.4：去掉 total 跟随（用户「total 随时涨」）——total 已改为全部值条目
-                #（含已汉化/记忆），done 恒 ≤ total；若仍超说明双计，应查根因而非掩盖
                 break
 
     def _bump_stage_only(self, n: int = 1) -> None:
@@ -932,7 +948,10 @@ class AutoFlow:
                     # AI 保留原文由审查判「合理保留 or 漏翻重翻」，不因批内他条失败背锅。
                     _req_fail = _real_fail
                     # sink：审查管道写回目标（lang=by_mod[modid]，json/pack=该文本源 out dict）
+                    # v1.3.7：带 file 供 _write_reviewed 账本 key（_progress_key）一致——
+                    # json/pack 阶段同 key 不同文件是不同条目，账本靠 (file, key) 区分
                     await enqueue_fn({"key": key, "modid": p.get("mod", ""),
+                                      "file": p.get("file", ""),
                                       "source": text, "translated": translated,
                                       "sink": sink, "request_failed": _req_fail})
                     # v1.2.9 用户诉求：翻译 done **不在翻译时加**——等审查过关写回才加
@@ -956,7 +975,7 @@ class AutoFlow:
                         # 供审查判漏翻（该翻的会被审查抓出重翻；专有名词审查豁免）
                         sink[key] = translated
                         if count_done:
-                            self._bump_stage()
+                            self._bump_stage(key=self._progress_key(p.get("mod", ""), p.get("file", ""), key))
                     else:
                         # 失败回原文：仅主轮（count_done）计 failed——重翻轮不重复计，
                         # 终审 _record_residual_failures 统一判（修复：同一失败条目计 4-6 次）
@@ -978,7 +997,7 @@ class AutoFlow:
                     self._record_consistency(text, translated)   # 一致性统计（兜底归一化用）
                     sink[key] = translated
                     if count_done:
-                        self._bump_stage()
+                        self._bump_stage(key=self._progress_key(p.get("mod", ""), p.get("file", ""), key))
                 # 修复（recheck 双计）：done 只在成功/保留原文分支 bump——失败条目仅计 failed，
                 # 否则 done+failed>total、覆盖率分子含失败条目虚高
                 self.state.progress.append({"key": key, "source": text,
@@ -1026,7 +1045,8 @@ class AutoFlow:
                 self._skipped_n += 1   # 跳过翻译计数（覆盖率分母扣：可翻译量 = 总文本 - 跳过）
                 if count_done:
                     # 续联：skip 只推进 stage 明细（全局基准已含，防翻倍）
-                    self._bump_stage() if not self._resume else self._bump_stage_only()
+                    self._bump_stage(key=self._progress_key(src_mod, src_file, key)) \
+                        if not self._resume else self._bump_stage_only()
                 self.state.progress.append({"key": key, "source": text,
                                             "translated": text, "status": "done",
                                             "mod": src_mod, "file": src_file})
@@ -1043,7 +1063,11 @@ class AutoFlow:
                 # 重复审查浪费 token 且拖慢续联——用户诉求「连审查都重跑」）；非续联
                 # 正常模式才交审查管道（审查通过才写明细）
                 if enqueue_fn is not None and not self._resume:
-                    await enqueue_fn({"key": key, "modid": src_mod,
+                    # v1.3.7 根治双计（用户「4,895/4,588 超 total」）：入队审查管道
+                    # 时**不提前 bump**——done 由审查写回 _write_reviewed 统一加
+                    #（对齐简繁分支 v1.2.9 修复，记忆命中分支此前漏修→同 key 计 2 次）。
+                    # enqueue dict 带 file 供 _write_reviewed 账本 key（_progress_key）一致。
+                    await enqueue_fn({"key": key, "modid": src_mod, "file": src_file,
                                       "source": text, "translated": cached, "sink": sink})
                 else:
                     sink[key] = cached
@@ -1051,9 +1075,10 @@ class AutoFlow:
                     self.state.progress.append({"key": key, "source": text,
                                                 "translated": cached, "status": "done",
                                                 "mod": src_mod, "file": src_file})
-                if count_done:
-                    # 续联：记忆命中只推进 stage 明细（全局基准已含）
-                    self._bump_stage() if not self._resume else self._bump_stage_only()
+                    if count_done:
+                        # 续联：记忆命中只推进 stage 明细（全局基准已含）
+                        self._bump_stage(key=self._progress_key(src_mod, src_file, key)) \
+                            if not self._resume else self._bump_stage_only()
                 if self.state.done % 10 == 0:
                     self.memory.save()
                 self.store.save(self.state)
@@ -1062,7 +1087,8 @@ class AutoFlow:
                 # 简繁双向直转，免 AI：zh_tw 走繁化，zh_cn 走简化（F5）
                 translated = (traditional(text) if self.req.target_lang == "zh_tw" else simplify(text))
                 if enqueue_fn is not None:
-                    await enqueue_fn({"key": key, "modid": src_mod,
+                    # v1.3.7：enqueue dict 带 file 供 _write_reviewed 账本 key 一致
+                    await enqueue_fn({"key": key, "modid": src_mod, "file": src_file,
                                       "source": text, "translated": translated, "sink": sink})
                     # v1.2.9 修复（recheck 双计）：简繁直转入审查队列也不提前 bump——
                     # 审查过关写回 _write_reviewed 统一 bump，否则同一条目 done 加 2 次
@@ -1071,7 +1097,8 @@ class AutoFlow:
                     sink[key] = translated
                     if count_done:
                         # 续联：简繁直转只推进 stage 明细（全局基准已含）
-                        self._bump_stage() if not self._resume else self._bump_stage_only()
+                        self._bump_stage(key=self._progress_key(src_mod, src_file, key)) \
+                            if not self._resume else self._bump_stage_only()
                 if enqueue_fn is None:
                     self.state.progress.append({"key": key, "source": text,
                                                 "translated": translated, "status": "done",
@@ -1384,7 +1411,9 @@ class AutoFlow:
         # 修复（recheck 续联漏计）：统一 _bump_stage——_write_reviewed 的条目都是**本次新
         # 翻译/重翻**（skip/记忆命中走 pipeline 其他分支用 _bump_stage_only，基准已含），
         # 续联时新翻译条目也应加全局 done，不能只加 stage 明细。
-        self._bump_stage()
+        # v1.3.7 账本幂等：带 (归属, key) 唯一键——记忆命中/简繁/主翻译入队审查管道的
+        # 条目在此统一 bump（提前 bump 已删），账本保证同 key 只计一次（防任何残留双计）
+        self._bump_stage(key=self._progress_key(it.get("modid", ""), it.get("file", ""), it.get("key", "")))
 
     def _add_project_term(self, source: str, decision: str) -> None:
         """项目级专有名词对照记录（用户诉求：Zeno→泽诺 这类决策写词汇表，后续统一沿用）。
@@ -1932,7 +1961,9 @@ class AutoFlow:
                 self.by_mod.setdefault(job.modid, {})[job.key] = cfpa_hit
                 self.memory.set(job.source_text, self.req.target_lang, cfpa_hit)   # 写记忆，json/硬编码阶段同文本复用
                 # 续联：CFPA 命中只推进 stage 明细（全局基准已含）
-                self._bump_stage() if not self._resume else self._bump_stage_only()
+                # v1.3.7 账本幂等：CFPA 直接写回不进审查管道，账本保证不与其他路径双计
+                self._bump_stage(key=self._progress_key(job.modid, "", job.key)) \
+                    if not self._resume else self._bump_stage_only()
                 self.state.progress.append({"key": job.key, "source": job.source_text,
                                             "translated": cfpa_hit, "status": "done",
                                             "mod": job.modid})
@@ -2388,7 +2419,8 @@ class AutoFlow:
                     continue
                 self.exported.append(str(jar_copy))
                 self.hard_count += 1
-                self._bump_stage()      # build 阶段逐 jar 推进（进度条不再停在 <100%）
+                # v1.3.7：build 剥离全局进度——只推进 build stage 明细（全局 done 翻译完已到 total）
+                self._bump_stage_only()
                 self.store.save(self.state)
                 await self._verify_one(jar, jar_copy)
         else:
@@ -2408,7 +2440,7 @@ class AutoFlow:
                 # 修复（recheck）：同步写几百 modid 资源包文件 → to_thread 防事件循环冻结
                 await asyncio.to_thread(build_resource_pack_dir, self.by_mod, self.req.target_lang,
                                         pack_spec, rp_dir, pack_desc)
-                self._bump_stage()      # build 阶段：资源包产出
+                self._bump_stage_only()   # v1.3.7：build 只推进 stage 明细，不 bump 全局
                 self.store.save(self.state)
             # 内置 i18n mod（i18n 是 mod 应放 mods 文件夹；进游戏自动下载 CFPA 全量汉化）
             _i18n = bundled_i18n_jar()
@@ -2491,7 +2523,7 @@ class AutoFlow:
                             f.write_text(content, encoding="utf-8")
                     except OSError:
                         pass
-                self._bump_stage()      # build 阶段：补丁产出
+                self._bump_stage_only()   # v1.3.7：build 只推进 stage 明细
                 self.store.save(self.state)
             # 整合包 jar 内 json/lines（教程书/进度等）**不产 hardcoded 修改版 jar**（用户刚需：
             # 整合包全走资源包 / VP / 补丁形式生效，无二次分发纠纷）。分流：
@@ -2565,7 +2597,7 @@ class AutoFlow:
                     self.store.save(self.state)
                     return
                 self.exported.append(str(zout))
-                self._bump_stage()
+                self._bump_stage_only()   # v1.3.7：build 只推进 stage 明细
                 self.store.save(self.state)
     async def _verify_one(self, src_jar: Path, jar_copy: Path) -> None:
         """单个汉化产物审查门禁：zip 完整 + 语言文件 + Identifier 复查，不过不输出（防交付即崩）。"""
@@ -3085,10 +3117,14 @@ class AutoFlow:
             if not self.engine_machine:
                 self.state.stages.append({"name": "hardcode", "total": sum(
                     len(c) for c in self.hard_candidates_by_jar.values()), "done": 0})
-            # 修复：total 下限 = done+failed（续联基准可能 > 扫描 total——删 mod/进度虚高时
-            # 进度不超 100%；Agent 审查确认 done>total 无自愈）
-            self.state.total = max(sum(s["total"] for s in self.state.stages),
-                                   self.state.done + self.state.failed)
+            # v1.3.7 重构（用户「4,895/4,588 超 total / 进度条随实际变化」）：total **一次性
+            # 定死**——只含翻译条目（lang+json+pack+hardcode），build 产物单位剥离出全局
+            # 进度（build 阶段只推进 stage 明细，不 bump 全局 done）。
+            # 续联保护（仅启动时一次）：续联基准 done 可能 > 当前扫描 total（删 mod/旧进度
+            # 虚高）——取较大者定死，**此后永不跟随 done**（删除原三处 max(done+failed) 修正，
+            # 双计由账本 _done_keys 根治，total 不再被拉高掩盖）。
+            _scan_total = sum(s["total"] for s in self.state.stages)
+            self.state.total = max(_scan_total, self.state.done + self.state.failed)
             self.state.stage = "lang"
             # 若语言/文本源为空但有硬编码候选（LLM/兜底引擎），仍需继续流程
             if self.state.total == 0 and not (self.hard_candidates_by_jar and not self.engine_machine):
@@ -3138,10 +3174,10 @@ class AutoFlow:
                     + 1 \
                     + (1 if self.hard_mappings else 0)
             self.state.stages.append({"name": "build", "total": build_total, "done": 0})
-            # 修复：total 下限 = done+failed（续联基准可能 > 扫描 total——删 mod/进度虚高时
-            # 进度不超 100%；Agent 审查确认 done>total 无自愈）
-            self.state.total = max(sum(s["total"] for s in self.state.stages),
-                                   self.state.done + self.state.failed)
+            # v1.3.7：build 产物单位**不并入全局 total**（total 已在扫描后定死=翻译条目）——
+            # build 阶段只推进 stage 明细（_bump_stage_only），全局 done 在翻译完成时已到 total。
+            # 删除原 `total = max(sum(stages), done+failed)`：build 单位预估 + 续联基准会被
+            # 双计 done 拉高 total（用户「total 随时涨」根因），账本 + 定死 total 根治。
             self._set_stage("build")
 
             # 产物组织 outputs/<task_id>/ 下（exe 旁 outputs，download 从这里读）
@@ -3160,17 +3196,13 @@ class AutoFlow:
                 self.store.save(self.state)
                 return
 
-            # build 预估单位与实际产出兜底对账：VP 成功跳过硬编码 jar 等场景预估偏大 →
-            # 修正 total，避免进度条卡在 <100% 无法到顶。
-            # 修复：全局 total 下限取 done+failed，保证进度占比自洽（done+failed 不超 total，
-            # failed 不虚高）；build stage 内部仍取自身 done（进度条到顶逻辑不变）
-            if self.state.done + self.state.failed != self.state.total:
-                for s in self.state.stages:
-                    if s["name"] == "build":
-                        s["total"] = s["done"]
-                        break
-                # 修复：双向修正（续联基准虚高时 done+failed 可能 > total——上调 total 保自洽，进度不超 100%）
-                self.state.total = self.state.done + self.state.failed
+            # v1.3.7：build 预估单位与实际产出兜底对账——**只修 build stage 明细 total**
+            #（VP 失败等预估偏大时 build 明细能到顶），全局 total 已定死（=翻译条目），
+            # **不再跟随 done**（删除原 total = done+failed 修正——那是「total 随时涨」根因）。
+            for s in self.state.stages:
+                if s["name"] == "build":
+                    s["total"] = s["done"]
+                    break
 
             self.state.status = "done"
             # modjar 无资源包 zip：pack 字段仅 modpack 且语言文件非空时指向成品 zip，否则 None

@@ -53,6 +53,13 @@ const percent = computed(() => {
   // 直接 done/total 会在 total 膨胀时进度「往回走」（用户实测观感像 bug）
   return Math.round((t.done / Math.max(t.done, t.total)) * 100)
 })
+// v1.3.7：数字显示兜底——分母取 max(total, done)，绝不让「done/total」数字超限
+//（后端已账本式防双计 + total 定死根治，此为双保险显示防护）
+const displayTotal = computed(() => {
+  const t = task.value
+  if (!t) return 0
+  return Math.max(t.done || 0, t.total || 0)
+})
 // 当前阶段中文名（无 stage/兼容旧任务回退空——旧任务总览仍用纯百分比）
 const STAGE_TEXT = {
   lang: '翻译语言文件', json: '翻译 JSON / 文本', pack: '翻译整合包文本',
@@ -620,7 +627,7 @@ onUnmounted(() => {
             <div class="progress-track">
               <div class="progress-fill" :style="{ width: percent + '%' }"></div>
             </div>
-            <span class="progress-num">{{ percent }}%（{{ task.done }}/{{ task.total }}）</span>
+            <span class="progress-num">{{ percent }}%（{{ task.done }}/{{ displayTotal }}）</span>
           </div>
           <div v-if="task.failed > 0" class="warn-box">
             有 {{ task.failed }} 条翻译失败（具体原因见流程结束后翻译报告）

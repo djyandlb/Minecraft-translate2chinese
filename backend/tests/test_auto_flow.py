@@ -515,10 +515,11 @@ async def test_auto_machine_skips_hardcode(tmp_path, monkeypatch):
     await run_auto_translation(state.id, req, {"force_hardcode": True}, store, work, outputs)
     st = store.load(state.id)
     assert st.status == "done"
-    # machine 引擎 total 不含硬编码候选（只含语言文件 1 词条 + build 1 单位）
-    assert st.total == 3   # lang 1 + build 2（资源包目录 + 整合包汉化.zip）
-    assert st.done == st.total                     # build 阶段推进到 100%
-    # 阶段结构：lang 1 + build 1，无 hardcode 阶段（machine 不扫硬编码）
+    # v1.3.7：total 定死 = 翻译条目（machine 无硬编码 → lang 1 词条）；build 剥离全局
+    assert st.total == 1
+    assert st.done == 1
+    assert st.done <= st.total                     # 永不超 total
+    # 阶段结构：lang 1 + build stage 独立（done 到顶），无 hardcode（machine 不扫硬编码）
     stages = {s["name"]: s for s in st.stages}
     assert stages["lang"]["total"] == 1 and stages["lang"]["done"] == 1
     assert "hardcode" not in stages
@@ -1060,13 +1061,12 @@ async def test_auto_total_includes_hardcode_candidates(tmp_path, monkeypatch):
     await run_auto_translation(state.id, req, {"force_hardcode": True}, store, work, outputs)
     st = store.load(state.id)
     assert st.status == "done"
-    # total = 语言文件 1 + 硬编码候选 2 + build ≥1 单位（build 实际单位取决于
-    # VP 下载成败/补丁包产出，收尾修正对账 → done 恒到 total）
-    assert st.total >= 1 + 2 + 1
-    # done 按候选数推进：语言文件 1 + 硬编码 2 + build 单位都算已处理，且推进到顶
+    # v1.3.7：total 定死 = 语言文件 1 + 硬编码候选 2（build 剥离全局）
+    assert st.total == 1 + 2
+    # done 按候选数推进：语言文件 1 + 硬编码 2，永不超 total
     assert st.done == st.total
     assert st.done <= st.total
-    # 阶段结构：lang 1 + hardcode 2，各阶段 done 对齐，build done 到顶
+    # 阶段结构：lang 1 + hardcode 2，各阶段 done 对齐，build 独立到顶
     stages = {s["name"]: s for s in st.stages}
     assert stages["lang"]["total"] == 1 and stages["lang"]["done"] == 1
     assert stages["hardcode"]["total"] == 2 and stages["hardcode"]["done"] == 2
@@ -1106,12 +1106,12 @@ async def test_auto_llm_total_includes_all_candidates(tmp_path, monkeypatch):
     await run_auto_translation(state.id, req, {"force_hardcode": True}, store, work, outputs)
     st = store.load(state.id)
     assert st.status == "done"
-    # total = 硬编码候选数（无语言文件/文本源）+ build 2 单位（hardcoded jar + 整合包汉化.zip）
-    assert st.total == 1 + 2
-    # done 按候选数推进（AI 判定可见的 1 条）+ build 2
-    assert st.done == 1 + 2
+    # v1.3.7：total 一次性定死 = 翻译条目（硬编码候选数）；build 剥离全局进度（只进 stage 明细）
+    assert st.total == 1
+    # done 按候选数推进（AI 判定可见的 1 条）
+    assert st.done == 1
     assert st.done <= st.total
-    # 阶段结构：hardcode 1 + build 2
+    # 阶段结构：hardcode 1 + build stage 独立（done 到顶）
     stages = {s["name"]: s for s in st.stages}
     assert stages["hardcode"]["total"] == 1 and stages["hardcode"]["done"] == 1
     assert stages["build"]["done"] == stages["build"]["total"]
@@ -1565,3 +1565,39 @@ def test_has_english_leak_rules():
     assert flow._has_english_leak("Press the key to toggle the minimap visibility") is True
     # 纯中文 → 不残留
     assert flow._has_english_leak("这是一个纯中文的翻译结果") is False
+
+
+def test_bump_stage_ledger_idempotent():
+    """v1.3.7 账本式 done 计数：同一 key 重复 bump 只计一次（记忆命中入队+审查写回
+    双计根治——用户「4,895/4,588 超 total」根因），不同 key 各计一次。"""
+    from app.auto_flow import AutoFlow
+    flow = object.__new__(AutoFlow)
+    flow._done_keys = set()
+    flow.state = SimpleNamespace(done=0, stages=[{"name": "lang", "done": 0, "total": 2}], stage="lang")
+
+    # 同一条目 (mod, key) 双计路径：记忆命中 enqueue → 审查写回
+    k = flow._progress_key("mymod", "", "key.hello")
+    flow._bump_stage(key=k)
+    flow._bump_stage(key=k)          # 重复（双计路径）→ 账本吞掉
+    assert flow.state.done == 1
+
+    # 不同条目 → 各自计数
+    flow._bump_stage(key=flow._progress_key("mymod", "", "key.world"))
+    assert flow.state.done == 2
+    assert flow.state.stages[0]["done"] == 2
+
+    # json/pack 阶段同 key 不同文件是不同条目 → 各计一次（file 归属区分）
+    flow2 = object.__new__(AutoFlow)
+    flow2._done_keys = set()
+    flow2.state = SimpleNamespace(done=0, stages=[{"name": "json", "done": 0, "total": 2}], stage="json")
+    flow2._bump_stage(key=flow2._progress_key("", "config/a.json", "k"))
+    flow2._bump_stage(key=flow2._progress_key("", "config/b.json", "k"))
+    assert flow2.state.done == 2
+
+    # key=None（build 等单位）→ 无账本直接加
+    flow3 = object.__new__(AutoFlow)
+    flow3._done_keys = set()
+    flow3.state = SimpleNamespace(done=0, stages=[{"name": "build", "done": 0, "total": 2}], stage="build")
+    flow3._bump_stage()
+    flow3._bump_stage()
+    assert flow3.state.done == 2
