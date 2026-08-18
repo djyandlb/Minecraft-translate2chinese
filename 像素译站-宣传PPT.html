@@ -16,15 +16,13 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: "Microsoft YaHei","PingFang SC",sans-serif; background: var(--bg); color: var(--text); overflow: hidden; }
 
-/* ============ 16:9 画布 ============ */
-/* 画布铺满整个窗口（不再 16:9 letterbox）——封面 hero 深绿背景满屏，任意窗口比例都铺满 */
+/* ============ 画布 ============ */
 .slide-deck { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
 .slide { position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 64px 80px; background: var(--bg); overflow: hidden; opacity: 0; will-change: transform, opacity; transition: transform .55s cubic-bezier(.4,0,.2,1), opacity .5s ease; }
-/* 内容页背景：极淡像素网格，强化纸张像素感（封面除外） */
-.slide:not(.cover)::before { content: ""; position: absolute; inset: 0; background-image: linear-gradient(rgba(63,101,72,.04) 1px, transparent 1px), linear-gradient(90deg, rgba(63,101,72,.04) 1px, transparent 1px); background-size: 30px 30px; pointer-events: none; }
+.slide:not(.cover):not(.no-grid)::before { content: ""; position: absolute; inset: 0; background-image: linear-gradient(rgba(63,101,72,.04) 1px, transparent 1px), linear-gradient(90deg, rgba(63,101,72,.04) 1px, transparent 1px); background-size: 30px 30px; pointer-events: none; }
 .slide-content { position: relative; z-index: 1; width: 100%; max-width: 100%; max-height: 100%; overflow: hidden; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 13px; }
 
-/* ============ 封面（深绿像素） ============ */
+/* ============ 封面 ============ */
 .slide.cover { background: linear-gradient(150deg, var(--hero1), var(--hero2)); color: #f5f1e6; }
 .cover .grid-bg { position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px); background-size: 34px 34px; }
 .cover .scanline { position: absolute; top: 0; left: -40%; width: 45%; height: 100%; background: linear-gradient(100deg, transparent, rgba(200,233,106,.10), transparent); animation: scan 5.5s ease-in-out infinite; }
@@ -43,7 +41,7 @@ body { font-family: "Microsoft YaHei","PingFang SC",sans-serif; background: var(
 
 /* ============ 内容页通用 ============ */
 .slide .tag { position: absolute; top: 30px; left: 44px; font-size: 12px; letter-spacing: .3em; color: var(--dim); }
-.slide .pageno { position: absolute; bottom: 30px; right: 44px; font-size: 13px; color: var(--dim); letter-spacing: .1em; }
+/* .slide .pageno 已移除：不需要脚标 */
 .slide .mark { position: absolute; top: 30px; right: 44px; display: flex; gap: 6px; }
 .slide .mark i { width: 8px; height: 8px; transform: rotate(45deg); background: var(--moss); }
 .slide .mark i:first-child { background: var(--lime); border: 1px solid var(--moss); }
@@ -85,12 +83,7 @@ h2.t em { font-style: normal; color: var(--moss); }
 .list .li b { color: var(--moss2); }
 .list .li span { color: var(--dim); font-size: 13px; }
 
-/* ============ 图片占位 ============ */
-.ph { border: 2px dashed var(--line); background: var(--bg3); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--dim); min-height: 120px; width: 100%; transition: border-color .22s, background .22s; }
-.ph:hover { border-color: var(--moss); background: var(--bg2); }
-
-/* ============ 界面示意（CSS 编码绘制，替代截图） ============ */
-/* 应用主界面示意：标题栏 + 拖放区 + 进度区 */
+/* ============ 界面示意 ============ */
 .mock-win { width: 100%; border: 2px solid var(--moss2); background: var(--bg2); box-shadow: 5px 5px 0 rgba(47,80,56,.18); overflow: hidden; }
 .mw-bar { background: var(--moss2); color: #e8f3d8; display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
 .mw-dots { display: flex; gap: 6px; }
@@ -106,33 +99,29 @@ h2.t em { font-style: normal; color: var(--moss); }
 .mw-stage { display: flex; gap: 6px; }
 .mw-stage i { height: 6px; flex: 1; background: var(--line); }
 .mw-stage i:nth-child(1){background:var(--moss)} .mw-stage i:nth-child(2){background:var(--lime)} .mw-stage i:nth-child(3){background:var(--moss)}
-.mw-prog { height: 10px; background: var(--line); position: relative; }
-.mw-prog span { display: block; height: 100%; background: var(--moss); }
+.mw-prog { height: 10px; background: var(--line); position: relative; overflow: hidden; }
+.mw-prog span { display: block; height: 100%; background: var(--moss); width: 0; }
 .mw-status { font-size: 11px; color: var(--dim); letter-spacing: .05em; }
-/* 设置面板示意：字段行 + 测试按钮 */
 .mock-set { width: 100%; max-width: 460px; border: 2px solid var(--line); background: var(--bg2); box-shadow: 4px 4px 0 var(--line); padding: 12px 14px; display: flex; flex-direction: column; gap: 7px; }
 .ms-row { display: flex; align-items: center; gap: 10px; }
 .ms-label { width: 78px; font-size: 12px; color: var(--dim); flex-shrink: 0; }
 .ms-ctl { flex: 1; border: 2px solid var(--line); background: #fff; padding: 5px 8px; font-size: 12px; color: var(--moss2); display: flex; align-items: center; justify-content: space-between; }
 .ms-ctl::after { content: "▾"; color: var(--dim); }
 .ms-btn { background: var(--moss); color: var(--lime); border: 2px solid var(--moss); padding: 5px 0; font-size: 12px; text-align: center; letter-spacing: .1em; margin-top: 2px; }
-/* 拖放区 + 进度示意 */
 .mock-drop { width: 100%; max-width: 420px; border: 2px dashed var(--moss); background: var(--bg3); padding: 14px 16px; display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .md-cube { display: flex; gap: 5px; }
 .md-cube i { width: 12px; height: 12px; background: var(--moss); border: 1px solid var(--lime); transform: rotate(45deg); }
 .mock-drop b { font-size: 13px; color: var(--moss2); }
-.md-prog { width: 100%; height: 10px; background: var(--line); position: relative; }
-.md-prog span { display: block; height: 100%; background: var(--moss); }
+.md-prog { width: 100%; height: 10px; background: var(--line); position: relative; overflow: hidden; }
+.md-prog span { display: block; height: 100%; background: var(--moss); width: 0; }
 .mock-drop p { font-size: 11px; color: var(--dim); }
-.ph b { font-size: 14px; letter-spacing: .2em; }
-.ph span { font-size: 11px; }
 
-/* ============ 大标题页（居中简介） ============ */
+/* ============ 大标题页 ============ */
 .big { font-size: 64px; letter-spacing: .2em; color: var(--moss2); text-shadow: 4px 4px 0 var(--line); }
 .center-para { font-size: 17px; color: var(--dim); line-height: 1.9; max-width: 820px; text-align: center; }
 .center-para b { color: var(--moss2); }
 
-/* ============ 进度条（播放进度指示） ============ */
+/* ============ 进度条 ============ */
 .progress-bar { position: fixed; top: 0; left: 0; height: 3px; background: var(--moss); transition: width .3s; z-index: 1000; }
 
 /* ============ 统一动画：浮现 + 错落 ============ */
@@ -144,8 +133,6 @@ h2.t em { font-style: normal; color: var(--moss); }
 .slide.active .slide-content > *:nth-child(4) { animation-delay: .32s; }
 .slide.active .slide-content > *:nth-child(5) { animation-delay: .41s; }
 @keyframes fadeUp { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: translateY(0); } }
-
-/* 封面内容单独动画 */
 .slide.cover .inner > * { opacity: 0; }
 .slide.cover.active .inner > * { animation: fadeUp .6s ease-out both; }
 .slide.cover.active .inner > *:nth-child(1) { animation-delay: .05s; }
@@ -154,25 +141,86 @@ h2.t em { font-style: normal; color: var(--moss); }
 .slide.cover.active .inner > *:nth-child(4) { animation-delay: .38s; }
 .slide.cover.active .inner > *:nth-child(5) { animation-delay: .49s; }
 
+/* ============ 动画演示层（核心新增） ============ */
+.demo-area { width: 100%; max-width: 700px; margin: 12px auto 0; position: relative; min-height: 200px; }
+
+/* 拖入动画：文件图标飞入 */
+.fly-in { position: absolute; opacity: 0; transition: all .8s cubic-bezier(.23,1,.32,1); }
+.fly-in.show { opacity: 1; }
+.fly-icon { width: 48px; height: 48px; background: var(--moss); border: 3px solid var(--lime); display: flex; align-items: center; justify-content: center; color: var(--lime); font-weight: 700; font-size: 16px; transform: rotate(45deg); }
+.fly-icon span { transform: rotate(-45deg); }
+
+/* 进度条动画 */
+@keyframes progressFill { from { width: 0; } to { width: 100%; } }
+@keyframes progressFill75 { from { width: 0; } to { width: 75%; } }
+@keyframes progressFillPartial { from { width: 0; } to { width: 62%; } }
+.anim-prog { height: 12px; background: var(--line); border: 2px solid var(--moss); overflow: hidden; width: 100%; }
+.anim-prog span { display: block; height: 100%; background: linear-gradient(90deg, var(--moss), var(--lime)); width: 0; }
+.slide.active .anim-prog span { animation: progressFill 2.8s ease-out .6s both; }
+.slide.active .anim-prog.partial span { animation: progressFillPartial 2.2s ease-out .6s both; }
+
+/* 阶段 rail 逐段点亮 */
+@keyframes railLight { 0% { background: var(--line); } 100% { background: var(--moss); } }
+.rail { display: flex; gap: 4px; margin: 8px 0; }
+.rail i { height: 8px; flex: 1; background: var(--line); }
+.slide.active .rail i:nth-child(1) { animation: railLight .4s ease .3s both; }
+.slide.active .rail i:nth-child(2) { animation: railLight .4s ease .9s both; }
+.slide.active .rail i:nth-child(3) { animation: railLight .4s ease 1.5s both; }
+.slide.active .rail i:nth-child(4) { animation: railLight .4s ease 2.1s both; }
+.slide.active .rail i:nth-child(5) { animation: railLight .4s ease 2.7s both; }
+
+/* 数字跳动动画 */
+@keyframes countUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.count-num { font-size: 48px; font-weight: 700; color: var(--moss2); letter-spacing: .05em; }
+.slide.active .count-num { animation: countUp .6s ease-out .4s both; }
+
+/* 设置面板动画：逐行出现 */
+.slide.active .mock-set .ms-row:nth-child(1) { animation: fadeUp .4s ease .2s both; }
+.slide.active .mock-set .ms-row:nth-child(2) { animation: fadeUp .4s ease .5s both; }
+.slide.active .mock-set .ms-row:nth-child(3) { animation: fadeUp .4s ease .8s both; }
+.slide.active .mock-set .ms-row:nth-child(4) { animation: fadeUp .4s ease 1.1s both; }
+.slide.active .mock-set .ms-btn { animation: fadeUp .4s ease 1.4s both; }
+.slide.active .mock-set .ms-btn::after { content: " ✓ 连接成功"; color: var(--lime); margin-left: 8px; font-size: 11px; }
+
+/* 完成动画：弹出结果卡 */
+.result-pop { background: var(--bg2); border: 3px solid var(--moss); box-shadow: 5px 5px 0 rgba(47,80,56,.2); padding: 20px 28px; text-align: center; opacity: 0; transform: scale(.8); transition: all .5s cubic-bezier(.23,1,.32,1); }
+.slide.active .result-pop { opacity: 1; transform: scale(1); transition-delay: 2.5s; }
+.result-pop h3 { font-size: 22px; color: var(--moss2); margin-bottom: 8px; }
+.result-pop .cov { font-size: 40px; font-weight: 700; color: var(--moss); letter-spacing: .05em; }
+.result-pop p { font-size: 13px; color: var(--dim); margin-top: 6px; }
+
+/* 飞入图标动画 */
+@keyframes flyJar { 0% { opacity: 0; transform: translate(-180px, -60px) rotate(45deg) scale(.5); } 60% { opacity: 1; transform: translate(0, 0) rotate(45deg) scale(1.1); } 100% { opacity: 1; transform: translate(0, 0) rotate(45deg) scale(1); } }
+.slide.active .fly-jar { animation: flyJar 1s cubic-bezier(.23,1,.32,1) .2s both; }
+
+/* 扫描中文字闪烁 */
+@keyframes blink { 0%,100%{ opacity:1 } 50%{ opacity:.4 } }
+.slide.active .blink-text { animation: blink 1.2s ease-in-out infinite; }
+
+/* 吞吐测试数字动画 */
+@keyframes testPulse { 0%{transform:scale(1)} 50%{transform:scale(1.08)} 100%{transform:scale(1)} }
+.slide.active .test-num { animation: testPulse .8s ease-in-out 1.2s 3; }
+
+/* 断点续联：进度从中间开始 */
+@keyframes resumeFill { from { width: 38%; } to { width: 100%; } }
+.slide.active .resume-prog span { width: 38%; animation: resumeFill 2s ease-out .8s both; }
+
+/* ============ 自动播放控制栏 ============ */
+.autoplay-bar { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 12px; align-items: center; z-index: 1001; background: rgba(31,53,38,.9); padding: 8px 20px; border: 2px solid var(--lime); backdrop-filter: blur(8px); }
+.autoplay-bar button { background: transparent; border: 1px solid rgba(200,233,106,.4); color: var(--lime); padding: 5px 16px; font-size: 13px; cursor: pointer; letter-spacing: .08em; transition: all .2s; font-family: inherit; }
+.autoplay-bar button:hover { background: rgba(200,233,106,.15); }
+.autoplay-bar button.on { background: var(--lime); color: var(--hero1); border-color: var(--lime); }
+.autoplay-bar .timer { color: var(--lime); font-size: 12px; letter-spacing: .08em; min-width: 60px; text-align: center; }
+
 /* ============ 响应式 ============ */
 @media (max-width: 768px) {
   .slide { padding: 44px 24px; }
   h2.t { font-size: 30px; }
   .cover h1 { font-size: 44px; }
-  .cover .slogan { font-size: 18px; }
   .big { font-size: 36px; }
-  .center-para { font-size: 15px; }
   .cards.c3, .cards.c4 { grid-template-columns: 1fr 1fr; }
   .steps { grid-template-columns: 1fr 1fr; gap: 20px 8px; }
   .steps::before { display: none; }
-  .step .n { width: 44px; height: 44px; font-size: 18px; }
-  .slide .tag { top: 18px; left: 20px; }
-  .slide .pageno { bottom: 18px; right: 20px; }
-}
-@media (max-width: 480px) {
-  h2.t { font-size: 24px; }
-  .lead { font-size: 14px; }
-  .cards.c3, .cards.c4 { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -198,37 +246,72 @@ h2.t em { font-style: normal; color: var(--moss); }
   </div>
 </section>
 
-<!-- ========== 2 应用是什么 ========== -->
-<section class="slide">
+<!-- ========== 2 痛点切入 ========== -->
+<section class="slide no-grid">
   <span class="tag">像素译站 · PIXEL TRANSLATION</span>
   <span class="mark"><i></i><i></i></span>
-  <span class="pageno">02</span>
   <div class="slide-content">
     <span class="diamond"><i></i><i></i></span>
-    <h2 class="t">这是什么</h2>
-    <p class="center-para">一款面向 Minecraft 玩家的 <b>AI 一键汉化工具</b>。<br>拖入文件 → 自动识别 → AI 翻译 → 质量审查 → 生成可用的汉化产物。<br><b>全程可视化</b>，队列逐项处理，无需任何手动编辑。</p>
-    <div class="mock-win">
-      <div class="mw-bar"><span class="mw-dots"><i></i><i></i><i></i></span><span class="mw-title">像素译站</span></div>
-      <div class="mw-body">
-        <div class="mw-left">
-          <span class="mw-cube"><i></i><i></i></span>
-          <b>拖入整合包 / Mod / 地图 / 光影</b>
+    <h2 class="t">你有没有遇到过</h2>
+    <p class="lead">下了一个整合包，几百个 Mod，全是英文</p>
+    <div class="cards c3" style="margin-top:16px">
+      <div class="card" style="border-color:var(--rust)">
+        <div class="ico" style="background:var(--rust)">?</div>
+        <h3>任务书看不懂</h3>
+        <p>FTB Quests 几百个任务，全是英文根本不知道要干啥</p>
+      </div>
+      <div class="card" style="border-color:var(--rust)">
+        <div class="ico" style="background:var(--rust)">?</div>
+        <h3>物品描述看不懂</h3>
+        <p>JEI 里每个物品的用途、合成方式全英文</p>
+      </div>
+      <div class="card" style="border-color:var(--rust)">
+        <div class="ico" style="background:var(--rust)">?</div>
+        <h3>手动翻译太慢</h3>
+        <p>一个整合包几百个 mod，手动翻要好几天</p>
+      </div>
+    </div>
+    <p class="hint" style="margin-top:16px;font-size:15px;color:var(--moss2)">有没有一种工具，能一键搞定？</p>
+  </div>
+</section>
+
+<!-- ========== 3 核心演示：拖入 → 翻译 → 完成 ========== -->
+<section class="slide no-grid">
+  <span class="tag">像素译站 · PIXEL TRANSLATION</span>
+  <span class="mark"><i></i><i></i></span>
+  <div class="slide-content">
+    <span class="diamond"><i></i><i></i></span>
+    <h2 class="t">拖入即翻 · 一键汉化</h2>
+    <div class="demo-area">
+      <div class="mock-win">
+        <div class="mw-bar"><span class="mw-dots"><i></i><i></i><i></i></span><span class="mw-title">像素译站</span></div>
+        <div class="mw-body">
+          <div class="mw-left" style="position:relative;min-height:140px">
+            <div class="fly-jar" style="position:absolute;top:50%;left:50%;margin:-24px 0 0 -24px">
+              <div class="fly-icon"><span>JAR</span></div>
+            </div>
+            <b style="margin-top:60px" class="blink-text">正在识别…</b>
+          </div>
+          <div class="mw-right">
+            <div class="rail"><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="anim-prog"><span></span></div>
+            <p class="mw-status">翻译语言文件 · 1,245 / 18,300 · 并发 ×16</p>
+          </div>
         </div>
-        <div class="mw-right">
-          <div class="mw-stage"><i></i><i></i><i></i><i></i></div>
-          <div class="mw-prog"><span style="width:68%"></span></div>
-          <p class="mw-status">翻译中 · 正在翻译语言文件</p>
-        </div>
+      </div>
+      <div class="result-pop" style="margin-top:12px">
+        <h3>汉化完成</h3>
+        <div class="cov">98.6%</div>
+        <p>覆盖率 · 18,300 条已翻译 · 耗时 2 分 14 秒</p>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ========== 3 四种输入类型 ========== -->
+<!-- ========== 4 支持四种输入 ========== -->
 <section class="slide">
   <span class="tag">像素译站 · PIXEL TRANSLATION</span>
   <span class="mark"><i></i><i></i></span>
-  <span class="pageno">03</span>
   <div class="slide-content">
     <span class="diamond"><i></i><i></i></span>
     <h2 class="t">支持 <em>四种</em> 输入类型</h2>
@@ -243,21 +326,14 @@ h2.t em { font-style: normal; color: var(--moss); }
   </div>
 </section>
 
-<!-- ========== 4 AI 翻译引擎 ========== -->
+<!-- ========== 5 AI 翻译引擎（设置面板动画） ========== -->
 <section class="slide">
   <span class="tag">像素译站 · PIXEL TRANSLATION</span>
   <span class="mark"><i></i><i></i></span>
-  <span class="pageno">04</span>
   <div class="slide-content">
     <span class="diamond"><i></i><i></i></span>
     <h2 class="t">AI 翻译引擎</h2>
     <p class="lead">任意 OpenAI 兼容接口，翻译质量取决于所选模型</p>
-    <div class="list">
-      <div class="li"><i></i><span><b>语境化翻译</b> —— 贴合目标语言语境意译，不逐字硬翻</span></div>
-      <div class="li"><i></i><span><b>AI 名称翻译</b> —— 输入名也自动汉化（Project Infinity → 无限计划）</span></div>
-      <div class="li"><i></i><span><b>在线机翻兜底</b> —— Google 免费通道，无 Key 也能翻</span></div>
-      <div class="li"><i></i><span><b>胡言乱语模式</b> —— 搞笑热梗翻译，忠实保留原意</span></div>
-    </div>
     <div class="mock-set">
       <div class="ms-row"><span class="ms-label">翻译引擎</span><span class="ms-ctl">DeepSeek</span></div>
       <div class="ms-row"><span class="ms-label">API Key</span><span class="ms-ctl">sk-••••••••</span></div>
@@ -265,14 +341,18 @@ h2.t em { font-style: normal; color: var(--moss); }
       <div class="ms-row"><span class="ms-label">目标语言</span><span class="ms-ctl">简体中文</span></div>
       <div class="ms-btn">测试连接</div>
     </div>
+    <div class="list" style="margin-top:12px">
+      <div class="li"><i></i><span><b>语境化翻译</b> —— 贴合目标语言语境意译，不逐字硬翻</span></div>
+      <div class="li"><i></i><span><b>胡言乱语模式</b> —— 搞笑热梗翻译，忠实保留原意</span></div>
+      <div class="li"><i></i><span><b>在线机翻兜底</b> —— Google 免费通道，无 Key 也能翻</span></div>
+    </div>
   </div>
 </section>
 
-<!-- ========== 5 多厂商支持 ========== -->
+<!-- ========== 6 多厂商支持 ========== -->
 <section class="slide">
   <span class="tag">像素译站 · PIXEL TRANSLATION</span>
   <span class="mark"><i></i><i></i></span>
-  <span class="pageno">05</span>
   <div class="slide-content">
     <span class="diamond"><i></i><i></i></span>
     <h2 class="t">多厂商 · 自由选择</h2>
@@ -281,7 +361,7 @@ h2.t em { font-style: normal; color: var(--moss); }
       <div class="card hot"><div class="ico">DS</div><h3>DeepSeek</h3><p>高性价比中文大模型，主流之选</p></div>
       <div class="card"><div class="ico">通</div><h3>通义千问</h3><p>阿里系，中长文本能力强</p></div>
       <div class="card"><div class="ico">K</div><h3>Kimi</h3><p>长上下文，任务书长文本友好</p></div>
-      <div class="card"><div class="ico">O</div><h3>Ollama</h3><p>本地部署，离线可用</p></div>
+      <div class="card"><div class="ico">阶</div><h3>阶跃星辰</h3><p>step-3.7-flash，经济实惠</p></div>
       <div class="card"><div class="ico">免</div><h3>免费 API</h3><p>智谱 GLM-Flash 等免费限额</p></div>
       <div class="card"><div class="ico">自</div><h3>自定义</h3><p>任意 OpenAI 兼容端点</p></div>
     </div>
@@ -289,52 +369,49 @@ h2.t em { font-style: normal; color: var(--moss); }
   </div>
 </section>
 
-<!-- ========== 6 吞吐档位 ========== -->
+<!-- ========== 7 动态压力测试 ========== -->
 <section class="slide">
   <span class="tag">像素译站 · PIXEL TRANSLATION</span>
   <span class="mark"><i></i><i></i></span>
-  <span class="pageno">06</span>
   <div class="slide-content">
     <span class="diamond"><i></i><i></i></span>
-    <h2 class="t">吞吐档位 · 快慢随心</h2>
-    <p class="lead">并发 + 批次 + 扫描三合一调整，翻译中随时切换立即生效</p>
+    <h2 class="t">动态压力测试 · 测到顶</h2>
+    <p class="lead">点一下，自动测出你的 API 能跑多快</p>
     <div class="cards c3">
-      <div class="card"><div class="ico">稳</div><h3>低 · 稳定</h3><p>并发 2 · 批 12 · 扫描 2，网络慢时更稳</p></div>
-      <div class="card hot"><div class="ico">均</div><h3>中 · 均衡</h3><p>并发 5 · 批 25 · 扫描 4，日常推荐</p></div>
-      <div class="card"><div class="ico">快</div><h3>高 · 较快</h3><p>并发 8 · 批 35 · 扫描 6，快但吃额度</p></div>
+      <div class="card"><div class="ico" style="background:var(--lime);color:var(--moss2)">→</div><h3>测出并发上限</h3><p>多档并行爬坡，47 秒测到顶</p></div>
+      <div class="card hot"><div class="ico test-num">64</div><h3>并发 ×64</h3><p>自动校准，不浪费一点 API 配额</p></div>
+      <div class="card"><div class="ico test-num">193</div><h3>RPM 193</h3><p>动态测试 RPM 直接应用</p></div>
     </div>
-    <div class="list">
-      <div class="li"><i></i><span><b>自动测试吞吐</b> —— 从高到低探测 API 稳定上限，一键应用</span></div>
-      <div class="li"><i></i><span><b>翻译中热切换</b> —— 切换档位下一次批量立即生效，无需重启</span></div>
+    <div class="list" style="margin-top:12px">
+      <div class="li"><i></i><span><b>自适应超时</b> —— 慢 API 大步爬、快 API 细测</span></div>
+      <div class="li"><i></i><span><b>翻译中热切换</b> —— 切换档位下一次批量立即生效</span></div>
     </div>
   </div>
 </section>
 
-<!-- ========== 7 全文本覆盖 ========== -->
+<!-- ========== 8 全文本覆盖 ========== -->
 <section class="slide">
   <span class="tag">像素译站 · PIXEL TRANSLATION</span>
   <span class="mark"><i></i><i></i></span>
-  <span class="pageno">07</span>
   <div class="slide-content">
     <span class="diamond"><i></i><i></i></span>
     <h2 class="t">全文本覆盖</h2>
     <p class="lead">不只语言文件，整个整合包的文本一样不落</p>
     <div class="cards c3">
-      <div class="card"><div class="ico">言</div><h3>语言文件</h3><p>en_us.json / .lang / .properties，UTF-8 / BOM 兼容</p></div>
-      <div class="card"><div class="ico">书</div><h3>教程书 / 进度</h3><p>Patchouli、Advancements，只翻显示文本</p></div>
-      <div class="card"><div class="ico">任</div><h3>任务书</h3><p>FTB Quests / Better Questing，含长段描述</p></div>
-      <div class="card"><div class="ico">脚</div><h3>KubeJS 脚本</h3><p>text / title / tooltip 等明确文本字段</p></div>
-      <div class="card"><div class="ico">配</div><h3>配置 / JSON</h3><p>mods 配置文件中的显示文本</p></div>
-      <div class="card"><div class="ico">编</div><h3>差集智能</h3><p>自带中文自动跳过，只补真缺的（省 token）</p></div>
+      <div class="card"><div class="ico">言</div><h3>语言文件</h3><p>en_us.json / .lang / .properties</p></div>
+      <div class="card"><div class="ico">书</div><h3>教程书 / 进度</h3><p>Patchouli、Advancements</p></div>
+      <div class="card"><div class="ico">任</div><h3>任务书</h3><p>FTB Quests / Better Questing</p></div>
+      <div class="card"><div class="ico">脚</div><h3>KubeJS 脚本</h3><p>text / title / tooltip 等字段</p></div>
+      <div class="card"><div class="ico">配</div><h3>配置 / JSON</h3><p>mods 配置中的显示文本</p></div>
+      <div class="card"><div class="ico">编</div><h3>差集智能</h3><p>自带中文自动跳过，省 token</p></div>
     </div>
   </div>
 </section>
 
-<!-- ========== 8 硬编码字节码 ========== -->
+<!-- ========== 9 硬编码 ========== -->
 <section class="slide">
   <span class="tag">像素译站 · PIXEL TRANSLATION</span>
   <span class="mark"><i></i><i></i></span>
-  <span class="pageno">08</span>
   <div class="slide-content">
     <span class="diamond"><i></i><i></i></span>
     <h2 class="t">硬编码 · 字节码也翻</h2>
@@ -345,152 +422,101 @@ h2.t em { font-style: normal; color: var(--moss); }
       <div class="li"><i></i><span><b>结构零破坏</b> —— 字节级重建，只改被 String 引用的 Utf8，不伤 mod 结构</span></div>
       <div class="li"><i></i><span><b>产物审查门禁</b> —— 交付前校验 zip 完整 + 已知风险 mod 复查</span></div>
     </div>
-    <p class="hint">复杂 mod（Sodium / Xaero 等）结构敏感，替换后仍建议备份原版</p>
   </div>
 </section>
 
-<!-- ========== 9 社区词库 CFPA ========== -->
+<!-- ========== 10 社区词库 ========== -->
 <section class="slide">
   <span class="tag">像素译站 · PIXEL TRANSLATION</span>
   <span class="mark"><i></i><i></i></span>
-  <span class="pageno">09</span>
   <div class="slide-content">
     <span class="diamond"><i></i><i></i></span>
     <h2 class="t">社区词库 · CFPA</h2>
     <p class="lead">人工翻译优先命中，零成本高质量</p>
     <div class="cards c2">
-      <div class="card"><div class="ico">人</div><h3>社区公认译名</h3><p>内置 CFPA 人工翻译词库，命中直接复用社区认可的译名，与 AI 无关</p></div>
-      <div class="card"><div class="ico">6</div><h3>内置 6 版本</h3><p>覆盖主流 MC 版本，离线可用；支持在线检查更新下载新版词库</p></div>
-      <div class="card"><div class="ico">省</div><h3>省 token 省额度</h3><p>词库覆盖的条目不走 AI，翻译更快更省，质量更稳</p></div>
-      <div class="card"><div class="ico">缺</div><h3>缺口才走 AI</h3><p>词库未覆盖的缺口才交给 AI 翻译，双通道互补</p></div>
-    </div>
-    <p class="hint">AI + 词库双通道：词库命中走人工翻译，缺口走 AI，质量与成本兼顾</p>
-  </div>
-</section>
-
-<!-- ========== 10 三级质量审查 ========== -->
-<section class="slide">
-  <span class="tag">像素译站 · PIXEL TRANSLATION</span>
-  <span class="mark"><i></i><i></i></span>
-  <span class="pageno">10</span>
-  <div class="slide-content">
-    <span class="diamond"><i></i><i></i></span>
-    <h2 class="t">三级质量审查</h2>
-    <p class="lead">AI 裁判层层把关，不留纯英文残留</p>
-    <div class="steps" style="grid-template-columns:repeat(3,1fr)">
-      <div class="step"><div class="n">初</div><h3>初审</h3><p>AI 裁判检查译文质量、占位符一致性、语境贴合度</p></div>
-      <div class="step"><div class="n">重</div><h3>强制重翻</h3><p>不合格条目强制重翻，逐条专注最可能翻出合格译文</p></div>
-      <div class="step"><div class="n">终</div><h3>终审</h3><p>目标语言校验，纯英文假翻译一律打回重翻</p></div>
-    </div>
-    <div class="list">
-      <div class="li"><i></i><span><b>占位符保护</b> —— %s / {var} / § 颜色码翻译前后严格一致</span></div>
-      <div class="li"><i></i><span><b>合理保留豁免</b> —— 专有名词 Minecraft、命令、代码标识 AI 保留不误判</span></div>
+      <div class="card"><div class="ico">人</div><h3>社区公认译名</h3><p>内置 CFPA 人工翻译词库，命中直接复用社区认可的译名</p></div>
+      <div class="card"><div class="ico">6</div><h3>内置 6 版本</h3><p>覆盖主流 MC 版本，离线可用；支持在线检查更新</p></div>
+      <div class="card"><div class="ico">省</div><h3>省 token 省额度</h3><p>词库覆盖的条目不走 AI，翻译更快更省</p></div>
+      <div class="card"><div class="ico">缺</div><h3>缺口才走 AI</h3><p>词库未覆盖的缺口才交给 AI 翻译</p></div>
     </div>
   </div>
 </section>
 
-<!-- ========== 11 术语全局统一 ========== -->
+<!-- ========== 12 产物 ========== -->
 <section class="slide">
   <span class="tag">像素译站 · PIXEL TRANSLATION</span>
   <span class="mark"><i></i><i></i></span>
-  <span class="pageno">11</span>
-  <div class="slide-content">
-    <span class="diamond"><i></i><i></i></span>
-    <h2 class="t">术语全局统一</h2>
-    <p class="lead">同一个英文词，全项目只有一个译法</p>
-    <div class="cards c3">
-      <div class="card hot"><div class="ico">Z</div><h3>Zeno → 泽诺</h3><p>无论在哪出现，Zeno 一律译为泽诺，不一词多译</p></div>
-      <div class="card"><div class="ico">统</div><h3>第一定义 + 跟随</h3><p>首次出现的规范译名被登记，后续所有出现自动跟随</p></div>
-      <div class="card"><div class="ico">锁</div><h3>术语保护</h3><p>翻译前把已确认术语替换为占位符，AI 不误改，翻译后还原规范译名</p></div>
-    </div>
-    <p class="hint">告别「Zeno / 泽诺 / 泽昂」混着翻的尴尬，全包口径一致</p>
-  </div>
-</section>
-
-<!-- ========== 12 断点续联 ========== -->
-<section class="slide">
-  <span class="tag">像素译站 · PIXEL TRANSLATION</span>
-  <span class="mark"><i></i><i></i></span>
-  <span class="pageno">12</span>
-  <div class="slide-content">
-    <span class="diamond"><i></i><i></i></span>
-    <h2 class="t">断点续联</h2>
-    <p class="lead">中断可继续，已翻译不重复</p>
-    <div class="list">
-      <div class="li"><i></i><span><b>实时保存进度</b> —— 翻译过程中每批进度实时落盘，随时中断不丢</span></div>
-      <div class="li"><i></i><span><b>一键续联</b> —— 「可断点续联」标签可点击，直接接着上次进度翻</span></div>
-      <div class="li"><i></i><span><b>记忆跳过</b> —— 已翻译词条命中记忆直接跳过，不再重复调用 AI</span></div>
-      <div class="li"><i></i><span><b>内容指纹匹配</b> —— 同一份整合包换路径/复制也能识别续联</span></div>
-    </div>
-    <p class="hint">启动自动检测未完成项目 · 清缓存 / 换缓存目录即时刷新列表</p>
-  </div>
-</section>
-
-<!-- ========== 13 全类型产物 ========== -->
-<section class="slide">
-  <span class="tag">像素译站 · PIXEL TRANSLATION</span>
-  <span class="mark"><i></i><i></i></span>
-  <span class="pageno">13</span>
   <div class="slide-content">
     <span class="diamond"><i></i><i></i></span>
     <h2 class="t">全类型产物 · 拷入即用</h2>
     <p class="lead">产物格式正确，游戏不报「资源包不兼容」</p>
     <div class="cards c4">
-      <div class="card"><div class="ico">整</div><h3>整合包</h3><p>整合包汉化.zip（资源包 + 补丁组件）</p></div>
-      <div class="card"><div class="ico">M</div><h3>单个 Mod</h3><p>汉化 jar，直接替换原 jar</p></div>
-      <div class="card"><div class="ico">图</div><h3>地图存档</h3><p>汉化存档，替换原存档</p></div>
-      <div class="card"><div class="ico">光</div><h3>光影包</h3><p>汉化光影包，切语言生效</p></div>
+      <div class="card"><div class="ico">整</div><h3>整合包</h3><p>整合包汉化.zip</p></div>
+      <div class="card"><div class="ico">M</div><h3>单个 Mod</h3><p>汉化 jar，替换即用</p></div>
+      <div class="card"><div class="ico">图</div><h3>地图存档</h3><p>汉化存档</p></div>
+      <div class="card"><div class="ico">光</div><h3>光影包</h3><p>汉化光影包</p></div>
     </div>
-    <div class="list">
+    <div class="list" style="margin-top:12px">
       <div class="li"><i></i><span><b>自动识别 MC 版本</b> —— pack_format 权威映射，产物格式正确</span></div>
-      <div class="li"><i></i><span><b>打开产物文件夹</b> —— 一键直达产物位置，不翻文件夹</span></div>
+      <div class="li"><i></i><span><b>打开产物文件夹</b> —— 一键直达产物位置</span></div>
     </div>
   </div>
 </section>
 
-<!-- ========== 14 使用流程 ========== -->
+<!-- ========== 13 使用流程 ========== -->
 <section class="slide">
   <span class="tag">像素译站 · PIXEL TRANSLATION</span>
   <span class="mark"><i></i><i></i></span>
-  <span class="pageno">14</span>
   <div class="slide-content">
     <span class="diamond"><i></i><i></i></span>
     <h2 class="t">使用流程</h2>
     <p class="lead">四步上手，简单到不需要教程</p>
     <div class="steps">
-      <div class="step"><div class="n">1</div><h3>配置引擎</h3><p>选 DeepSeek / 通义 / Kimi 等，填 API Key（仅存本机），测试连接</p></div>
-      <div class="step"><div class="n">2</div><h3>拖入文件</h3><p>把整合包 / Mod / 地图 / 光影拖进窗口，自动识别类型</p></div>
-      <div class="step"><div class="n">3</div><h3>一键翻译</h3><p>AI + 词库双通道并行，阶段进度与翻译明细实时可见</p></div>
-      <div class="step"><div class="n">4</div><h3>拷入即用</h3><p>打开产物文件夹，汉化资源包 / 汉化 jar 拷进游戏就生效</p></div>
+      <div class="step"><div class="n">1</div><h3>配置引擎</h3><p>选 DeepSeek / 通义 / Kimi 等，填 API Key，测试连接</p></div>
+      <div class="step"><div class="n">2</div><h3>拖入文件</h3><p>把整合包 / Mod / 地图 / 光影拖进窗口</p></div>
+      <div class="step"><div class="n">3</div><h3>一键翻译</h3><p>AI + 词库双通道并行，进度实时可见</p></div>
+      <div class="step"><div class="n">4</div><h3>拷入即用</h3><p>打开产物文件夹，汉化资源包拷进游戏</p></div>
     </div>
-    <div class="mock-drop">
+    <div class="mock-drop" style="margin-top:16px">
       <span class="md-cube"><i></i><i></i></span>
       <b>拖入文件，自动识别类型</b>
-      <div class="md-prog"><span style="width:62%"></span></div>
-      <p>翻译中 · 3,456 / 37,025 · 已完成 62%</p>
+      <div class="anim-prog partial"><span></span></div>
+      <p>翻译中 · 3,456 / 17,025 · 已完成 62%</p>
     </div>
   </div>
 </section>
 
-<!-- ========== 15 获取方式 ========== -->
-<section class="slide">
-  <span class="tag">像素译站 · PIXEL TRANSLATION</span>
-  <span class="mark"><i></i><i></i></span>
-  <span class="pageno">15</span>
+<!-- ========== 14 获取方式 + 开源 ========== -->
+<section class="slide no-grid" style="background:linear-gradient(160deg,var(--hero1) 0%,var(--hero2) 100%);color:#f5f1e6">
+  <div class="grid-bg" style="position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);background-size:34px 34px"></div>
+  <span class="tag" style="color:rgba(245,241,230,.5)">像素译站 · PIXEL TRANSLATION</span>
   <div class="slide-content">
     <span class="diamond"><i></i><i></i></span>
-    <h2 class="t">免费开源 · 获取方式</h2>
-    <p class="lead">Windows 桌面应用，MIT 开源</p>
-    <div class="cards c3">
-      <div class="card"><div class="ico">便</div><h3>便携版</h3><p>双击即用，无需安装，随身携带</p></div>
-      <div class="card hot"><div class="ico">★</div><h3>安装版</h3><p>安装向导，正式部署，桌面快捷方式</p></div>
-      <div class="card"><div class="ico">源</div><h3>源码构建</h3><p>GitHub 开源，自行编译，参考实现</p></div>
+    <h2 class="t" style="color:var(--lime)">免费开源 · 获取方式</h2>
+    <p class="lead" style="color:rgba(245,241,230,.7)">Windows 桌面应用 · MIT 许可证 · 不收费 · 不内购</p>
+    <div class="cards c3" style="margin-top:16px">
+      <div class="card" style="background:rgba(255,255,255,.06);border-color:rgba(200,233,106,.25);color:#f5f1e6">
+        <div class="ico" style="background:var(--lime);color:var(--moss2)">便</div>
+        <h3 style="color:var(--lime)">便携版</h3>
+        <p style="color:rgba(245,241,230,.7)">双击即用，无需安装</p>
+      </div>
+      <div class="card hot" style="background:rgba(255,255,255,.08);border-color:var(--lime);color:#f5f1e6">
+        <div class="ico" style="background:var(--lime);color:var(--moss2)">★</div>
+        <h3 style="color:var(--lime)">安装版</h3>
+        <p style="color:rgba(245,241,230,.7)">安装向导，正式部署</p>
+      </div>
+      <div class="card" style="background:rgba(255,255,255,.06);border-color:rgba(200,233,106,.25);color:#f5f1e6">
+        <div class="ico" style="background:var(--lime);color:var(--moss2)">源</div>
+        <h3 style="color:var(--lime)">源码构建</h3>
+        <p style="color:rgba(245,241,230,.7)">GitHub 开源，自行编译</p>
+      </div>
     </div>
-    <div class="list">
-      <div class="li"><i></i><span><b>GitHub Releases</b> —— github.com/djyandlb/Minecraft-translate2chinese</span></div>
-      <div class="li"><i></i><span><b>免费开源</b> —— MIT 许可证，仅供学习交流</span></div>
+    <div style="margin-top:24px;text-align:center">
+      <p style="font-size:20px;color:var(--lime);letter-spacing:.12em;margin-bottom:12px">
+        github.com/djyandlb/Minecraft-translate2chinese
+      </p>
+      <p style="font-size:14px;color:rgba(245,241,230,.6)">MIT 许可证 · 翻译质量与所用 API 直接挂钩 · 使用前请备份原文件</p>
     </div>
-    <p class="hint">翻译质量与所用 API 直接挂钩 · 使用前请备份原文件</p>
   </div>
 </section>
 
@@ -499,8 +525,12 @@ h2.t em { font-style: normal; color: var(--moss); }
 <script>
 const total = document.querySelectorAll('.slide').length;
 let current = 1;
-
+let autoPlaying = false;
+let autoTimer = null;
+let autoSeconds = 0;
+const SLIDE_DURATION = 5000; // 每页停留 5 秒（录屏用）
 const slides = document.querySelectorAll('.slide');
+
 function showSlide(n) {
   if (n < 1) n = 1;
   if (n > total) n = total;
@@ -523,15 +553,64 @@ function showSlide(n) {
     }
   });
   document.getElementById('progressBar').style.width = (n / total * 100) + '%';
+  // 重置当前页动画
+  const activeSlide = slides[n - 1];
+  activeSlide.querySelectorAll('.anim-prog span, .md-prog span').forEach(el => {
+    el.style.animation = 'none';
+    el.offsetHeight; // 强制重排
+    el.style.animation = '';
+  });
+  autoSeconds = 0;
 }
 function nextSlide() { showSlide(current + 1); }
 function prevSlide() { showSlide(current - 1); }
+
+// 自动播放
+function toggleAuto() {
+  const btn = document.getElementById('btnAuto');
+  const timer = document.getElementById('autoTimer');
+  if (autoPlaying) {
+    autoPlaying = false;
+    clearInterval(autoTimer);
+    btn.textContent = '▶ 自动播放';
+    btn.classList.remove('on');
+    timer.textContent = '手动';
+  } else {
+    autoPlaying = true;
+    btn.textContent = '⏸ 暂停';
+    btn.classList.add('on');
+    autoSeconds = 0;
+    autoTimer = setInterval(() => {
+      autoSeconds += 100;
+      timer.textContent = Math.ceil((SLIDE_DURATION - autoSeconds) / 1000) + 's';
+      if (autoSeconds >= SLIDE_DURATION) {
+        if (current < total) {
+          nextSlide();
+        } else {
+          // 到最后一页停止
+          toggleAuto();
+        }
+      }
+    }, 100);
+  }
+}
+
+// 键盘控制
 document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); nextSlide(); }
   if (e.key === 'ArrowLeft') { e.preventDefault(); prevSlide(); }
+  if (e.key === 'f' || e.key === 'F') {
+    // F 键全屏
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+    else document.exitFullscreen();
+  }
+  if (e.key === 'a' || e.key === 'A') toggleAuto();
 });
-// 仅保留「点击播放」：点击页面任意处翻到下一页
-document.addEventListener('click', function () { nextSlide(); });
+// 点击翻页（不与按钮冲突）
+document.querySelector('.slide-deck').addEventListener('click', function (e) {
+  if (!e.target.closest('.autoplay-bar')) nextSlide();
+});
+
 showSlide(1);
 </script>
 </body>
