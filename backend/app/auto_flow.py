@@ -1993,7 +1993,14 @@ class AutoFlow:
                 # 翻译与审查并行（用户诉求）：翻译管道不断翻译入队，审查管道并行审查写回——
                 # 翻译了 1 入审查、2 在审查 1 时继续翻译……两个互不干涉的管道，审查通过才显示。
                 # 都吃吞吐档位：翻译并发走 pipeline 批次，审查并发走 review_translations 分页。
-                await self._dual_pipeline(lang_items, skip_fn=needs_lang_value_translation)
+                # v1.4.0 修复（用户「Bombs/Plantkillable 小词没法正常翻译」）：
+                # keep_original_ok=False——语言文件值是用户可见文本，AI 保留原文不该自动放行，
+                # 必须送审查判断。原来默认 True + _has_english_leak 阈值≥3词才拦 → 单个英文
+                # 短词（Bombs 1个词）被当「AI 故意保留」放行写回产物（不翻译）。
+                # 改 False 后：AI 返回原文 → 记 failed → 送审查 → 审查抓「漏翻」→ 强制重翻。
+                # 专有名词（Minecraft/Xaero）审查会判合理保留，不误伤。
+                await self._dual_pipeline(lang_items, skip_fn=needs_lang_value_translation,
+                                          keep_original_ok=False)
             else:
                 # 机翻/兜底：无 AI 审查能力，直接翻译写回（原逻辑，终审审计兜底）
                 await self._translate_batch_pipeline(
