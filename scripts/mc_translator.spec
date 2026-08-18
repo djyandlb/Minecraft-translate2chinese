@@ -79,7 +79,25 @@ a = Analysis(
         "nbtlib", "anvil", "opencc", "deep_translator",
     ],
     binaries=[],
-    excludes=["tkinter"],
+    excludes=[
+        "tkinter",
+        # v1.4.2：排除系统 Python 环境里不需要的库（PyInstaller 会把所有已安装的包打包进去）
+        # torch 366MB + llvmlite 115MB + PyQt5 81MB + scipy 51MB + onnxruntime 34MB + pandas 13MB
+        # + PIL 13MB + torchvision 12MB = 685MB 无用体积
+        "torch", "torchvision", "torchaudio",
+        "llvmlite",
+        "PyQt5", "PyQt6", "PySide2", "PySide6",
+        "scipy",
+        "onnxruntime", "onnx",
+        "pandas",
+        "PIL", "Pillow",
+        "matplotlib",
+        "IPython", "jupyter", "notebook",
+        "cv2", "opencv",
+        "sklearn", "scikit-learn",
+        "tensorflow", "keras",
+        "tqdm",
+    ],
 )
 
 pyz = PYZ(a.pure)
