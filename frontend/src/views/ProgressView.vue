@@ -1001,7 +1001,7 @@ onUnmounted(() => {
    ch 对中文≈1 汉字宽，12ch≈12 汉字/行 */
 .row-langs .src, .row-langs .trans {
   min-width: 0; max-width: 12em;
-  word-break: break-word; white-space: normal;
+  word-break: break-word; white-space: pre-wrap;
 }
 .row-langs .src { color: var(--text-dim); }
 .row-langs .trans { color: var(--text); }

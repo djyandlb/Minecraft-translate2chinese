@@ -112,22 +112,22 @@ def parse_tagged(translated: str) -> dict[int, str]:
 
 
 def clean_translation(raw: str) -> str:
-    """清洗 LLM 输出：剥代码块 / 翻译前缀 / 首尾引号 + 助词冗余安全清理。"""
+    “””清洗 LLM 输出：剥代码块 / 翻译前缀 / 首尾引号 + 助词冗余安全清理。”””
     s = raw.strip()
-    if s.startswith("```"):
-        s = re.sub(r"^```[a-zA-Z]*\n", "", s)
-        s = re.sub(r"\n?```$", "", s)
-    s = re.sub(r"^(翻译|译文|结果|Translation)\s*[:：]\s*", "", s)
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'“”":
+    if s.startswith(“```”):
+        s = re.sub(r”^```[a-zA-Z]*\n”, “”, s)
+        s = re.sub(r”\n?```$”, “”, s)
+    s = re.sub(r”^(翻译|译文|结果|Translation)\s*[:：]\s*”, “”, s)
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in “\”'”””:
         s = s[1:-1]
     # 助词冗余安全清理（系统性修复「符文的的宝珠」）：连续重复格助词（的的/了了/地地/
     # 之之）→ 单助词。先保护白名单成语（的的确确/了了分明/地地道道）再折叠；
     # 字符集不含「得」——「得得」多是拟声词（马蹄声得得）合法（Agent 审查）。
     for _i, _ph in enumerate(_PARTICLE_IDIOMS):
-        s = s.replace(_ph, f"\x00P{_i}\x00")
-    s = re.sub(r"([的地之了])\1+", r"\1", s)
+        s = s.replace(_ph, f”\x00P{_i}\x00”)
+    s = re.sub(r”([的地之了])\1+”, r”\1”, s)
     for _i, _ph in enumerate(_PARTICLE_IDIOMS):
-        s = s.replace(f"\x00P{_i}\x00", _ph)
+        s = s.replace(f”\x00P{_i}\x00”, _ph)
     return s.strip()
 
 
