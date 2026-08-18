@@ -398,7 +398,7 @@ def list_projects():
                     })
             except Exception:
                 pass
-    # 兼容旧版（无 progress 文件）：从 tasks/ 找有记忆的未完成项目
+    # 兼容旧版（无 progress 文件）：从 memory/ 找有记忆的未完成项目
     if not projects:
         mem_dir = WORK_DIR / "memory"
         if mem_dir.is_dir():
@@ -409,17 +409,23 @@ def list_projects():
                 except Exception:
                     cnt = 0
                 if cnt > 0:
-                    # 修复（用户实测）：从 progress 找回真实名 + 原始路径——否则 memory 兜底
-                    # 只给 pid（哈希 5a818a7428e7）+ 无 path → 前端显示哈希名、续联按钮被
-                    # v-if="p.path" 隐藏（想续联却只能拖入整合包）
+                    # v1.4.2 修复（用户「已完成项目下次打开仍显示断点续联」）：
+                    # 兜底路径不检查 progress status → 已完成项目（status=="done"）被路径 1
+                    # 正确跳过后，路径 2 又把它们从 memory 加回来。加 progress 检查：有
+                    # progress 且 status=="done" → 跳过（已完成，不续联）。
                     _name, _path = pid, ""
+                    _skip = False
                     try:
                         _pd = json.loads((WORK_DIR / "progress" / f"{pid}.json")
                                          .read_text(encoding="utf-8"))
                         _name = (_pd.get("name") or "").strip() or _name
                         _path = _pd.get("path") or ""
+                        if _pd.get("status") == "done":
+                            _skip = True    # 已完成项目：memory 存在但不该续联
                     except Exception:
                         pass
+                    if _skip:
+                        continue
                     projects.append({"project_id": pid, "name": _name, "done": 0,
                                      "total": 0, "failed": 0, "stage": "", "pct": 0,
                                      "path": _path})

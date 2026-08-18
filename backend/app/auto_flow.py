@@ -841,16 +841,10 @@ class AutoFlow:
                         _has_fail = False
                 else:
                     # 网络连通：失败子集攒批重试（_MAX_FLUSH_RETRY 封顶，消灭无限重试卡住）
-                    # v1.4.2 修复（用户「1528 条请求失败，断线重连为什么没兜住」）：
-                    # 原逻辑重试之间没有等待——API 返回 429/5xx 时立即重试→又失败→2 次都失败
-                    # → 直接记 failed。加指数退避等待（1s/2s/4s），让 API 有恢复窗口。
-                    _MAX_FLUSH_RETRY = 4   # 2 → 4，给更多恢复机会
+                    _MAX_FLUSH_RETRY = 2
                     for _attempt in range(_MAX_FLUSH_RETRY):
                         if not retry_pos:
                             break
-                        # 指数退避等待（首次不等，后续 1s/2s/4s）
-                        if _attempt > 0:
-                            await asyncio.sleep(min(2 ** _attempt, 8))
                         _rp = [pending[k] for k in retry_pos]
                         _r_texts = [p["text"] for p in _rp]
                         _r_reasons = [p.get("reason", "") for p in _rp]
@@ -859,7 +853,7 @@ class AutoFlow:
                         except Exception:
                             _retried, _r_meta = None, None
                         if _retried is None:
-                            continue   # 失败不 break，继续重试（等退避后可能恢复）
+                            break
                         if translated_list is None:
                             translated_list = [p["text"] for p in pending]
                         _r_failed = set((_r_meta or {}).get("failed") or ()) if _r_meta else set()
