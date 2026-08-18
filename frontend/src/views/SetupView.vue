@@ -29,7 +29,7 @@ const LANGUAGES = [
 // keyring 已配置时的回显占位符：避免用户每次误以为要重输（保存时跳过该占位值）
 const API_KEY_PLACEHOLDER = '已配置（••••）'
 // 应用版本号：打包时同步更新（设置页「配置」标题右侧淡灰小字展示）
-const APP_VERSION = '1.4.0'
+const APP_VERSION = '1.4.1'
 
 const engine = ref('llm')            // llm(用户 API) | free(免费 API) | machine(机翻)，三选项互斥
 const provider = ref('DeepSeek')
@@ -163,12 +163,12 @@ async function runTest(which) {
     testOk.value = !!r.ok
     testResult.value = r.message || ''
     if (!r.ok && apiKey.value === API_KEY_PLACEHOLDER) {
-      // 修复（v1.4.0）：keyring 里的 key 被服务器拒绝（401/403）→ 占位符继续显示会让用户
+      // 修复（v1.4.1）：keyring 里的 key 被服务器拒绝（401/403）→ 占位符继续显示会让用户
       // 误以为 key 仍有效（「每次打开都是 API Key 无效」的困惑源头）。清掉占位符强制重填。
       apiKey.value = ''
     }
     if (r.ok) {
-      // 修复（v1.4.0）：测试连接成功 → 若表单是真实 key（非占位符）立即写入 keyring——
+      // 修复（v1.4.1）：测试连接成功 → 若表单是真实 key（非占位符）立即写入 keyring——
       // 否则用户填新 key 测试成功但直接关窗，key 不落盘，下次打开退回 keyring 旧 key → 401
       if (apiKey.value && apiKey.value !== API_KEY_PLACEHOLDER) {
         await saveKey(apiKey.value).catch(() => {})   // 静默兜底：保存按钮路径会显式报错
@@ -207,7 +207,7 @@ async function runThroughputTest() {
       if (Number(rpm.value) <= 0 && r.rpm > 0) rpm.value = r.rpm
       tpOk.value = true
       tpResult.value = r.message
-      // 修复（v1.4.0）：吞吐测试成功同样验证了 key → 真实 key 立即落盘 keyring，
+      // 修复（v1.4.1）：吞吐测试成功同样验证了 key → 真实 key 立即落盘 keyring，
       // 防止动态测试完成后关窗丢 key、下次打开退回旧 key → 401
       if (apiKey.value && apiKey.value !== API_KEY_PLACEHOLDER) {
         await saveKey(apiKey.value).catch(() => {})
