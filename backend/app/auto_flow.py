@@ -1140,9 +1140,10 @@ class AutoFlow:
         （用户诉求：审查攒批跟翻译同数量）→ 审查通过才写回各 item 的 sink。审查是初审；
         漏翻/重翻后仍保留原文的条目留给源终审判定（终审只审漏翻，不重复审合格译文）。
         """
-        # v1.4.1 预扫描：已汉化/记忆命中的条目批量 bump done，进度条开局就涨到位。
-        # 原逻辑在翻译循环里逐条 bump → 开局 20000 条已汉化从 0 慢慢涨到 20000（每秒几百条），
-        # 用户以为不跳。预扫描后进度条开局显示 20000/32000，真正翻译的 12000 条慢慢涨。
+        # v1.4.1 预扫描：已汉化/记忆命中的条目批量 bump stage done，进度条开局就涨到位。
+        # v1.4.2 修复（用户「total 虚标 61885，实际 36740」）：预扫描跳过的条目
+        # **只计 stage done，不计全局 done**——total 已改成 len(state_jobs)（待翻译缺口），
+        # 预扫描跳过的不算「翻译完成」，否则 done > total。
         items_list = list(items)
         _prescan_done = 0
         _prescan_items = []
@@ -1151,14 +1152,13 @@ class AutoFlow:
             key = it.get("key", "")
             src_mod = it.get("mod", "")
             src_file = it.get("file", "")
-            # 已汉化（含 CJK）/ 技术串 / 作者名 → 批量 bump done
+            # 已汉化（含 CJK）/ 技术串 / 作者名 → 批量 bump stage done（不加全局 done）
             if (not self.same_script and
                     (not skip_fn(text, self.req.target_lang) or str(key).endswith(".author"))):
                 self._skipped_n += 1
-                if not self._resume:
-                    self._bump_stage(key=self._progress_key(src_mod, src_file, key))
-                else:
-                    self._bump_stage_only()
+                # 修复：预扫描跳过的条目只推 stage 明细，不加全局 done——
+                # total = len(state_jobs)（待翻译缺口），跳过的不属于「翻译完成」
+                self._bump_stage_only()
                 _prescan_done += 1
             else:
                 _prescan_items.append(it)
@@ -3178,8 +3178,11 @@ class AutoFlow:
             # 硬编码阶段 done 按候选数推进（可见翻译或 exclude 判定都算「已处理」）；
             # build 阶段在产物组织前补入（total 依赖阶段 1-3 的实际产出）。
             self.state.stages = [
-                # v1.3.4：lang total 用全部值条目（含已汉化/记忆），done 恒 ≤ total，不再乱涨
-                {"name": "lang", "total": getattr(self, "_lang_total", 0) or len(self.state_jobs), "done": 0},
+                # v1.4.2 修复（用户「total 虚标 61885，实际 36740」）：lang total 只算
+                # 「切切实实需要翻译的」（待翻译缺口），不算已汉化/记忆命中/跳过的。
+                # 原 _lang_total = sum(len(source_entries)) 包含了全部条目（含已汉化），虚标。
+                # 预扫描跳过的条目只计 stage done，不计全局 done——否则 done > total。
+                {"name": "lang", "total": len(self.state_jobs), "done": 0},
                 {"name": "json", "total": sum(
                     len(s.entries) for srcs in self.text_sources_by_jar.values() for s in srcs), "done": 0},
                 {"name": "pack", "total": sum(len(s.entries) for s in self.pack_sources), "done": 0},
