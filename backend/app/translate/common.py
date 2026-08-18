@@ -93,10 +93,17 @@ def should_translate(text: str, max_len: int = 1000) -> bool:
     # hex 颜色码（长度 6/8 全十六进制，如 ff00ff）→ 跳过
     if len(text) in (6, 8) and re.fullmatch(r"[0-9a-fA-F]+", text):
         return False
-    # 纯字母单词（如 "hi"/"Bombs"/"Plantkillable"）→ 保留（用户可见文本，该翻译；
-    # 代码标识（驼峰类名等）由硬编码 AI 裁判把关，语言文件 value 都是用户可见文本）
+    # 纯字母单词：区分「普通英文单词（该翻）」和「代码标识/结构串（不该翻）」。
+    # - 全大写（≥4字符）：PCPPPPPCP、HHHHHHHHH、ABCDEF → 代码/模式串，跳过
+    # - 驼峰（小写后跟大写）：ModelViewMat、texCoord、Brightness → 代码标识，跳过
+    # - 首字母大写普通单词：Bombs、Enable、Sprint → 用户可见文本，翻译
+    # - 全小写：enable、sprint → 用户可见文本，翻译
     if _PURE_ALPHA_RE.match(text):
-        return True
+        if len(text) >= 4 and text == text.upper():
+            return False                      # 全大写 ≥4：代码/模式串
+        if re.search(r"[a-z][A-Z]", text):
+            return False                      # 驼峰：代码标识（ModelViewMat/texCoord）
+        return True                           # 普通单词：该翻译
     # 技术标识符（snake_case / 含数字变量名）→ 跳过，如 "iron_ingot"
     if _IDENT_RE.match(text):
         return False

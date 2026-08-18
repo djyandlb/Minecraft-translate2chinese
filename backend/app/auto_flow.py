@@ -1792,6 +1792,15 @@ class AutoFlow:
                     and not self._has_english_leak(tr):
                 self._write_reviewed(it, tr)
                 continue
+            # v1.4.1（用户「质量差就差点，但要保证有中文翻译」）：forced 重翻没出中文时，
+            # 检查**初翻是否有中文**——有则用初翻的中文译文，不记 failed。
+            # 初翻结果在 it["translated"] 里（审查打回时保留了原译文）。宁可要质量差的
+            # 中文翻译，也不要记 failed 导致没翻译（用户核心诉求）。
+            _orig_tr = it.get("translated") or ""
+            if _orig_tr and _orig_tr != src_full \
+                    and self._is_target_lang(_orig_tr, self.req.target_lang):
+                self._write_reviewed(it, _orig_tr)
+                continue
             sink[it["key"]] = src_full
             # 合理保留必须**原文规则为主**（v1.3.9 修复「翻译出原文」根因）：
             # `_is_legit_keep_by_source(原文)` 已按原文形态判定——含空格/实词的句子（如
