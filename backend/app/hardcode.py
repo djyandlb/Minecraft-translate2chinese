@@ -1038,8 +1038,6 @@ async def _ai_judge_batch(engine, client, batch: list[dict], target_lang: str,
     }
     # v1.2.4 请求前 RPM 预算闸：硬编码 AI 判断也共享同一配额
     _gate = getattr(engine, "rate_gate", None)
-    if _gate is not None:
-        await _gate.acquire()
     try:
         resp = await client.post(f"{engine.base_url}/chat/completions", json=body)
         resp.raise_for_status()
@@ -1131,9 +1129,17 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
     #（并发 = RPM/60 × W）按 RPM 预算算出的满速档位，硬编码判断阶段**独占运行**（翻译不并行）
     # 可吃满；原封顶 5 低估高并发档（RPM 允许时白浪费）→ 慢。共享 rate_gate 仍保证不超 RPM 配额。
     # 批大小跟随 batch_size（_judge_page），吞吐 ≈ RPM × 批大小（非逐条单发）。
+    # v1.4.2 修复（用户「硬编码 2 小时才 12000 条，没有并行感」）：
+    # 原 rate_gate.acquire() 在 sem 内部——等 RPM 令牌时占着并发槽，其他批拿不到 sem，
+    # 实际串行。修复：rate_gate.acquire() 移到 sem 外部——先等令牌，再拿并发槽，
+    # 并发批同时等令牌，拿到后同时发请求。
     sem = asyncio.Semaphore(max(1, int(getattr(engine, "concurrency", _AI_JUDGE_CONCURRENCY) or 1)))
+    _gate = getattr(engine, "rate_gate", None)
 
     async def run_batch(batch: list[dict]) -> AiJudgeResult:
+        # 先等 RPM 令牌（不占 sem 槽），再拿并发槽
+        if _gate is not None:
+            await _gate.acquire()
         async with sem:
             if on_batch_start:
                 on_batch_start(len(batch))   # 批请求前先给「正在判断」反馈
