@@ -86,6 +86,13 @@ async def run_hardcode_translation(task_id: str, req: HardcodeRequest, cfg: AppC
         # v1.4.1：多批并发——原逐批串行（每批等 API 响应再下一批），500条/batch_size=20
         # → 25 批串行要几十秒。改为 asyncio.gather 同时发多批，受引擎全局并发池控制
         #（engine._conc_sem），不会打爆 API。
+        # v1.4.2（用户「硬编码 2 小时才 12000 条，没有并行感」）：硬编码每条文本很短
+        #（几十字符），API 响应比翻译快——临时提高并发（翻译并发 ×2，封顶 32），
+        # 硬编码阶段独占并发槽（翻译已完成），完成后恢复原并发。
+        _orig_conc = getattr(engine, "concurrency", 5)
+        _hc_conc = min(32, _orig_conc * 2)
+        if hasattr(engine, "set_throughput"):
+            engine.set_throughput(concurrency=_hc_conc)
         _bs = getattr(engine, "batch_size", 20)
         _batches = []
         for start in range(0, len(need_engine), _bs):
@@ -109,6 +116,9 @@ async def run_hardcode_translation(task_id: str, req: HardcodeRequest, cfg: AppC
                 translated_by_idx[i] = results[k] if k < len(results) else texts[i]
 
         await asyncio.gather(*(_run_batch(idxs, bt) for idxs, bt in _batches))
+        # 恢复原并发（硬编码阶段临时提高了并发）
+        if hasattr(engine, "set_throughput"):
+            engine.set_throughput(concurrency=_orig_conc)
         # 写回映射 + 记忆（仅真译文写记忆：失败回原文 / AI 保留原文都不写，防记忆污染固化失败）
         for i, t in enumerate(texts):
             translated = translated_by_idx.get(i, t)
