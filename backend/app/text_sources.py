@@ -306,6 +306,12 @@ def _parse_lang_entry(fmt: str, raw: str) -> dict[str, str]:
 
 # ---------- 结构化 JSON 遍历 ----------
 
+# Patchouli multiblock pattern 字段：方块排列代码（PCP000PCP / PCCCCCcCP），不是用户
+# 可见文本。纯字母 pattern 被 _PURE_ALPHA_RE 放行→ AI 翻译成「底座哭泣的黑曜石」破坏数据。
+# 匹配 key_path 含 multiblock.pattern 的任何位置（pages[0].multiblock.pattern[0][4]等）。
+_MULTIBLOCK_PATTERN_RE = re.compile(r"\.multiblock\.pattern\b")
+
+
 def _walk_json(node, prefix: str, entries: dict[str, str],
                translate=should_translate, allow_keys: set[str] | None = None) -> None:
     """递归遍历 JSON，收集应翻译的字符串值；key_path 形如 title.text / pages[0].text。
@@ -327,6 +333,9 @@ def _walk_json(node, prefix: str, entries: dict[str, str],
             child = f"{prefix}[{i}]" if prefix else f"[{i}]"
             _walk_json(v, child, entries, translate, allow_keys)
     elif isinstance(node, str):
+        # v1.4.1：multiblock.pattern 是方块排列代码（PCP000PCP），跳过
+        if _MULTIBLOCK_PATTERN_RE.search(prefix):
+            return
         if translate(node) and (allow_keys is None or prefix in allow_keys):
             entries[prefix] = node
 
