@@ -1134,10 +1134,34 @@ class AutoFlow:
         （用户诉求：审查攒批跟翻译同数量）→ 审查通过才写回各 item 的 sink。审查是初审；
         漏翻/重翻后仍保留原文的条目留给源终审判定（终审只审漏翻，不重复审合格译文）。
         """
+        # v1.4.1 预扫描：已汉化/记忆命中的条目批量 bump done，进度条开局就涨到位。
+        # 原逻辑在翻译循环里逐条 bump → 开局 20000 条已汉化从 0 慢慢涨到 20000（每秒几百条），
+        # 用户以为不跳。预扫描后进度条开局显示 20000/32000，真正翻译的 12000 条慢慢涨。
+        items_list = list(items)
+        _prescan_done = 0
+        _prescan_items = []
+        for it in items_list:
+            text = it.get("text", "")
+            key = it.get("key", "")
+            src_mod = it.get("mod", "")
+            src_file = it.get("file", "")
+            # 已汉化（含 CJK）/ 技术串 / 作者名 → 批量 bump done
+            if (not self.same_script and
+                    (not skip_fn(text, self.req.target_lang) or str(key).endswith(".author"))):
+                self._skipped_n += 1
+                if not self._resume:
+                    self._bump_stage(key=self._progress_key(src_mod, src_file, key))
+                else:
+                    self._bump_stage_only()
+                _prescan_done += 1
+            else:
+                _prescan_items.append(it)
+        if _prescan_done > 0:
+            self.store.save(self.state)   # 批量 bump 后立即存盘，前端轮询读到
         review_queue = asyncio.Queue(maxsize=1000)   # v1.2.9：200 → 1000，审查慢时减少 producer 阻塞
         done_event = asyncio.Event()
         producer = asyncio.create_task(self._translate_batch_pipeline(
-            items, self._engine_translate, self._batch_size, skip_fn=skip_fn,
+            _prescan_items, self._engine_translate, self._batch_size, skip_fn=skip_fn,
             enqueue_fn=review_queue.put, **kw))
         # v1.2.9：审查攒批 = 翻译 flush 阈值（batch×并发）——review_translations 内部按
         # batch_size 分页 gather 并发（每页 1 请求），审查也吃满并发档。原 review_batch=20
