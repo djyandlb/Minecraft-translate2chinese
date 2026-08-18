@@ -83,29 +83,32 @@ async def run_hardcode_translation(task_id: str, req: HardcodeRequest, cfg: AppC
                 translated_by_idx[i] = traditional(t) if req.target_lang == "zh_tw" else simplify(t)
             else:
                 need_engine.append(i)
+        # v1.4.1：多批并发——原逐批串行（每批等 API 响应再下一批），500条/batch_size=20
+        # → 25 批串行要几十秒。改为 asyncio.gather 同时发多批，受引擎全局并发池控制
+        #（engine._conc_sem），不会打爆 API。
         _bs = getattr(engine, "batch_size", 20)
+        _batches = []
         for start in range(0, len(need_engine), _bs):
+            idxs = need_engine[start:start + _bs]
+            _batches.append((idxs, [texts[i] for i in idxs]))
+
+        async def _run_batch(idxs, batch_texts):
             if state.cancelled:
-                state.status = "cancelled"
-                store.save(state)
                 return
             while state.paused and not state.cancelled:
                 await asyncio.sleep(0.5)
-            idxs = need_engine[start:start + _bs]
-            batch_texts = [texts[i] for i in idxs]
             try:
                 results = await engine.translate_batch(batch_texts, req.target_lang)
             except Exception as exc:
-                # 引擎异常（Key 无效/网络/配置缺失）：明确计失败并给用户可见原因，不静默
                 results = list(batch_texts)
                 for t0 in batch_texts:
                     state.failed += 1
                     state.progress.append({"status": "warn", "key": "hardcode",
                                            "error": f"翻译失败：{t0[:40]}（{type(exc).__name__}）"})
             for k, i in enumerate(idxs):
-                # 引擎成功但返回原文：AI 故意保留专有名词/命令/代码标识 → 不算失败
-                # （对齐 auto_flow 的 keep_original_ok 语义）
                 translated_by_idx[i] = results[k] if k < len(results) else texts[i]
+
+        await asyncio.gather(*(_run_batch(idxs, bt) for idxs, bt in _batches))
         # 写回映射 + 记忆（仅真译文写记忆：失败回原文 / AI 保留原文都不写，防记忆污染固化失败）
         for i, t in enumerate(texts):
             translated = translated_by_idx.get(i, t)
