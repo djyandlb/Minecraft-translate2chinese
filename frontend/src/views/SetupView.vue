@@ -212,7 +212,12 @@ async function runThroughputTest() {
       if (apiKey.value && apiKey.value !== API_KEY_PLACEHOLDER) {
         await saveKey(apiKey.value).catch(() => {})
       }
-      autoSave()   // 新档位即时保存
+      // 修复（v1.4.3）：吞吐测试后立即同步保存（不用防抖），关窗不丢设置
+      try {
+        const saveBody = buildConfigBody()
+        await saveConfig(saveBody)
+        props.onDone?.(saveBody)
+      } catch (e) { /* 保存失败静默 */ }
     } else {
       tpOk.value = false
       tpResult.value = r.message || '吞吐档位测试失败'
@@ -274,7 +279,7 @@ async function autoSave() {
       await saveConfig(body)
       props.onDone?.(body)
     } catch (e) { /* 自动保存失败静默：用户点「保存」按钮时再显式报错 */ }
-  }, 800)
+  }, 200)   // 修复（v1.4.3）：800ms→200ms，吞吐测试后立即关窗不再丢设置
 }
 watch([engine, provider, baseUrl, model, targetLang, concurrency, scanConcurrency, batchSize, rpm, tpm, sillyMode, cacheDir], autoSave)
 // 组件卸载（关窗/销毁）时立即保存当前值，防防抖窗口期内的改动丢失（webview 关窗会丢弃 pending setTimeout）

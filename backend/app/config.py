@@ -16,7 +16,9 @@ DEFAULT_CONFIG = {
     "cache_dir": "",                        # 缓存/工作目录（设置页可改；空 = 默认系统 temp/mc-translator）
     "batch_size": None,
     "pack_format": 15,
-    "rpm_limit": 0,                        # 0 = 不限
+    "rpm": 0,                              # 0 = 自动校准（推荐）；>0 = 固定配额
+    "rpm_limit": 0,                        # 0 = 不限（兼容旧配置）
+    "tpm": 0,                              # 0 = 自动/未知；>0 = 固定配额
     "calibrated_rpm": 0,                   # v1.2.9：动态测试校准的该 API 建议 RPM，作为
                                            # rate_gate auto 模式的初始目标（避免从 30 爬坡）
     "api_key_ref": "mc-translator",        # keyring 服务名：key 走系统 keyring，绝不落盘
