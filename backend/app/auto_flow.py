@@ -648,14 +648,13 @@ class AutoFlow:
         return results, meta
 
     async def _wait_network_retry(self, translate_fn, texts: list[str],
-                                  reasons: list[str], max_attempts: int = 4) -> list | None:
+                                  reasons: list[str], max_attempts: int = 6) -> list | None:
         """网络/限流失败：退避等待后重试失败子集（v1.2.3 封顶，不再无限等待卡住）。
 
-        退避 3s→6s→12s→24s 加抖动，封顶 max_attempts 次（≈45s）后返回 None——调用方
-        （_flush）据此明确记 failed（服务不可用），不再无限假装网络等待（用户「1.5h 几千条」
-        根因之一：429/超时陷入无限退避）。返回成功译文列表；用户取消 / 封顶返回 None。
+        v1.4.4：重试从4→6次，退避从3s起步改为5s起步（5s→10s→20s→30s→30s→30s），
+        总等待从45s增加到~125s，给限流窗口更多恢复时间。返回成功译文列表；用户取消 / 封顶返回 None。
         """
-        wait = 3
+        wait = 5
         attempts = 0
         while not self.state.cancelled and attempts < max_attempts:
             await self._wait_if_paused()   # 修复：网络等待也响应暂停（暂停语义不失效）
@@ -691,7 +690,7 @@ class AutoFlow:
             except Exception:
                 pass
             attempts += 1
-            wait = min(int(wait * 2 * random.uniform(0.8, 1.2)), 30)   # 抖动退避封顶 30s
+            wait = min(int(wait * 2 * random.uniform(0.8, 1.2)), 30)   # 抖动退避封顶 30s（v1.4.4 已调整起步为5s）
         return None
 
     async def _translate_batch_pipeline(self, items, translate_fn, batch_size: int = 20,
@@ -841,10 +840,16 @@ class AutoFlow:
                         _has_fail = False
                 else:
                     # 网络连通：失败子集攒批重试（_MAX_FLUSH_RETRY 封顶，消灭无限重试卡住）
-                    _MAX_FLUSH_RETRY = 2
+                    # v1.4.4：重试从2→4次 + 指数退避（1/2/4/8s），大幅减少限流导致的失败
+                    _MAX_FLUSH_RETRY = 4
+                    _retry_wait = 1
                     for _attempt in range(_MAX_FLUSH_RETRY):
                         if not retry_pos:
                             break
+                        # 退避等待：限流/服务错误后给API恢复时间
+                        if _attempt > 0:
+                            await asyncio.sleep(_retry_wait * random.uniform(0.8, 1.2))
+                            _retry_wait = min(_retry_wait * 2, 10)  # 封顶10s
                         _rp = [pending[k] for k in retry_pos]
                         _r_texts = [p["text"] for p in _rp]
                         _r_reasons = [p.get("reason", "") for p in _rp]
