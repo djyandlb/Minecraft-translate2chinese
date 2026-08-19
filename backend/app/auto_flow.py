@@ -1161,17 +1161,15 @@ class AutoFlow:
                 _prescan_items.append(it)
         if _prescan_done > 0:
             self.store.save(self.state)   # 批量 bump 后立即存盘，前端轮询读到
-        review_queue = asyncio.Queue(maxsize=1000)   # v1.2.9：200 → 1000，审查慢时减少 producer 阻塞
+        review_queue = asyncio.Queue(maxsize=2000)   # v1.4.4：1000 → 2000，翻译快审查慢时减少阻塞
         done_event = asyncio.Event()
         producer = asyncio.create_task(self._translate_batch_pipeline(
             _prescan_items, self._engine_translate, self._batch_size, skip_fn=skip_fn,
             enqueue_fn=review_queue.put, **kw))
-        # v1.2.9：审查攒批 = 翻译 flush 阈值（batch×并发）——review_translations 内部按
-        # batch_size 分页 gather 并发（每页 1 请求），审查也吃满并发档。原 review_batch=20
-        # → consumer 每 20 条串行发 1 个审查请求、250 请求一个接一个（用户「审查慢」根因）
-        _rb_conc = max(1, int(getattr(self.engine, "concurrency", 1) or 1))
+        # v1.4.4：审查攒批固定40条（不跟随并发），让审查尽早开始、不攒太久
+        # 原逻辑 max(20, batch_size * concurrency) 会攒到几百条，翻译完审查还没开始
         consumer = asyncio.create_task(self._review_pipeline(
-            review_queue, done_event, review_batch=max(20, self._batch_size * _rb_conc)))
+            review_queue, done_event, review_batch=40))
         # 审查状态灯：审查管道活跃 → 前端红灯「静默审查中…」；全部审查完成 → 绿灯「审查完成」
         self.state.reviewing = True
         self.store.save(self.state)
