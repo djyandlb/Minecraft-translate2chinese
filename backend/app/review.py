@@ -165,14 +165,16 @@ async def review_translations(engine, pairs: list[dict], target_lang: str,
     # 下由并发（min_cap ≥ 并发）覆盖单批耗时，不再靠缩小批。
     _page = max(_REVIEW_PAGE, min(int(getattr(engine, "batch_size", 0) or _REVIEW_PAGE), 40))
     batches = [pairs[k:k + _page] for k in range(0, len(pairs), _page)]
-    # v1.4.6 恢复全局共享并发池：审查与翻译共享 engine._conc_sem
-    # 撤销并发池分离——deepseek 并发能力强，阶段串行时独占跑满并发
-    _conc_sem = getattr(engine, "_conc_sem", None)
-    if _conc_sem is None:
-        _conc_sem = asyncio.Semaphore(max(1, int(getattr(engine, "concurrency", _REVIEW_CONCURRENCY))))
-        if hasattr(engine, "_conc_sem"):
-            engine._conc_sem = _conc_sem
-    sem = _conc_sem
+    # v1.4.8 审查独立并发信号量（不被翻译挤占）：
+    # _dual_pipeline 下翻译 worker pool 占满 _conc_sem，审查若共享则被翻译挤占 →
+    # 审查慢 → 产出（done）慢（用户「15分钟200条，翻译完没直接出去」根因）。
+    # 审查用独立 _review_sem（满并发），RPM 仍共享（总速率 ≤ RPM 防超限）。
+    _review_sem = getattr(engine, "_review_sem", None)
+    if _review_sem is None:
+        _review_sem = asyncio.Semaphore(max(1, int(getattr(engine, "concurrency", _REVIEW_CONCURRENCY))))
+        if hasattr(engine, "_review_sem"):
+            engine._review_sem = _review_sem
+    sem = _review_sem
 
     async def run_batch(batch: list[dict]) -> dict[int, str]:
         # v1.2.9：RPM 令牌**先取、sem 后取**（对齐翻译 run_chunk）——等待令牌的审查批

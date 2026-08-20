@@ -201,6 +201,9 @@ class LLMClient:
         # concurrency 建池；set_throughput 改并发时置 None，下次按新值重建（asyncio
         # 单线程，无 await 的检查+赋值是原子的，不会竞态）。
         self._conc_sem: asyncio.Semaphore | None = None
+        # v1.4.8 审查独立并发信号量：_dual_pipeline 下审查不被翻译占满 _conc_sem 挤占
+        #（审查慢→产出慢根因）。懒创建（review.py 首次访问），set_throughput 改并发时重置。
+        self._review_sem: asyncio.Semaphore | None = None
         # v1.2.8 并发生效可视化：每并发 chunk 请求开始/完成回调（pipeline 据此聚合显示
         # 「正在翻译 N 条 × 当前并发数」，不是每 chunk 刷一条）。None = 不回调。
         self.on_chunk_start = None
@@ -218,6 +221,7 @@ class LLMClient:
             if _c != self.concurrency:
                 self.concurrency = _c
                 self._conc_sem = None      # 旧池废弃，下次按新值懒重建
+                self._review_sem = None    # v1.4.8：审查独立并发池也按新值重建
                 # v1.4.6 修复：连接池大小 = 并发×2（_get_client 里算），热更新并发必须
                 # 重建 httpx 客户端——否则连接池仍旧并发（如 4×2=20），高并发下连接排队
                 if self._client is not None:

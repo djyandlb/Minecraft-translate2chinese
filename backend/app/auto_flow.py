@@ -1278,10 +1278,10 @@ class AutoFlow:
         producer = asyncio.create_task(self._translate_batch_pipeline(
             _prescan_items, self._engine_translate, self._batch_size, skip_fn=skip_fn,
             enqueue_fn=review_queue.put, **kw))
-        # v1.4.4：审查攒批固定40条（不跟随并发），让审查尽早开始、不攒太久
-        # 原逻辑 max(20, batch_size * concurrency) 会攒到几百条，翻译完审查还没开始
+        # v1.4.8：审查攒批 20 条（更快开始、更快写回产出）——40 条攒批在翻译快时
+        # 审查滞后、done 产出慢（用户「15分钟200条」根因之一）。20 条更快审查写回。
         consumer = asyncio.create_task(self._review_pipeline(
-            review_queue, done_event, review_batch=40))
+            review_queue, done_event, review_batch=20))
         # 审查状态灯：审查管道活跃 → 前端红灯「静默审查中…」；全部审查完成 → 绿灯「审查完成」
         self.state.reviewing = True
         self.store.save(self.state)
