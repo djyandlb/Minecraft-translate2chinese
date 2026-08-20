@@ -184,6 +184,10 @@ class LLMClient:
         # concurrency 建池；set_throughput 改并发时置 None，下次按新值重建（asyncio
         # 单线程，无 await 的检查+赋值是原子的，不会竞态）。
         self._conc_sem: asyncio.Semaphore | None = None
+        # v1.4.5 并发池分离：翻译专用信号量（占1/4并发），审查用剩下的3/4
+        # 翻译是一次性的，审查是长线过程，分开互不干扰
+        self._translate_sem: asyncio.Semaphore | None = None
+        self._review_sem: asyncio.Semaphore | None = None
         # v1.2.8 并发生效可视化：每并发 chunk 请求开始/完成回调（pipeline 据此聚合显示
         # 「正在翻译 N 条 × 当前并发数」，不是每 chunk 刷一条）。None = 不回调。
         self.on_chunk_start = None
