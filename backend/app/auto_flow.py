@@ -1278,11 +1278,9 @@ class AutoFlow:
         producer = asyncio.create_task(self._translate_batch_pipeline(
             _prescan_items, self._engine_translate, self._batch_size, skip_fn=skip_fn,
             enqueue_fn=review_queue.put, **kw))
-        # v1.4.8：审查攒批 20 条（更快开始、更快写回产出）——40 条攒批在翻译快时
-        # 审查滞后、done 产出慢（用户「15分钟200条」根因之一）。20 条更快审查写回。
-        # v1.4.10：**多个审查 consumer 并行**——原单一 consumer 串行审查（取20条→
-        # AI审查几秒→写回→再取），产出 = 20条/审查耗时（用户「token涨但十几条十几条出」根因）。
-        # 并发 consumer 各自从队列取、并行审查，产出速度 × 并发数（RPM 共享兜底防超限）。
+        # v1.5.0b：审查攒批 = 设置批大小（跟随 batch_size，不再固定 20）——审查请求数
+        # 减半、单请求 token 消耗更平滑（速度快起来 TPM 不爆，用户「快起来失败变多」根因之一）。
+        # 多审查 consumer 并行（consumer = 设置并发，见下），各自攒满 batch_size 条一起审查。
         _rb_conc = max(1, int(getattr(self.engine, "concurrency", 1) or 1))
         # v1.5.1：审查 consumer 不再封顶 6——审查与翻译共享全局 RateGate 令牌桶
         # （admission 管速率），consumer 只是「抢令牌的调度单元」（execution 管并发）。
@@ -1291,7 +1289,7 @@ class AutoFlow:
         # 令牌桶 acquire() 兜底：consumer 再多也不会超 RPM（业界「admission+execution」双层）。
         _review_consumers = max(2, _rb_conc)   # 审查并发 consumer 数（= 设置并发，吃满空闲令牌）
         consumers = [asyncio.create_task(self._review_pipeline(
-            review_queue, done_event, review_batch=20))
+            review_queue, done_event, review_batch=self._batch_size))
             for _ in range(_review_consumers)]
         # 审查状态灯：审查管道活跃 → 前端红灯「静默审查中…」；全部审查完成 → 绿灯「审查完成」
         self.state.reviewing = True
