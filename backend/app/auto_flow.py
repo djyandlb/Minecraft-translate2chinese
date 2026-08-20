@@ -1284,7 +1284,12 @@ class AutoFlow:
         # AI审查几秒→写回→再取），产出 = 20条/审查耗时（用户「token涨但十几条十几条出」根因）。
         # 并发 consumer 各自从队列取、并行审查，产出速度 × 并发数（RPM 共享兜底防超限）。
         _rb_conc = max(1, int(getattr(self.engine, "concurrency", 1) or 1))
-        _review_consumers = min(6, max(2, _rb_conc))   # 审查并发 consumer 数（2-6）
+        # v1.5.1：审查 consumer 不再封顶 6——审查与翻译共享全局 RateGate 令牌桶
+        # （admission 管速率），consumer 只是「抢令牌的调度单元」（execution 管并发）。
+        # 原封顶 6 导致翻译管道空下来时令牌全闲置（6 个 consumer 同时最多 6 个审查请求
+        # 在飞，远低于 RPM 配额）。consumer = 设置并发 → 翻译一空审查立刻吃满空闲令牌；
+        # 令牌桶 acquire() 兜底：consumer 再多也不会超 RPM（业界「admission+execution」双层）。
+        _review_consumers = max(2, _rb_conc)   # 审查并发 consumer 数（= 设置并发，吃满空闲令牌）
         consumers = [asyncio.create_task(self._review_pipeline(
             review_queue, done_event, review_batch=20))
             for _ in range(_review_consumers)]
