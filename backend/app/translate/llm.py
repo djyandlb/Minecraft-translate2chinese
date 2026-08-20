@@ -184,10 +184,6 @@ class LLMClient:
         # concurrency 建池；set_throughput 改并发时置 None，下次按新值重建（asyncio
         # 单线程，无 await 的检查+赋值是原子的，不会竞态）。
         self._conc_sem: asyncio.Semaphore | None = None
-        # v1.4.5 并发池分离：翻译专用信号量（占1/4并发），审查用剩下的3/4
-        # 翻译是一次性的，审查是长线过程，分开互不干扰
-        self._translate_sem: asyncio.Semaphore | None = None
-        self._review_sem: asyncio.Semaphore | None = None
         # v1.2.8 并发生效可视化：每并发 chunk 请求开始/完成回调（pipeline 据此聚合显示
         # 「正在翻译 N 条 × 当前并发数」，不是每 chunk 刷一条）。None = 不回调。
         self.on_chunk_start = None
@@ -205,8 +201,6 @@ class LLMClient:
             if _c != self.concurrency:
                 self.concurrency = _c
                 self._conc_sem = None      # 旧池废弃，下次按新值懒重建
-                self._translate_sem = None  # v1.4.5：翻译信号量也要重置
-                self._review_sem = None    # v1.4.5：审查信号量也要重置
                 # v1.2.9（Agent recheck）：热更新并发同步 rate_gate 桶容量（min_cap）——
                 # 否则初始并发 4 热更新 16 后桶容量仍 4 → 并发又被限回 4（「×16 显示但串行」复现）
                 if self.rate_gate is not None and hasattr(self.rate_gate, "_min_cap"):
@@ -267,7 +261,15 @@ class LLMClient:
             # 180s 超时（v1.2.3+ 慢 API 宽容：MiniMax/stepfun 等生成慢（单批 30-60s 正常），
             # 120s 对大批次长文本仍可能误超时 → 降级链把「慢」当「死」反复重试翻倍耗时）。
             # 生成慢是正常不是断网——超时只该在网络/服务挂掉时触发。
-            self._client = httpx.AsyncClient(timeout=180, headers=headers)
+            # v1.4.6 业界最佳实践（async-batch-llm）：连接池大小匹配并发——
+            # httpx 默认 100 连接，高并发（64）下 max_connections < 并发会成为吞吐瓶颈。
+            # 连接池 = 并发×2，留足突发余量；keepalive 同量减少连接重建。
+            _pool = max(20, self.concurrency * 2)
+            self._client = httpx.AsyncClient(
+                timeout=180,
+                headers=headers,
+                limits=httpx.Limits(max_connections=_pool,
+                                    max_keepalive_connections=_pool))
         return self._client
 
     async def aclose(self) -> None:
@@ -364,12 +366,12 @@ class LLMClient:
                 if (not self.filter_technical) or should_translate(t)]
         if todo:
             client = self._get_client()
-            # v1.4.5 并发池分离：翻译专用信号量（占1/4并发），审查用剩下的3/4
-            # 翻译是一次性的，审查是长线过程，分开互不干扰
-            if self._translate_sem is None:
-                _translate_conc = max(1, self.concurrency // 4)
-                self._translate_sem = asyncio.Semaphore(_translate_conc)
-            sem = self._translate_sem
+            # v1.4.6 恢复全局共享并发池：翻译/审查/硬编码共享同一 _conc_sem
+            # 撤销并发池分离——分离后翻译并发仅 concurrency//4，deepseek 并发能力强被浪费，
+            # 且 _prebuild_terms 术语预扫描被卡在信号量外导致「卡在正在翻译语言文件」
+            if self._conc_sem is None:
+                self._conc_sem = asyncio.Semaphore(max(1, self.concurrency))
+            sem = self._conc_sem
             chunks = [todo[k:k + self.batch_size] for k in range(0, len(todo), self.batch_size)]
 
             async def run_chunk(chunk):

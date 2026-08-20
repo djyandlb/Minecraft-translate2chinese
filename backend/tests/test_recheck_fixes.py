@@ -214,9 +214,9 @@ async def test_pipeline_flush_threshold_scales_with_concurrency(tmp_path, monkey
     items = [{"key": f"k{i}", "text": f"Item number {i} description here", "sink": {}}
              for i in range(200)]
     await flow._translate_batch_pipeline(items, fake_translate, batch_size=40)
-    # 200 条 → 首 flush 160（=40×4 并发阈值，translate_batch 内部切 4 chunk 并发），
-    # 收尾 flush 剩余 40。原逻辑会是 [40,40,40,40,40]（一次只 1 请求）。
-    assert received == [160, 40], received
+    # v1.4.6：攒够 batch_size(40) 就触发翻译，并发由 translate_batch 内部信号量控制
+    # 200 条 → 5 次 flush，每次 40 条。原逻辑攒 batch×并发(160) 首 flush 160。
+    assert received == [40, 40, 40, 40, 40], received
 
 
 @pytest.mark.asyncio

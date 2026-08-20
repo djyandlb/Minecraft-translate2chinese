@@ -742,15 +742,12 @@ async def test_throughput(payload: dict = None):
         # 自适应步长：慢 API（W>3s）大步爬省时间，快 API（W≤3s）细爬测准
         _step = 1 if _base_w <= 3.0 else (2 if _base_w <= 6.0 else 4)
         # 档位序列（1, 1+step, 1+2step... 到 MAX_CONC）
+        # v1.4.6：恢复逐档爬坡（撤销采样限制）——deepseek 并发强，精确测出真实并发
+        # 之前采样到16档会丢失中间档位精度；「并发压力测试失败」根因是 _translate_sem
+        # 未初始化（AttributeError），现已恢复 _conc_sem，与档位数无关
         _levels = list(range(1, MAX_CONC + 1, _step))
         if _levels[-1] != MAX_CONC:
             _levels.append(MAX_CONC)
-        # v1.4.6 修复：限制并发测试的档位数量，防止同时创建太多LLMClient导致API限流
-        # 最多同时测试16个档位，超过则均匀采样
-        if len(_levels) > 16:
-            _levels = [_levels[i] for i in range(0, len(_levels), len(_levels) // 16)]
-            if _levels[-1] != MAX_CONC:
-                _levels.append(MAX_CONC)
         # v1.3.10 **多档并行**（业界 litellm 并发快照思路）：所有档位同时发请求，
         # 每档独立判定——慢 API 总耗时从「档数×单批」降到「~2×单批」（并发 gather 同时飞）。
         # 逐档串行是慢 API 测不准主因（stepfun 单批 9.7s × 16 档 = 155s 才爬到 61）。
@@ -764,9 +761,16 @@ async def test_throughput(payload: dict = None):
                 await asyncio.wait_for(eng.translate_batch(req, "zh_cn", meta=_m),
                                        timeout=_timeout)   # 自适应超时
                 _w = _t.time() - _t0
-                # v1.4.6 修复：并发压力测试只关心请求是否成功，而不是所有条目都成功翻译
-                # 如果有fatal错误（鉴权失败），才算失败
+                # v1.4.6 判定逻辑：
+                # - fatal（鉴权失败）→ 该档不稳（重试无用）
+                # - failed 含全部请求条目 → 整批失败，该档不稳
+                #   （kind=ratelimit → hit_limit=True，标记撞过限流）
+                # - 部分条目失败（非全部）→ 请求成功，该档稳定
                 if _m.get("fatal"):
+                    return cc, 0.0, False, False
+                _failed = set(_m.get("failed") or ())
+                _req_set = set(req)
+                if _failed and _req_set and _failed >= _req_set:
                     return cc, 0.0, False, (_m.get("kind") or "") == "ratelimit"
                 return cc, _w, True, False
             except Exception:

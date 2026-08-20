@@ -1124,27 +1124,18 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
         return AiJudgeResult()
     client = engine._get_client()  # LLMClient 内部复用的 httpx.AsyncClient
 
-    # v1.4.5 动态参数：跟随RPM自动调整
+    # v1.4.6 恢复全局共享并发池：判断与翻译/审查共享 engine._conc_sem
+    # 撤销 mimo 相关动态批大小——deepseek 并发强，简单跟随 batch_size 即可
     _total_conc = max(1, int(getattr(engine, "concurrency", _AI_JUDGE_CONCURRENCY) or _AI_JUDGE_CONCURRENCY))
-    _rpm = float(getattr(engine.rate_gate, "_target", 0) if hasattr(engine, "rate_gate") and engine.rate_gate else 0)
+    _judge_page = max(_AI_JUDGE_PAGE, min(int(getattr(engine, "batch_size", 0) or _AI_JUDGE_PAGE), 40))
 
-    # 动态批大小：RPM/60/并发×0.8，确保每批在1秒内完成，充分利用并发
-    # 下限10，上限40（防JSON输出截断）
-    if _rpm > 0:
-        _judge_page = max(10, min(40, int(_rpm / 60.0 / _total_conc * 0.8)))
-    else:
-        _judge_page = max(_AI_JUDGE_PAGE, min(int(getattr(engine, "batch_size", 0) or _AI_JUDGE_PAGE), 40))
-
-    # 并发池分离（硬编码阶段独占运行）：
-    # - 初判：2/4 并发（主要工作）
-    # - 翻译：1/4 并发（对translate项翻译）
-    # - 重判：1/4 并发（unresolved补充判断）
-    _judge_conc = max(1, _total_conc * 2 // 4)    # 初判：2/4
-    _translate_conc = max(1, _total_conc // 4)     # 翻译：1/4
-    _rejudge_conc = max(1, _total_conc // 4)       # 重判：1/4
-
-    # 初判信号量
-    judge_sem = asyncio.Semaphore(_judge_conc)
+    # 共享引擎全局并发池（硬编码阶段独占运行，可跑满）
+    _conc_sem = getattr(engine, "_conc_sem", None)
+    if _conc_sem is None:
+        _conc_sem = asyncio.Semaphore(_total_conc)
+        if hasattr(engine, "_conc_sem"):
+            engine._conc_sem = _conc_sem
+    judge_sem = _conc_sem
 
     batches = [
         candidates[k:k + _judge_page]
@@ -1152,7 +1143,7 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
     ]
 
     async def run_batch(batch: list[dict]) -> AiJudgeResult:
-        async with judge_sem:  # v1.4.5：使用初判专用信号量
+        async with judge_sem:  # v1.4.6：共享全局并发池
             if on_batch_start:
                 on_batch_start(len(batch))   # 批请求前先给「正在判断」反馈
             result = await _ai_judge_batch(engine, client, batch, target_lang, known_translations,
@@ -1175,13 +1166,13 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
         unresolved_set = set(merged.unresolved)
         retry_cands = [c for c in candidates if c["text"] in unresolved_set]
         still: list[str] = []
-        # v1.4.5：重判使用专用信号量（1/4并发），与初判互不干扰
-        rejudge_sem = asyncio.Semaphore(_rejudge_conc)
+        # v1.4.6：重判也共享全局并发池
+        rejudge_sem = judge_sem
         rejudge_batches = [retry_cands[k:k + _judge_page]
                            for k in range(0, len(retry_cands), _judge_page)]
 
         async def _rejudge_batch(batch: list[dict]) -> AiJudgeResult:
-            async with rejudge_sem:  # v1.4.5：使用重判专用信号量
+            async with rejudge_sem:  # v1.4.6：共享全局并发池
                 return await _ai_judge_batch(engine, client, batch, target_lang,
                                              known_translations, silly_mode=silly_mode)
 
