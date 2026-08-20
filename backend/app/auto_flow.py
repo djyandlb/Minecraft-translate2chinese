@@ -1168,16 +1168,10 @@ class AutoFlow:
             pending.append({"key": key, "text": text, "sink": sink,
                             "reason": item.get("reason", ""),
                             "mod": src_mod, "file": src_file})
-            # v1.2.8 修复（用户实测「一批一批上传」= 并发没生效）：原阈值 = batch_size(40)
-            # → 每次 translate_batch 只收到 40 条 → 只切 1 个 chunk（1 个请求），
-            # gather 并发从不施展。改为攒够 **batch_size × 并发** 再 flush——translate_batch
-            # 把这一大堆切成多个 chunk（每个仍 batch_size 条）gather 并发发，真正吃满并发档。
+            # v1.4.6 修复：攒够 batch_size 就触发翻译，不需要攒够 batch_size * concurrency
+            # 并发由 translate_batch 内部的信号量控制，不需要在外面攒批
             # batch_size=1（漏翻逐条重翻）保持逐条专注不放大；收尾 flush 剩余不足阈值的照发。
-            if batch_size > 1:
-                _flush_thr = batch_size * max(1, int(getattr(self.engine, "concurrency", 1) or 1))
-            else:
-                _flush_thr = 1
-            if len(pending) >= _flush_thr:
+            if len(pending) >= batch_size:
                 await _flush()
         await _flush()
 
