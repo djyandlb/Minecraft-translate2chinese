@@ -1104,9 +1104,12 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
                              silly_mode: bool = False) -> AiJudgeResult:
     """LLM 判断硬编码候选是否用户可见并翻译（P0-2 三分类，不静默漏判）。
 
-    分页 ≤25 条/批并发请求；每批对照候选检查，未返回的并入 unresolved；
-    unresolved（模棱两可）单独重判 _ai_judge_single **一次**，重判后可以翻译→翻译、
-    不能翻译→排除；**仍模棱两可 → 选择不翻译**（只翻判断准的，不误翻技术串）。
+    v1.4.5（业界最佳实践）：
+    - 动态批大小：跟随RPM自动调整，充分利用并发
+    - 并发池分离：初判2/4，翻译1/4，重判1/4，互不干扰
+    - 分页并发请求；每批对照候选检查，未返回的并入 unresolved；
+    - unresolved（模棱两可）批量重判 **一次**，重判后可以翻译→翻译、
+      不能翻译→排除；**仍模棱两可 → 选择不翻译**（只翻判断准的，不误翻技术串）。
 
     P0-3：known_translations（已确认术语 {text: translation}）注入 user prompt，
     强制沿用已确认译名。复用 engine（LLMClient）的 base_url/model 与 httpx 客户端。
@@ -1120,21 +1123,36 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
     if not candidates:
         return AiJudgeResult()
     client = engine._get_client()  # LLMClient 内部复用的 httpx.AsyncClient
-    # 统一吞吐：判断批次跟随引擎 batch_size（吞吐档位放大时 25+ 条/批，并发跑满更有效）；
-    # 上限 40 防 JSON 输出截断降级（ai_judge 输出是判断结果数组）
-    _judge_page = max(_AI_JUDGE_PAGE, min(int(getattr(engine, "batch_size", 0) or _AI_JUDGE_PAGE), 40))
+
+    # v1.4.5 动态参数：跟随RPM自动调整
+    _total_conc = max(1, int(getattr(engine, "concurrency", _AI_JUDGE_CONCURRENCY) or _AI_JUDGE_CONCURRENCY))
+    _rpm = float(getattr(engine.rate_gate, "_target", 0) if hasattr(engine, "rate_gate") and engine.rate_gate else 0)
+
+    # 动态批大小：RPM/60/并发×0.8，确保每批在1秒内完成，充分利用并发
+    # 下限10，上限40（防JSON输出截断）
+    if _rpm > 0:
+        _judge_page = max(10, min(40, int(_rpm / 60.0 / _total_conc * 0.8)))
+    else:
+        _judge_page = max(_AI_JUDGE_PAGE, min(int(getattr(engine, "batch_size", 0) or _AI_JUDGE_PAGE), 40))
+
+    # 并发池分离（硬编码阶段独占运行）：
+    # - 初判：2/4 并发（主要工作）
+    # - 翻译：1/4 并发（对translate项翻译）
+    # - 重判：1/4 并发（unresolved补充判断）
+    _judge_conc = max(1, _total_conc * 2 // 4)    # 初判：2/4
+    _translate_conc = max(1, _total_conc // 4)     # 翻译：1/4
+    _rejudge_conc = max(1, _total_conc // 4)       # 重判：1/4
+
+    # 初判信号量
+    judge_sem = asyncio.Semaphore(_judge_conc)
+
     batches = [
         candidates[k:k + _judge_page]
         for k in range(0, len(candidates), _judge_page)
     ]
-    # v1.3.2（用户「用 RPM 算硬编码批次」）：并发跟随引擎并发——引擎并发本就是 Little's Law
-    #（并发 = RPM/60 × W）按 RPM 预算算出的满速档位，硬编码判断阶段**独占运行**（翻译不并行）
-    # 可吃满；原封顶 5 低估高并发档（RPM 允许时白浪费）→ 慢。共享 rate_gate 仍保证不超 RPM 配额。
-    # 批大小跟随 batch_size（_judge_page），吞吐 ≈ RPM × 批大小（非逐条单发）。
-    sem = asyncio.Semaphore(max(1, int(getattr(engine, "concurrency", _AI_JUDGE_CONCURRENCY) or 1)))
 
     async def run_batch(batch: list[dict]) -> AiJudgeResult:
-        async with sem:
+        async with judge_sem:  # v1.4.5：使用初判专用信号量
             if on_batch_start:
                 on_batch_start(len(batch))   # 批请求前先给「正在判断」反馈
             result = await _ai_judge_batch(engine, client, batch, target_lang, known_translations,
@@ -1157,17 +1175,13 @@ async def ai_judge_translate(engine, candidates: list[dict], target_lang: str,
         unresolved_set = set(merged.unresolved)
         retry_cands = [c for c in candidates if c["text"] in unresolved_set]
         still: list[str] = []
-        # v1.3.2 修复（用户「硬编码 1 条 1s」）：unresolved 重判原**逐条 _ai_judge_single 串行**——
-        # 每条 1 个请求排队，RPM 限速下 ~1.3 条/s（几百条 unresolved 重判要几分钟）。
-        # 改**批量重判**（_ai_judge_batch 每请求多条、走并发池），RPM 利用率提几十倍：
-        # 每请求判断 _judge_page 条，吞吐 ≈ RPM × _judge_page（非逐条单发）。
-        # 仍 unresolved → 不翻译（保持原文），与原「仍模棱两可→不翻译」语义一致。
-        _rejudge_sem = asyncio.Semaphore(max(1, int(getattr(engine, "concurrency", _AI_JUDGE_CONCURRENCY) or 1)))
+        # v1.4.5：重判使用专用信号量（1/4并发），与初判互不干扰
+        rejudge_sem = asyncio.Semaphore(_rejudge_conc)
         rejudge_batches = [retry_cands[k:k + _judge_page]
                            for k in range(0, len(retry_cands), _judge_page)]
 
         async def _rejudge_batch(batch: list[dict]) -> AiJudgeResult:
-            async with _rejudge_sem:
+            async with rejudge_sem:  # v1.4.5：使用重判专用信号量
                 return await _ai_judge_batch(engine, client, batch, target_lang,
                                              known_translations, silly_mode=silly_mode)
 
