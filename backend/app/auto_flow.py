@@ -2140,8 +2140,23 @@ class AutoFlow:
                                "mod": job.modid})
         # A: 翻译前预扫描术语表（DocuTranslate 模式）——AI 先统一高频词译名，
         # 预填 _norm_terms + glossary_prompt，让翻译一开始就遵循统一译名
+        # v1.4.9：改为**后台异步**，不 await 阻塞主翻译——原 await 时 AI 翻译 40 个高频词
+        # 受 RateGate 冷却/API 慢影响卡住「正在翻译语言文件」（用户「每次卡半天」根因）。
+        # 术语预扫描是可选优化，后台跑完后续批次生效，主翻译立即开始。
         if isinstance(self.engine, LLMClient) and lang_items:
-            await self._prebuild_terms([it["text"] for it in lang_items])
+            try:
+                _pt = asyncio.create_task(self._prebuild_terms([it["text"] for it in lang_items]))
+
+                def _pt_done(t: asyncio.Task) -> None:
+                    # 后台预扫描异常不抛到事件循环（_prebuild_terms 内部已 try/except，双保险）
+                    if not t.cancelled():
+                        try:
+                            t.exception()
+                        except Exception:
+                            pass
+                _pt.add_done_callback(_pt_done)
+            except Exception:
+                pass
         try:
             if isinstance(self.engine, LLMClient):
                 # 翻译与审查并行（用户诉求）：翻译管道不断翻译入队，审查管道并行审查写回——
