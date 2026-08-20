@@ -50,6 +50,23 @@ _MAX_NET_SPLIT_DEPTH = 1
 _MAX_SPLIT_DEPTH = 3
 
 
+def _retry_after_secs(exc) -> float | None:
+    """从 429 异常响应头读 Retry-After（秒数），供全局协调冷却使用。
+
+    业界最佳实践（async-batch-llm / 阿里云限流）：尊重 API 的 Retry-After 建议，
+    而非只用本地启发式退避。头可能是秒数（int）或 HTTP-date（少见，跳过）。
+    """
+    try:
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            h = resp.headers.get("retry-after")
+            if h and h.strip().isdigit():
+                return float(h.strip())
+    except Exception:
+        pass
+    return None
+
+
 def build_tagged_texts(texts: list[str]) -> str:
     """N 条文本拼一条 prompt，每行带 [i索引] 前缀，便于切回。
     原文真实换行必须转义为字面 \\n——否则换行会打断 [iN] 行式结构，
@@ -549,12 +566,14 @@ class LLMClient:
             ctx["kind"] = self._err_kind(e)   # 修复：batch 级失败也更新错误类别（否则错误分类漂移）
             out = None
             if ctx["kind"] == "ratelimit" and self.rate_gate is not None:
-                self.rate_gate.report_ratelimit()          # 自动校准：撞限流 → 退 40%
+                # v1.4.7：传 Retry-After 头给全局协调冷却（业界尊重 Retry-After）
+                _ra = _retry_after_secs(e)
+                self.rate_gate.report_ratelimit(retry_after=_ra)
         except Exception as e:
             ctx["kind"] = self._err_kind(e)   # 修复：同上
             out = None
             if ctx["kind"] == "ratelimit" and self.rate_gate is not None:
-                self.rate_gate.report_ratelimit()          # 自动校准：撞限流 → 退 40%
+                self.rate_gate.report_ratelimit()          # 无响应头 → 默认退避冷却
         if out is not None:
             if self.rate_gate is not None:
                 self.rate_gate.report_ok()                 # 自动校准：成功 → 累计微升
@@ -721,7 +740,9 @@ class LLMClient:
         except httpx.HTTPStatusError as e:
             ctx["kind"] = self._err_kind(e)
             if ctx["kind"] == "ratelimit" and self.rate_gate is not None:
-                self.rate_gate.report_ratelimit()          # 自动校准：撞限流 → 退 40%
+                # v1.4.7：传 Retry-After 头给全局协调冷却
+                _ra = _retry_after_secs(e)
+                self.rate_gate.report_ratelimit(retry_after=_ra)
             sc = e.response.status_code if e.response is not None else 0
             if sc in (401, 403):
                 ctx["fatal"] = f"API Key 无效或无权限（HTTP {sc}），请检查设置中的 API Key"

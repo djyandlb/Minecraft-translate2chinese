@@ -372,6 +372,9 @@ class AutoFlow:
         # 胡言乱语模式（用户诉求）：搞笑/热梗翻译但忠实原意。测试路径 cfg 可能为 None。
         self.silly = bool((cfg or {}).get("silly_mode"))
         self.store = store
+        # v1.4.7：token 落盘节流时间戳——worker pool 高并发下 _on_usage 每次请求
+        # save 全量 state 会 SSE 洪泛（队列背压丢旧），token 显示被丢只剩明细 save
+        self._last_token_save = 0.0
         self.work_dir = work_dir
         self.outputs_dir = outputs_dir
         self.cfpa_path = cfpa_path
@@ -463,10 +466,19 @@ class AutoFlow:
     # ---------- 引擎 / 进度辅助 ----------
 
     def _on_usage(self, t_in: int, t_out: int) -> None:
-        """token 统计回挂：引擎每批翻译后累加并落盘（前端显示消耗）。"""
+        """token 统计回挂：引擎每批翻译后累加（前端显示消耗）。
+
+        v1.4.7：累加在内存（实时），落盘**节流 500ms**——worker pool 高并发下
+        每次请求 save 全量 state（含 progress 序列化）会触发 SSE 洪泛，前端队列
+        背压丢旧 → token 显示只剩低频的明细 save（用户「token 不随时更新」）。
+        节流后 token 半秒内实时更新，且减轻 progress 序列化开销。
+        """
         self.state.tokens_in += t_in
         self.state.tokens_out += t_out
-        self.store.save(self.state)
+        _now = time.monotonic()
+        if _now - self._last_token_save >= 0.5:
+            self._last_token_save = _now
+            self.store.save(self.state)
 
     async def _translate_input_name(self) -> None:
         """翻译输入名（整合包/mod/地图/光影文件名，去扩展名）为目标语言。

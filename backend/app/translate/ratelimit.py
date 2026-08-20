@@ -20,6 +20,13 @@ v1.4.5 改进（业界最佳实践）：
 - 设置 RPM 下限 10，防止连续限流后降到1导致每60秒才能发1个请求
 - 退档更保守（70%而不是60%），升档更慢（10%而不是15%），更稳定
 - 尊重 Retry-After 头（如果API返回）
+
+v1.4.7 改进（业界标杆 async-batch-llm / 阿里云限流最佳实践的共享协调器模式）：
+- **桶容量收紧到 6 秒配额**（cap = min(并发, RPM/10)）——原 cap=并发数导致桶满
+  突发 64 个请求超速，RPM 测了也白测（用户「RPM 测出来为啥还限流」根因）
+- **429 全局协调冷却**：任一请求撞 429 → RateGate 设置冷却窗口，所有 acquire 暂停
+  等待（共享协调器），冷却后按新速率慢启动——不再各自退避重试风暴
+- **固定模式也学习**：固定 RPM 撞 429 同样冷却（固定值高于实际配额时自愈）
 """
 import asyncio
 import time
@@ -31,18 +38,21 @@ _AUTO_BACKOFF = 0.7       # v1.4.5：撞 429 退幅（×0.7，比0.6更保守）
 _AUTO_RAMPUP = 1.1        # v1.4.5：稳定后微升（×1.1，比1.15更慢更稳）
 _AUTO_OK_STREAK = 15      # 连续成功批次达到后微升一次
 _AUTO_RAMPUP_MAX = 300.0  # 自动校准软上限（超过后升档更慢）
+# v1.4.7 协调冷却参数（业界：429 cooldown + backoff_multiplier，封顶）
+_COOLDOWN_INIT = 5.0      # 撞 429 首次冷却（秒）
+_COOLDOWN_MAX = 60.0      # 冷却封顶（尊重 Retry-After 上限）
 
 
 class RateGate:
     """Token Bucket 请求门：`await gate.acquire()` 通过才允许发一个请求。
 
-    - 桶以当前目标速率每秒补充令牌，容量 = 短突发配额（≈6 秒配额）；
+    - 桶以当前目标速率每秒补充令牌，容量 = 短突发配额（≈6 秒配额，不超并发）；
     - 满桶即放行（低流量零延迟），空桶本地等下一令牌；
-    - auto 模式：目标速率由 report_ok/report_429 动态校准（撞限流退、稳定升）。
+    - **共享协调器**：撞 429 → 全局冷却窗口，所有 acquire 暂停，冷却后慢启动。
     """
 
     __slots__ = ("rpm", "auto", "_rate", "_cap", "_tokens", "_last", "_target", "_ok_streak",
-                 "_min_cap")
+                 "_min_cap", "_cooldown_until", "_cooldown")
 
     def __init__(self, rpm: float = 0.0, auto: bool | None = None, auto_init_rpm: float = 0.0,
                  min_cap: int = 1):
@@ -54,25 +64,20 @@ class RateGate:
         # 永不升档，动态测试校准白测（用户实测「翻译慢」的根因之一）
         self._target = (float(auto_init_rpm) if self.auto and float(auto_init_rpm or 0) > 0
                         else _AUTO_INIT_RPM if self.auto else self.rpm)
-        # v1.2.9 关键：桶容量 ≥ 并发数（min_cap）——原 cap = RPM/10（6 秒配额），RPM=30
-        # 时只有 3 个令牌突发 → 并发 16 全堵在 acquire 排队、实际同时飞 ≤3（压测实测
-        # peak=3，用户「×16 显示但串行」根因）。cap 抬到并发数，让并发请求能突发；
-        # auto 模式撞 429 仍会退 target（cap 跟着小），自适应安全。
         self._min_cap = max(1, int(min_cap))
         self._ok_streak = 0
+        self._cooldown_until = 0.0     # 全局冷却截止时间（monotonic）
+        self._cooldown = _COOLDOWN_INIT  # 当前冷却时长（下次撞 429 翻倍）
         self._reset_bucket()
 
     def _reset_bucket(self) -> None:
         # 修复（recheck）：rpm=0 + auto=False 时 _target=0 → _rate=0，acquire() 超配额
         # sleep 除零抛 ZeroDivisionError——取极小速率兜底（实际路径 rpm<=0 走 auto，防御公共类）
         self._rate = max(1e-9, self._target / 60.0)
-        # v1.2.9：桶容量 ≥ min_cap（并发数）——并发突发不被令牌桶憋死（auto 模式撞 429 会退档自愈）
-        # 修复（Agent recheck）：**固定模式（auto=False）突发不超 RPM 配额**——cap 钳
-        # min(min_cap, RPM)，否则 RPM=15/并发=16 时 burst 16 > 整个 60s 窗口配额必撞 429，
-        # 且固定模式 report_ratelimit 直接 return 无自愈 → 持续撞。
-        _cap_burst = (min(float(self._min_cap), self._target) if not self.auto
-                      else float(self._min_cap))
-        self._cap = max(1.0, _cap_burst, self._target / 10.0)
+        # v1.4.7 收紧桶容量：cap = min(并发, 6 秒配额 RPM/10)——原 cap=并发数(64) 导致
+        # 桶满突发 64 请求超速触发 API 限流（RPM 测了也白测）。6 秒配额防突发，速率稳定 ≤ RPM。
+        # 并发型 API（官方几乎不限流）测出 RPM 高 → cap 也大，不影响并发。
+        self._cap = max(1.0, min(float(self._min_cap), self._target / 10.0))
         self._tokens = self._cap
         self._last = time.monotonic()
 
@@ -85,6 +90,8 @@ class RateGate:
 
         v1.4.5：超过300 RPM后升档更慢（×1.05而不是×1.1），防止并发型API被闸卡死。
         """
+        # 成功也清零冷却（恢复后不再暂停）
+        self._cooldown_until = 0.0
         if not self.auto:
             return
         self._ok_streak += 1
@@ -97,27 +104,34 @@ class RateGate:
                 self._reset_bucket()
 
     def report_ratelimit(self, retry_after: float | None = None) -> None:
-        """一次请求撞 429/限流。auto 模式：立即退 70%（冷却），稳在「刚好不触发」。
+        """撞 429/限流 → **全局协调冷却**（业界共享协调器模式）。
 
-        v1.4.5：尊重 Retry-After 头（如果API返回），设置RPM下限10防止降到1。
+        - 设置冷却窗口：Retry-After 优先，否则退避（5s 起，翻倍封顶 60s）
+        - 冷却期间所有 acquire 暂停等待（不再各自退避重试风暴）
+        - auto 模式退档（×0.7）；固定模式也冷却（固定值高于实际配额时自愈）
+        - 尊重 Retry-After：按头里的秒数反算 RPM
         """
-        if not self.auto:
-            return
+        now = time.monotonic()
         if retry_after and retry_after > 0:
-            # 尊重 Retry-After 头：按头里的秒数反算RPM
+            cooldown = min(float(retry_after), _COOLDOWN_MAX)
             self._target = max(_AUTO_MIN_RPM, 60.0 / retry_after)
         else:
-            # 退70%，但不低于下限
+            cooldown = self._cooldown
             self._target = max(_AUTO_MIN_RPM, self._target * _AUTO_BACKOFF)
+        self._cooldown_until = now + cooldown
+        self._cooldown = min(self._cooldown * 2.0, _COOLDOWN_MAX)  # 下次翻倍封顶
         self._ok_streak = 0
         self._reset_bucket()
-        # 退档后清空桶令牌，按新速率补充（真正冷却）
         self._tokens = 0.0
 
     async def acquire(self) -> None:
-        """等待并消耗 1 个令牌。超配额时本地睡到下一令牌，不发请求给 API。"""
+        """等待并消耗 1 个令牌。超配额/冷却时本地等待，不发请求给 API。"""
         while True:
             now = time.monotonic()
+            # 全局协调冷却：任一请求撞 429 后，所有 acquire 暂停等待窗口
+            if self._cooldown_until > now:
+                await asyncio.sleep(self._cooldown_until - now)
+                continue
             self._tokens = min(self._cap, self._tokens + (now - self._last) * self._rate)
             self._last = now
             if self._tokens >= 1.0:
