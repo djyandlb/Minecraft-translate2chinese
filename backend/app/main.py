@@ -745,6 +745,12 @@ async def test_throughput(payload: dict = None):
         _levels = list(range(1, MAX_CONC + 1, _step))
         if _levels[-1] != MAX_CONC:
             _levels.append(MAX_CONC)
+        # v1.4.6 修复：限制并发测试的档位数量，防止同时创建太多LLMClient导致API限流
+        # 最多同时测试16个档位，超过则均匀采样
+        if len(_levels) > 16:
+            _levels = [_levels[i] for i in range(0, len(_levels), len(_levels) // 16)]
+            if _levels[-1] != MAX_CONC:
+                _levels.append(MAX_CONC)
         # v1.3.10 **多档并行**（业界 litellm 并发快照思路）：所有档位同时发请求，
         # 每档独立判定——慢 API 总耗时从「档数×单批」降到「~2×单批」（并发 gather 同时飞）。
         # 逐档串行是慢 API 测不准主因（stepfun 单批 9.7s × 16 档 = 155s 才爬到 61）。
