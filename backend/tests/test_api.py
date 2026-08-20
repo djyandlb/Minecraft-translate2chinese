@@ -44,8 +44,8 @@ def test_browse(tmp_path):
 
 
 def test_translate_starts_background_task(tmp_path, monkeypatch):
-    # translate 端点是 async def：create_task 需要 running loop，否则同步端点会 500。
-    # 此处隔离 work/task 目录并替换 run_translation，验证后台任务被调度。
+    # v1.4.6：旧 /api/translate（translator.py）已删除，统一走 /api/auto-translate。
+    # 验证后台任务被调度（mock run_auto_translation）。
     import app.main as main
     monkeypatch.setattr(main, "WORK_DIR", tmp_path)
     monkeypatch.setattr(main, "OUTPUTS_DIR", tmp_path / "outputs")
@@ -53,12 +53,12 @@ def test_translate_starts_background_task(tmp_path, monkeypatch):
 
     calls = []
 
-    async def fake_run(task_id, req, cfg, store, work_dir, outputs_dir):
+    async def fake_run(task_id, req, cfg, store, work_dir, outputs_dir, cfpa_path=None):
         calls.append((task_id, req))
         await asyncio.sleep(0)
 
-    monkeypatch.setattr(main, "run_translation", fake_run)
-    r = client.post("/api/translate", json={"path": str(tmp_path)})
+    monkeypatch.setattr(main, "run_auto_translation", fake_run)
+    r = client.post("/api/auto-translate", json={"path": str(tmp_path), "target_lang": "zh_cn"})
     assert r.status_code == 200
     task_id = r.json()["task_id"]
     for _ in range(50):          # 轮询等后台任务执行（TestClient 同步跑 portal loop）
@@ -76,11 +76,11 @@ def test_cancel_pause_flags(tmp_path, monkeypatch):
     store = TaskStore(tmp_path / "tasks")
     monkeypatch.setattr(main, "STORE", store)
 
-    async def fake_run(task_id, req, cfg, s, work_dir, outputs_dir):
+    async def fake_run(task_id, req, cfg, s, work_dir, outputs_dir, cfpa_path=None):
         await asyncio.sleep(0)   # 立即完成，不真正调引擎
 
-    monkeypatch.setattr(main, "run_translation", fake_run)
-    r = client.post("/api/translate", json={"path": str(tmp_path)})
+    monkeypatch.setattr(main, "run_auto_translation", fake_run)
+    r = client.post("/api/auto-translate", json={"path": str(tmp_path), "target_lang": "zh_cn"})
     assert r.status_code == 200
     task_id = r.json()["task_id"]
 
@@ -143,55 +143,6 @@ def test_map_scan_counts_mca_not_skipped(tmp_path):
     body = r.json()
     assert body["mca_skipped"] == 0
     assert any(e["nbt_path"].startswith("chunk(0,0)") for e in body["preview"])
-
-
-def test_hardcode_scan_invalid(tmp_path):
-    # 非 .jar 文件 → 400（原 jar 只读，接口拒绝非 jar 输入）
-    r = client.post("/api/hardcode-scan", json={"path": str(tmp_path / "notajar.txt")})
-    assert r.status_code == 400
-
-
-def test_hardcode_scan_valid(tmp_path):
-    # 复用 test_hardcode 的造 jar 逻辑（javac 编译；无 javac 时造一个含 class 的空 zip 即可测 200）
-    import shutil, subprocess, zipfile
-    if shutil.which("javac"):
-        srcdir = tmp_path / "s"; srcdir.mkdir()
-        (srcdir / "HelloMod.java").write_text(
-            'public class HelloMod { public static void main(String[] a) { System.out.println("Hello World"); } }',
-            encoding="utf-8")
-        classes = tmp_path / "c"; classes.mkdir()
-        subprocess.run(["javac", "-d", str(classes), str(srcdir / "HelloMod.java")], check=True)
-        jar = tmp_path / "mod.jar"
-        with zipfile.ZipFile(jar, "w") as zf:
-            for f in classes.rglob("*.class"):
-                zf.write(f, f.relative_to(classes).as_posix())
-        r = client.post("/api/hardcode-scan", json={"path": str(jar)})
-        assert r.status_code == 200 and r.json()["count"] >= 1 and "Hello World" in r.json()["strings"]
-    else:
-        pytest.skip("无 javac")
-
-
-def test_hardcode_translate_returns_task(tmp_path):
-    # 端点应返回 {task_id}，不等待后台跑完（参照地图 translate 测试模式）
-    jar = tmp_path / "mod.jar"
-    jar.write_bytes(b"PK\x05\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")  # 空 zip
-    r = client.post("/api/hardcode-translate", json={"path": str(jar)})
-    assert r.status_code == 200 and "task_id" in r.json()
-
-
-def test_hardcode_scan_bad_zip(tmp_path):
-    # 假 jar（不是有效 zip）→ 400 "不是有效的 jar/zip 文件"，而不是 500
-    fake = tmp_path / "fake.jar"
-    fake.write_bytes(b"this is definitely not a zip archive")
-    r = client.post("/api/hardcode-scan", json={"path": str(fake)})
-    assert r.status_code == 400
-    assert "不是有效的" in r.json()["detail"]
-
-
-def test_hardcode_translate_invalid(tmp_path):
-    # 非 .jar 文件 → 400（与 scan 端点对称校验，避免误选目录白白启动必失败任务）
-    r = client.post("/api/hardcode-translate", json={"path": str(tmp_path / "notajar.txt")})
-    assert r.status_code == 400
 
 
 # —— 任务 O1：/api/test-connection 连接检测 ——

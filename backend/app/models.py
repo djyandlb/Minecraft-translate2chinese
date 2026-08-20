@@ -16,16 +16,6 @@ class ScanRequest(BaseModel):
     target_lang: str = "zh_cn"
 
 
-class TranslateRequest(BaseModel):
-    path: str
-    mode: str = "modpack"
-    scope: str = "mods"            # 目录模式下："mods" | "all"，贯通扫描时的范围选择
-    source_lang: str = "en_us"
-    target_lang: str = "zh_cn"
-    pack_format: int | None = None
-    mc_version: str | None = None   # 未显式 pack_format 时按此版本换算
-
-
 class MapScanRequest(BaseModel):
     """地图汉化：扫描世界存档副本的可翻译词条。"""
     path: str
@@ -35,13 +25,6 @@ class MapScanRequest(BaseModel):
 
 class MapTranslateRequest(BaseModel):
     """地图汉化：对世界存档副本发起后台翻译。"""
-    path: str
-    source_lang: str = "en_us"
-    target_lang: str = "zh_cn"
-
-
-class HardcodeRequest(BaseModel):
-    """硬编码汉化：对 mod jar 内 JVM 字节码硬编码字符串发起后台翻译。原 jar 只读。"""
     path: str
     source_lang: str = "en_us"
     target_lang: str = "zh_cn"

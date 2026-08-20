@@ -30,15 +30,12 @@ from app.detect import (build_detect_summary, detect_input_type, detect_source_l
                         infer_pack_format, unwrap_bare_wrapper)
 from app.diff import build_jobs
 from app.glossary import load_glossary
-from app.hardcode import scan_hardcoded_strings
-from app.hardcode_flow import run_hardcode_translation
 from app.maps import flow as maps_flow, scan as maps_scan, world as maps_world
-from app.models import (AutoRequest, DetectRequest, HardcodeRequest, MapScanRequest,
-                        MapTranslateRequest, ScanRequest, TranslateRequest)
+from app.models import (AutoRequest, DetectRequest, MapScanRequest,
+                        MapTranslateRequest, ScanRequest)
 from app.scanner import scan_modpack, scan_jar
 from app.safeerr import sanitize_error
 from app.tasks import TaskStore
-from app.translator import run_translation
 
 def _base() -> Path:
     """定位可写工作目录（backend/）：
@@ -1081,12 +1078,6 @@ async def _spawn_task(coro_factory) -> str:
     return state.id
 
 
-@app.post("/api/translate")
-async def translate(req: TranslateRequest):
-    return {"task_id": await _spawn_task(
-        lambda cfg, state: run_translation(state.id, req, cfg, STORE, WORK_DIR, OUTPUTS_DIR))}
-
-
 @app.post("/api/auto-translate")
 async def auto_translate(req: AutoRequest):
     """统一全自动翻译入口：后台任务，复用 _TASKS 持有引用防 GC。"""
@@ -1604,39 +1595,6 @@ async def map_translate(req: MapTranslateRequest):
     return {"task_id": await _spawn_task(
         lambda cfg, state: maps_flow.run_map_translation(state.id, req, cfg, STORE,
                                                          WORK_DIR, OUTPUTS_DIR))}
-
-
-@app.post("/api/hardcode-scan")
-def hardcode_scan(req: HardcodeRequest):
-    """硬编码汉化：扫描 jar 内可翻译的字节码字符串（复制到 work 副本再扫，原 jar 只读）。"""
-    import shutil
-    src = Path(req.path)
-    if not src.is_file() or src.suffix.lower() != ".jar":
-        raise HTTPException(400, "请选择 .jar 文件")
-    # M5-recheck：副本用 uuid 子目录隔离，避免同名 jar 并发互踩 + 扫描后清理防 work 目录膨胀
-    dest = WORK_DIR / "hardcode" / "scan" / uuid.uuid4().hex / src.name
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dest)
-    try:
-        strings = scan_hardcoded_strings(dest)
-    except zipfile.BadZipFile:
-        # M5-recheck：假 jar（非有效 zip）报 400 而不是 500
-        raise HTTPException(400, "不是有效的 jar/zip 文件")
-    finally:
-        shutil.rmtree(dest.parent, ignore_errors=True)
-    return {"strings": strings, "count": len(strings)}
-
-
-@app.post("/api/hardcode-translate")
-async def hardcode_translate(req: HardcodeRequest):
-    """硬编码汉化：调度后台翻译任务（复制→扫描→翻译→替换校验→输出新 jar），复用 _TASKS 持有引用防 GC。"""
-    # M5-recheck：与 scan 端点对称校验，避免误选目录白白启动必失败任务
-    src = Path(req.path)
-    if not src.is_file() or src.suffix.lower() != ".jar":
-        raise HTTPException(400, "请选择 .jar 文件")
-    return {"task_id": await _spawn_task(
-        lambda cfg, state: run_hardcode_translation(state.id, req, cfg, STORE,
-                                                    WORK_DIR, OUTPUTS_DIR))}
 
 
 # —— 前端静态服务（桌面版 uvicorn 直接 serve dist；开发期 vite dev proxy 不受影响）——
