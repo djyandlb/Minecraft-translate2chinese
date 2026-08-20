@@ -25,6 +25,16 @@ import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
+# v1.4.5：重试参数常量（业界最佳实践：指数退避+抖动，区分错误类型）
+_RETRY_PARAMS = {
+    "ratelimit": {"base": 10.0, "max": 60.0},   # 限流：等更久
+    "timeout": {"base": 2.0, "max": 30.0},      # 超时：等短一些
+    "network": {"base": 5.0, "max": 30.0},      # 网络错误：中等
+    "server": {"base": 3.0, "max": 30.0},       # 服务器错误：中等
+    "other": {"base": 5.0, "max": 30.0},        # 其他：中等
+}
+_RETRY_MAX_TOTAL_TIME = 90.0  # 重试总超时（秒）
+
 from app.archive import (archive_fingerprint, dir_fingerprint, extract_cached,
                          is_archive)
 from app.audit import audit_invariants, audit_translation
@@ -648,7 +658,7 @@ class AutoFlow:
         return results, meta
 
     async def _wait_network_retry(self, translate_fn, texts: list[str],
-                                  reasons: list[str], max_total_time: float = 90.0) -> list | None:
+                                  reasons: list[str], max_total_time: float = _RETRY_MAX_TOTAL_TIME) -> list | None:
         """网络/限流失败：指数退避+抖动重试，90s总超时放弃。
 
         v1.4.5（业界最佳实践）：
@@ -657,17 +667,6 @@ class AutoFlow:
         - 总超时90秒，不是重试次数
         - 尊重 Retry-After 头（如果API返回）
         """
-        import random
-
-        # 错误类型对应的退避参数
-        _RETRY_PARAMS = {
-            "ratelimit": {"base": 10.0, "max": 60.0},   # 限流：等更久
-            "timeout": {"base": 2.0, "max": 30.0},      # 超时：等短一些
-            "network": {"base": 5.0, "max": 30.0},      # 网络错误：中等
-            "server": {"base": 3.0, "max": 30.0},       # 服务器错误：中等
-            "other": {"base": 5.0, "max": 30.0},        # 其他：中等
-        }
-
         start_time = time.monotonic()
         attempt = 0
         _last_kind = "other"
@@ -879,22 +878,13 @@ class AutoFlow:
                 else:
                     # 网络连通：失败子集攒批重试（90s总超时，指数退避+抖动）
                     # v1.4.5：业界最佳实践——指数退避+抖动，区分错误类型
-                    import random
                     _start_time = time.monotonic()
-                    _max_total_time = 90.0  # 总超时90秒
-                    _RETRY_PARAMS = {
-                        "ratelimit": {"base": 10.0, "max": 60.0},
-                        "timeout": {"base": 2.0, "max": 30.0},
-                        "network": {"base": 5.0, "max": 30.0},
-                        "server": {"base": 3.0, "max": 30.0},
-                        "other": {"base": 5.0, "max": 30.0},
-                    }
                     _attempt = 0
                     _last_kind = _kind
 
                     while retry_pos:
                         elapsed = time.monotonic() - _start_time
-                        if elapsed >= _max_total_time:
+                        if elapsed >= _RETRY_MAX_TOTAL_TIME:
                             break  # 总超时放弃
 
                         # 指数退避+抖动
@@ -903,7 +893,7 @@ class AutoFlow:
                             base_delay = min(params["base"] * (2 ** (_attempt - 1)), params["max"])
                             jitter = random.uniform(0, base_delay * 0.5)
                             wait_time = base_delay + jitter
-                            remaining = _max_total_time - elapsed
+                            remaining = _RETRY_MAX_TOTAL_TIME - elapsed
                             wait_time = min(wait_time, remaining)
                             await asyncio.sleep(wait_time)
 

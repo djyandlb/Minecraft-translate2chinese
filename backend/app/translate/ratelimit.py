@@ -26,7 +26,7 @@ import time
 
 _AUTO_INIT_RPM = 30.0     # 自动校准起点（保守，绝不出发即撞限流）
 _AUTO_MAX_RPM = 10000.0   # 自动校准上限（并发型 API 不被闸卡死）
-_AUTO_MIN_RPM = 10.0      # v1.4.5：RPM 下限，防止降到1导致每60秒才能发1个请求
+_AUTO_MIN_RPM = 30.0      # v1.4.5：RPM 下限，防止降到太低导致翻译极慢
 _AUTO_BACKOFF = 0.7       # v1.4.5：撞 429 退幅（×0.7，比0.6更保守）
 _AUTO_RAMPUP = 1.1        # v1.4.5：稳定后微升（×1.1，比1.15更慢更稳）
 _AUTO_OK_STREAK = 15      # 连续成功批次达到后微升一次
