@@ -285,6 +285,11 @@ watch([engine, provider, baseUrl, model, targetLang, concurrency, scanConcurrenc
 // 组件卸载（关窗/销毁）时立即保存当前值，防防抖窗口期内的改动丢失（webview 关窗会丢弃 pending setTimeout）
 onUnmounted(() => {
   clearTimeout(saveTimer)
+  // v1.4.6 修复：onUnmounted 加 loaded 守卫（对齐 autoSave）——冷启动后端未就绪时
+  // getConfig 失败 → loaded=false，此时保存会用默认值覆盖已有 config.json 的自定义配置
+  if (loading || !loaded) {
+    return
+  }
   saveConfig(buildConfigBody()).catch(() => {})   // 幂等：与保存按钮同值，静默兜底
   // 修复（recheck）：点「关闭」关窗时同步前端 config——否则后端已存 target_lang，前端
   // config 还是旧值，后续 detect/autoTranslate 请求带旧语言。之前引用未定义的 body

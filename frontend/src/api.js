@@ -128,7 +128,9 @@ export const downloadCfpa = (mcVersion) => req('/cfpa/download', { method: 'POST
 export const testConnection = (body = {}) => req('/test-connection', { method: 'POST', body: JSON.stringify(body) })
 
 // 测试吞吐档位：后端逐档探测并发/批大小，返回建议档位（{ ok, preset, concurrency, batch_size, scan_concurrency, message }）
-export const testThroughput = (body = {}) => req('/test-throughput', { method: 'POST', body: JSON.stringify(body), timeout: 180000 })
+// v1.4.6：超时 180s→300s——慢 API（mimo/stepfun 单批 >60s）后端测量 _measure_w(2×60s)+
+// 爬坡(150s) 可达 270s，180s 必被前端 abort（后端协程还在跑、结果丢弃）
+export const testThroughput = (body = {}) => req('/test-throughput', { method: 'POST', body: JSON.stringify(body), timeout: 300000 })
 
 // 检查更新内置资源（kind: cfpa/i18n/vp）：有更新下载到应用目录，返回 { ok, status, message, version }
 export const checkUpdate = (body = {}) => req('/check-update', { method: 'POST', body: JSON.stringify(body) })

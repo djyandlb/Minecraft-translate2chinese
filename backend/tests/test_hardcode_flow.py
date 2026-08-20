@@ -24,7 +24,11 @@ class _FakeEngine:
     def __init__(self, target_lang: str):
         self._target = target_lang
 
-    async def translate_batch(self, texts, target_lang):
+    async def translate_batch(self, texts, target_lang, meta=None):
+        if meta is not None:
+            meta["failed"] = set()
+            meta["kind"] = "other"
+            meta["fatal"] = None
         return [
             t.replace("Hello World", "你好世界") if t == "Hello World" else f"[译]{t}"
             for t in texts

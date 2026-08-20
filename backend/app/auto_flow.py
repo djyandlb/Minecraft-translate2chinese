@@ -643,8 +643,15 @@ class AutoFlow:
         _is_llm = isinstance(self.engine, LLMClient)
         masked = list(texts)   # v1.1.0：直接传原文（无占位符保护，AI 按语境自由翻译）
         if _is_llm:
-            results = await self.engine.translate_batch(
-                masked, self.req.target_lang, meta=meta, feedback=reasons or None, **kw)
+            try:
+                results = await self.engine.translate_batch(
+                    masked, self.req.target_lang, meta=meta, feedback=reasons or None, **kw)
+            except ValueError:
+                # v1.4.6 修复：fatal（401/403）已在 meta 里 update（translate_batch 先
+                # meta.update(ctx) 再抛 ValueError）。捕获后返回整批原文 + fatal meta，
+                # 让 _flush 的 `_fatal = _meta.get("fatal")` 读到——否则异常向上传播、
+                # _flush 的 except 置 _meta=None，401 被吞、任务每批白打一次 401。
+                return list(texts), meta
         else:
             # 非 LLM 引擎（machine/兜底）不接 LLM 专用参数（forced/feedback——修复 Agent 审查：
             # 漏翻专项重翻传 forced=True → MachineClient.translate_batch 签名不含该参抛
@@ -658,7 +665,8 @@ class AutoFlow:
         return results, meta
 
     async def _wait_network_retry(self, translate_fn, texts: list[str],
-                                  reasons: list[str], max_total_time: float = _RETRY_MAX_TOTAL_TIME) -> list | None:
+                                  reasons: list[str], max_total_time: float = _RETRY_MAX_TOTAL_TIME,
+                                  initial_kind: str = "other") -> list | None:
         """网络/限流失败：指数退避+抖动重试，90s总超时放弃。
 
         v1.4.5（业界最佳实践）：
@@ -666,10 +674,13 @@ class AutoFlow:
         - 指数退避+随机抖动：防止惊群效应
         - 总超时90秒，不是重试次数
         - 尊重 Retry-After 头（如果API返回）
+
+        v1.4.6：接受 initial_kind（实际错误类型）做首次退避基准；translate_fn 用
+        wait_for 包住、超时=剩余时间，避免单次阻塞 180s 超过总超时（实际等待远超声明）。
         """
         start_time = time.monotonic()
         attempt = 0
-        _last_kind = "other"
+        _last_kind = initial_kind or "other"
 
         while not self.state.cancelled:
             elapsed = time.monotonic() - start_time
@@ -702,7 +713,10 @@ class AutoFlow:
                 return None
 
             try:
-                _got = await translate_fn(texts, reasons)
+                # v1.4.6：wait_for 包住 translate_fn，超时=剩余时间——原直接 await，
+                # 单次请求最多阻塞 180s（httpx timeout）超过 90s 总超时声明
+                _timeout = max(5.0, remaining)
+                _got = await asyncio.wait_for(translate_fn(texts, reasons), timeout=_timeout)
                 if isinstance(_got, tuple) and len(_got) == 2 and isinstance(_got[1], dict):
                     got, meta = _got
                 else:
@@ -854,7 +868,8 @@ class AutoFlow:
                     self.store.save(self.state)
                     _retried = await self._wait_network_retry(
                         translate_fn, [pending[k]["text"] for k in retry_pos],
-                        [pending[k].get("reason", "") for k in retry_pos])
+                        [pending[k].get("reason", "") for k in retry_pos],
+                        initial_kind=_kind)
                     if _retried is None:
                         if self.state.cancelled:
                             return   # 用户取消，中断整个流程
@@ -1553,29 +1568,37 @@ class AutoFlow:
         （避免第一批错译/多译——Zeno 无论在哪都是泽诺，从头到尾一致）。
 
         仅 LLM 引擎、高频词 ≥3 个时启用；失败静默（不阻塞翻译）。
+
+        v1.4.6：同步正则扫描几万条文本阻塞事件循环（用户「卡在正在翻译语言文件」元凶之一），
+        扫描段用 to_thread 丢后台线程 + 整体 wait_for 60s 超时，不阻塞心跳/任务状态。
         """
         from collections import Counter
         try:
-            cnt: Counter = Counter()
-            for t in texts:
-                if not t:
-                    continue
-                for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,23}", t):
-                    wl = w.lower()
-                    if wl in {"the", "and", "for", "with", "you", "your", "this", "that",
-                              "from", "into", "when", "will", "can", "has", "have", "are",
-                              "was", "not", "but", "all", "any", "per", "via"}:
+            def _scan_terms(texts: list[str]) -> list[str]:
+                """同步统计高频词（在后台线程跑，避免阻塞事件循环）。"""
+                cnt: Counter = Counter()
+                for t in texts:
+                    if not t:
                         continue
-                    if w.isupper() and len(w) <= 3:
-                        continue   # 缩写（RF/HP）跳过
-                    # 过滤代码标识：下划线（player_name）/驼峰（ModelViewMat 中部大写）/
-                    # 含数字（iron2）→ 不参与预扫描（防误计代码词）
-                    if "_" in w or re.search(r"[A-Z]", w[1:]) or re.search(r"[0-9]", w):
-                        continue
-                    cnt[w] += 1
-            # 按**频率**排序取前 40（修复：原 list(freq) 是首次出现顺序，长尾词挤掉真高频）
-            top = [w for w in sorted(cnt, key=cnt.get, reverse=True)
-                   if cnt[w] >= 3 and len(w) <= 20][:40]
+                    for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,23}", t):
+                        wl = w.lower()
+                        if wl in {"the", "and", "for", "with", "you", "your", "this", "that",
+                                  "from", "into", "when", "will", "can", "has", "have", "are",
+                                  "was", "not", "but", "all", "any", "per", "via"}:
+                            continue
+                        if w.isupper() and len(w) <= 3:
+                            continue   # 缩写（RF/HP）跳过
+                        # 过滤代码标识：下划线（player_name）/驼峰（ModelViewMat 中部大写）/
+                        # 含数字（iron2）→ 不参与预扫描（防误计代码词）
+                        if "_" in w or re.search(r"[A-Z]", w[1:]) or re.search(r"[0-9]", w):
+                            continue
+                        cnt[w] += 1
+                # 按**频率**排序取前 40（修复：原 list(freq) 是首次出现顺序，长尾词挤掉真高频）
+                return [w for w in sorted(cnt, key=cnt.get, reverse=True)
+                        if cnt[w] >= 3 and len(w) <= 20][:40]
+
+            top = await asyncio.wait_for(
+                asyncio.to_thread(_scan_terms, texts), timeout=20.0)
             if len(top) < 3:
                 return
             _r, _m = await self._engine_translate(top, None, forced=False)

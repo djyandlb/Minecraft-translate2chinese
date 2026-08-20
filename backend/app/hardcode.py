@@ -1072,10 +1072,17 @@ async def _ai_judge_batch(engine, client, batch: list[dict], target_lang: str,
     items = _parse_ai_judge_response(content)
     if not items:
         # 非法 JSON / 空数组 → 不整批丢，对该批候选逐条降级（P0 根因 3）
+        # v1.4.6 修复：降级链并发执行（gather）——原逐条串行占住 judge_sem 槽位，
+        # 一批 25 条串行 25 个请求拖慢整个并发池；并发后受 rate_gate 令牌限速，不超配额
         logger.warning("ai_judge 输出非法 JSON/空数组，%d 条逐条降级", len(batch))
-        for cand in batch:
-            verdict, payload = await _ai_judge_single(
+
+        async def _single_degrade(cand: dict) -> tuple[str, str | None]:
+            v, p = await _ai_judge_single(
                 engine, client, cand, target_lang, known_translations, silly_mode=silly_mode)
+            return v, p
+
+        _degrades = await asyncio.gather(*(_single_degrade(c) for c in batch))
+        for cand, (verdict, payload) in zip(batch, _degrades):
             if verdict == "translate":
                 result.translations[cand["text"]] = (payload.replace("\\n", "\n")
                               if "\n" in cand["text"] else payload)

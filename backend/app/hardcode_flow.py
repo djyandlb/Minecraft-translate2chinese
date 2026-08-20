@@ -96,16 +96,29 @@ async def run_hardcode_translation(task_id: str, req: HardcodeRequest, cfg: AppC
                 return
             while state.paused and not state.cancelled:
                 await asyncio.sleep(0.5)
+            _meta: dict = {}
             try:
-                results = await engine.translate_batch(batch_texts, req.target_lang)
+                # v1.4.6 修复：传 meta= 拿 per-call 失败状态——否则无法区分「AI 保留原文」
+                # 和「请求失败回原文」，失败被静默吞掉（state.failed 恒 0，用户无任何提示）
+                results = await engine.translate_batch(batch_texts, req.target_lang, meta=_meta)
             except Exception as exc:
                 results = list(batch_texts)
                 for t0 in batch_texts:
                     state.failed += 1
                     state.progress.append({"status": "warn", "key": "hardcode",
                                            "error": f"翻译失败：{t0[:40]}（{type(exc).__name__}）"})
+            _failed = set(_meta.get("failed") or ())
             for k, i in enumerate(idxs):
-                translated_by_idx[i] = results[k] if k < len(results) else texts[i]
+                if k >= len(results):
+                    # 返回条数不足：缺的条目回原文并计 failed（不静默）
+                    translated_by_idx[i] = texts[i]
+                    state.failed += 1
+                    continue
+                tr = results[k]
+                if tr == texts[i] and texts[i] in _failed:
+                    # 请求失败回原文 → 计 failed（AI 保留原文不算失败）
+                    state.failed += 1
+                translated_by_idx[i] = tr
 
         await asyncio.gather(*(_run_batch(idxs, bt) for idxs, bt in _batches))
         # 写回映射 + 记忆（仅真译文写记忆：失败回原文 / AI 保留原文都不写，防记忆污染固化失败）
@@ -149,5 +162,12 @@ async def run_hardcode_translation(task_id: str, req: HardcodeRequest, cfg: AppC
         store.save(state)
     finally:
         # 任务终态（done/failed/cancelled）后清理任务级中间产物（temp），产物保留（C）
+        # v1.4.6 修复：关闭引擎 httpx 连接池（对齐 auto_flow）——否则每次硬编码任务
+        # 结束连接池不释放，反复多任务累积 HTTP 连接/文件描述符（资源泄漏）
+        try:
+            if hasattr(engine, "aclose"):
+                await engine.aclose()
+        except Exception:
+            pass
         if state.status in ("done", "failed", "cancelled"):
             cleanup_task_work(work_dir, task_id)

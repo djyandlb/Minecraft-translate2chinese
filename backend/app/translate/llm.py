@@ -201,6 +201,15 @@ class LLMClient:
             if _c != self.concurrency:
                 self.concurrency = _c
                 self._conc_sem = None      # 旧池废弃，下次按新值懒重建
+                # v1.4.6 修复：连接池大小 = 并发×2（_get_client 里算），热更新并发必须
+                # 重建 httpx 客户端——否则连接池仍旧并发（如 4×2=20），高并发下连接排队
+                if self._client is not None:
+                    try:
+                        import asyncio as _aio
+                        _aio.ensure_future(self._client.aclose())
+                    except Exception:
+                        pass
+                    self._client = None   # 置 None，下次 _get_client() 按新并发重建连接池
                 # v1.2.9（Agent recheck）：热更新并发同步 rate_gate 桶容量（min_cap）——
                 # 否则初始并发 4 热更新 16 后桶容量仍 4 → 并发又被限回 4（「×16 显示但串行」复现）
                 if self.rate_gate is not None and hasattr(self.rate_gate, "_min_cap"):
@@ -384,6 +393,10 @@ class LLMClient:
                     return
                 if self.rate_gate is not None:
                     await self.rate_gate.acquire()
+                    # v1.4.6 修复：acquire 等令牌期间其他 chunk 可能已撞 401 置 fatal，
+                    # 醒来必须复查——否则本 chunk 白打一次请求（auto 低速率下尤为常见）
+                    if ctx["fatal"]:
+                        return
                 async with sem:
                     # v1.2.8 并发生效可视化：每 chunk 请求开始回调（pipeline 聚合 ×N）
                     if self.on_chunk_start is not None:
@@ -612,6 +625,13 @@ class LLMClient:
         # 切批前抖动退避（0.4-0.6s）让网络有恢复窗口、防惊群。
         if len(todo) > 1:
             _kind = ctx.get("kind") or "other"
+            # v1.4.6 修复：rejected（4xx 配置/数据错）是不可恢复错误，切批重试纯浪费
+            #（最坏 15 次请求全失败才放弃）。直接整块记 failed 交上层（上层 _flush 判
+            # _retryable 不含 rejected → 不会重试，明确计 failed 带原因）。
+            if _kind == "rejected":
+                for _i, _t in todo:
+                    ctx["failed"].add(_t)
+                return
             _max_depth = _MAX_NET_SPLIT_DEPTH if _kind in _NET_KINDS else _MAX_SPLIT_DEPTH
             if depth < _max_depth:
                 await asyncio.sleep(0.5 * random.uniform(0.8, 1.2))
@@ -689,6 +709,10 @@ class LLMClient:
         # v1.2.9：run_chunk 已取令牌（gate_acquired=True）时透传不重复
         if not gate_acquired and self.rate_gate is not None:
             await self.rate_gate.acquire()
+            # v1.4.6 修复：等令牌期间其他请求可能已撞 401 置 fatal，醒来复查避免白打请求
+            if ctx["fatal"]:
+                ctx["failed"].add(text)
+                return text
         try:
             resp = await client.post(f"{self.base_url}/chat/completions", json=body)
             resp.raise_for_status()

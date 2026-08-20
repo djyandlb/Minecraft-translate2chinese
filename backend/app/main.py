@@ -682,7 +682,7 @@ async def test_throughput(payload: dict = None):
     # v1.3.8 并发线性爬坡（_climb_concurrency）：从 1 逐档 +1 爬到 MAX_CONC，每档 1 批
     # 验证——精确测到顶（翻倍档位断档太粗，真实顶 30 会爬到 32 撞了回退 16 浪费一半）
 
-    async def _measure_w() -> tuple[float, bool]:
+    async def _measure_w() -> tuple[float, bool, int]:
         """低并发测平均单批耗时 W（秒）。全失败返回 (30, False)。
 
         v1.3.8：测 W 用 rpm=100000（不触发限流）——原 rpm=rpm_eff（auto 时 0→rate_gate
@@ -763,15 +763,17 @@ async def test_throughput(payload: dict = None):
                 _w = _t.time() - _t0
                 # v1.4.6 判定逻辑：
                 # - fatal（鉴权失败）→ 该档不稳（重试无用）
-                # - failed 含全部请求条目 → 整批失败，该档不稳
+                # - failed 占请求条目 >50% → 该档不稳定（部分失败也判不稳，
+                #   否则 8 条探针 7 条失败仍判「稳定」会被选为最终并发）
                 #   （kind=ratelimit → hit_limit=True，标记撞过限流）
-                # - 部分条目失败（非全部）→ 请求成功，该档稳定
                 if _m.get("fatal"):
                     return cc, 0.0, False, False
                 _failed = set(_m.get("failed") or ())
                 _req_set = set(req)
-                if _failed and _req_set and _failed >= _req_set:
-                    return cc, 0.0, False, (_m.get("kind") or "") == "ratelimit"
+                if _req_set:
+                    _fail_cnt = len(_failed & _req_set)
+                    if _fail_cnt * 2 > len(_req_set):
+                        return cc, 0.0, False, (_m.get("kind") or "") == "ratelimit"
                 return cc, _w, True, False
             except Exception:
                 return cc, 0.0, False, False
@@ -781,9 +783,16 @@ async def test_throughput(payload: dict = None):
                 except Exception:
                     pass
 
-        results = await asyncio.gather(*(_probe_level(cc) for cc in _levels))
+        # v1.4.6 修复：分波并行（每波 8 档，组间串行）——原 64 档同时 gather 打同一
+        # API，瞬时在途并发 = Σ(1..64)≈2080，低档必然被高档挤占、全灭 →「并发压力测试
+        # 失败：连并发1都请求失败」。分波后每波 8 档（在途 ≈Σ8 档）互不挤占，测的才是
+        # 「某并发下的真实稳定性」。快 API 每档 1 批（0.5s），8 波 ≈4s，时间可控。
+        _WAVE = 8
+        results: list = []
+        for _wi in range(0, len(_levels), _WAVE):
+            _wave = _levels[_wi:_wi + _WAVE]
+            results.extend(await asyncio.gather(*(_probe_level(cc) for cc in _wave)))
         # 判定：从最高档往下找「连续稳定的最高并发」——撞限流/失败的是不稳定的
-        #（慢 API 预算内并行全测，不逐档串行等；并发 1 成功是底线）
         _by_level = {cc: (ok, w, hit) for cc, w, ok, hit in results}
         for cc in reversed(_levels):
             ok, w, hit = _by_level[cc]
@@ -863,6 +872,11 @@ def _check_resume(path_str: str) -> dict:
     """
     try:
         p = Path(path_str)
+        # v1.4.6 修复：目录也先 unwrap_bare_wrapper（对齐 auto_flow.run() 的 project_id）——
+        # 带单层包裹的目录（zip 解压成 xxxx/主文件夹/）run() 用内层指纹，这里必须一致，
+        # 否则 detect 判「不可续联」而实际 run() 能续联（指纹 md5 不同）
+        if p.is_dir():
+            p = unwrap_bare_wrapper(p)
         # 修复：与 run() 的 project_id 一致——jar 也按内容指纹（is_file），目录才用目录指纹
         proj = (archive_fingerprint(p) if (is_archive(p) or p.is_file()) else dir_fingerprint(p))
     except Exception:
