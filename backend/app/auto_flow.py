@@ -788,8 +788,14 @@ class AutoFlow:
             self._active_chunks = max(0, self._active_chunks - 1)
             _push_chunk_status(n)
 
-        async def _flush() -> None:
-            """攒满一批 → 一次批量翻译 → 逐条写回记忆/产物/进度。"""
+        async def _flush(batch: list[dict]) -> None:
+            """翻译一批（batch 参数）→ 逐条写回记忆/产物/进度。
+
+            v1.4.6：改为接受 batch 参数（worker pool 并发调用，不再串行 await）。
+            内部用 pending 别名保持原逻辑引用不变；batch 是独立列表（主循环每批新建），
+            不 clear 不影响主循环的 pending 变量。
+            """
+            pending = batch
             if not pending:
                 return
             texts = [p["text"] for p in pending]
@@ -805,16 +811,12 @@ class AutoFlow:
             try:
                 # translate_fn(texts, reasons)：reasons 与 texts 对齐，供 AI 审查反馈重翻
                 # （每条携带上次审查不合格原因，AI 针对原因修正——用户诉求「翻译到合格」）
+                # v1.4.6：回调已由 worker pool 在外层一次性挂载（并发 flush 共用），
+                # 这里不再反复设置/恢复（并发下会互相覆盖）；_active_chunks 由
+                # _chunk_start_cb/_chunk_done_cb 的 +1/-1 维护，不在此清零
                 if _chunk_ok:
-                    _s0, _d0 = _eng.on_chunk_start, _eng.on_chunk_done
-                    _eng.on_chunk_start = _chunk_start_cb    # 闭包引用（非 self.xxx）
-                    _eng.on_chunk_done = _chunk_done_cb
-                    try:
-                        _translated = await translate_fn(
-                            texts, [p.get("reason", "") for p in pending])
-                    finally:
-                        _eng.on_chunk_start, _eng.on_chunk_done = _s0, _d0
-                        self._active_chunks = 0   # 本次 flush 结束，清零防跨批残留
+                    _translated = await translate_fn(
+                        texts, [p.get("reason", "") for p in pending])
                 else:
                     _translated = await translate_fn(
                         texts, [p.get("reason", "") for p in pending])
@@ -1092,7 +1094,31 @@ class AutoFlow:
                 except Exception:
                     pass
                 self._last_progress_save = _now
-            pending.clear()
+            # v1.4.6：不再 pending.clear()——batch 是独立列表（主循环每批新建传参），
+            # clear 只影响本次 batch，无意义且干扰并发（worker pool 下 batch 独立）。
+
+        # v1.4.6 worker pool 补位制度（用户诉求：攒够 batch_size 就提交翻译，并行 = 同一
+        # 时间能跑的数量，前面完成后面补位，不是一批等一批）：
+        # - 攒够 batch_size → create_task 提交 _flush（不 await，主循环继续攒下一批）
+        # - _flush_sem 限制同时运行的 flush 数 = 引擎并发（translate_batch 每批 1 个请求）
+        # - 前面的完成释放槽位 → 排队的自动补位（信号量天然实现）
+        _flush_sem = asyncio.Semaphore(
+            max(1, int(getattr(self.engine, "concurrency", 1) or 1)))
+        _flush_tasks: list[asyncio.Task] = []
+        # v1.4.6：on_chunk 回调一次性挂载（并发 flush 共用），收尾恢复原值——
+        # 原来每次 _flush 设置/恢复，并发时互相覆盖导致进度显示失效
+        _cbe = getattr(self, "engine", None)
+        _saved_ocs = _saved_ocd = None
+        _cb_ok = bool(_cbe is not None and hasattr(_cbe, "on_chunk_start"))
+        if _cb_ok:
+            _saved_ocs, _saved_ocd = _cbe.on_chunk_start, _cbe.on_chunk_done
+            _cbe.on_chunk_start = _chunk_start_cb
+            _cbe.on_chunk_done = _chunk_done_cb
+
+        async def _flush_limited(batch: list[dict]) -> None:
+            """拿槽位后翻译一批（信号量控制并发，完成即补位）。"""
+            async with _flush_sem:
+                await _flush(batch)
 
         for item in items:
             if self.state.cancelled:
@@ -1178,17 +1204,29 @@ class AutoFlow:
                         self.memory.save()
                 self.store.save(self.state)
                 continue
-            # 需走引擎：收集入批，攒满 batch_size 一次性批量翻译（LLM 并发/批次生效）。
+            # 需走引擎：收集入批，攒满 batch_size 提交翻译任务（worker pool，不 await）
             # reason（审查不合格原因）：review 重翻时携带，feedback 注入 prompt 让 AI 针对修正
             pending.append({"key": key, "text": text, "sink": sink,
                             "reason": item.get("reason", ""),
                             "mod": src_mod, "file": src_file})
-            # v1.4.6 修复：攒够 batch_size 就触发翻译，不需要攒够 batch_size * concurrency
-            # 并发由 translate_batch 内部的信号量控制，不需要在外面攒批
-            # batch_size=1（漏翻逐条重翻）保持逐条专注不放大；收尾 flush 剩余不足阈值的照发。
+            # v1.4.6 worker pool 补位：攒够 batch_size 就 create_task 提交（不 await），
+            # 主循环继续攒下一批；_flush_sem 限制并发数，前面完成槽位释放后面自动补位。
+            # batch_size=1（漏翻逐条重翻）保持逐条专注不放大。
             if len(pending) >= batch_size:
-                await _flush()
-        await _flush()
+                _flush_tasks.append(asyncio.create_task(_flush_limited(pending)))
+                pending = []
+        # 收尾：剩余不足 batch_size 的批次也提交，等所有翻译任务完成
+        if pending:
+            _flush_tasks.append(asyncio.create_task(_flush_limited(pending)))
+        if _flush_tasks:
+            await asyncio.gather(*_flush_tasks)
+        # 恢复 on_chunk 回调（worker pool 结束，防影响后续阶段/任务）
+        if _cb_ok:
+            try:
+                _cbe.on_chunk_start, _cbe.on_chunk_done = _saved_ocs, _saved_ocd
+            except Exception:
+                pass
+        self._active_chunks = 0
 
     # ---------- 审查管道（翻译与审查并行：边翻译边审查，审查通过才写回/显示） ----------
 
@@ -2288,123 +2326,126 @@ class AutoFlow:
             self._set_stage("hardcode")
         if isinstance(self.engine, LLMClient):
             # LLM 引擎：AI 判断「是否用户可见」并翻译（批量）
+            # v1.4.6 优化：合并所有 jar 的候选**一次批量判断**——原逐 jar 串行调用
+            # ai_judge_translate，jar 候选少时每 jar 只发 1 批请求，几十个 jar 排队串行
+            # （用户「排着队在翻译」）。合并后所有 jar 候选一起判断，ai_judge_translate
+            # 内部批次 gather 并行 + 并发信号量补位，jar 之间不再串行等待。
+            # 逐批推进进度：ai_judge 每判断完一批回调，进度条实时涨（用户反馈
+            # 「硬编码时进度条不涨」——不能等全部判断完才一次性 done）
+            def _judge_start(n: int) -> None:
+                self.state.progress.append({"status": "translating", "count": n,
+                                            "note": "AI 判断硬编码"})
+                self.store.save(self.state)
+            def _judge_done(n: int) -> None:
+                # 批完成：逐批推进 done（续联不重复加）
+                self._bump_stage(n) if not self._resume else self._bump_stage_only(n)
+                self.store.save(self.state)
+            # 第一遍：收集所有 jar 的 fresh 候选 + 缓存命中
+            # 省 token（用户诉求）：硬编码字符串跨 jar 重复率极高，判断过写记忆后续复用
+            _cached_by_jar: dict = {}          # jar -> {text: trans}
+            _excluded_cached_by_jar: dict = {}  # jar -> [text]
+            _all_fresh: list[dict] = []          # 候选带 jar 标记
+            _cached_n = 0
             for jar, cands in self.hard_candidates_by_jar.items():
                 if self.state.cancelled:
-                    # B 审查 🟡3：LLM 分支同样响应取消（照阶段 1/2 模式）。
-                    # 原巨型函数里这是函数级 return（中断整个流程）；拆分后置 _aborted，
-                    # run() 在阶段调用后检查并中断，避免继续 build 把 status 覆盖成 done。
                     self.state.status = "cancelled"
                     self.store.save(self.state)
                     self._aborted = True
                     return
                 await self._wait_if_paused()
-                try:
-                    # 逐批推进进度：ai_judge 每判断完一批回调，进度条实时涨（用户反馈
-                    # 「硬编码时进度条不涨」——不能等全部判断完才一次性 done）
-                    def _judge_start(n: int) -> None:
-                        # 批请求前：先给「正在 AI 判断 N 条」反馈——批请求（LLM 10-30 秒）
-                        # 期间进度/明细不静止，与语言文件阶段批前 translating 标记对齐
-                        # （进度条重写根因 2）
-                        self.state.progress.append({"status": "translating", "count": n,
-                                                    "note": "AI 判断硬编码"})
-                        self.store.save(self.state)
-                    def _judge_done(n: int) -> None:
-                        # 批完成：逐批推进 done 与 hardcode 阶段明细（根因 1：不再整批静默）。
-                        # 修复（recheck）：续联时硬编码候选全命中缓存不重判，无条件 _bump_stage
-                        # 会重复加 done（基准已含）→ 改 _bump_stage_only，与 pipeline 语义一致
-                        self._bump_stage(n) if not self._resume else self._bump_stage_only(n)
-                        self.store.save(self.state)
-                    # 省 token（用户诉求：14119 条候选烧 361 万 input token）：
-                    # 硬编码字符串**跨 jar 重复率极高**（同文本出现在多个 mod）。判断过
-                    # 一次的结果写记忆（翻译→译文；排除→原文标记），后续 jar 命中直接
-                    # 复用/跳过，不再重复烧 AI 判断 token。续联/重跑也命中缓存不重判。
-                    _cached_map: dict[str, str] = {}
-                    _fresh: list[dict] = []
-                    _cached_n = 0
-                    for c in cands:
-                        c_text = c["text"]
-                        cached = self.memory.get(c_text, self.req.target_lang)
-                        if cached and cached != c_text:
-                            _cached_map[c_text] = cached     # 已翻译过 → 直接复用译文
-                            _cached_n += 1
-                        elif cached == c_text:
-                            # 记忆存原文 = 排除/保留标记（此前判定非用户可见）→ 跳过
-                            self.hard_excluded_by_jar.setdefault(jar, []).append(c_text)
-                            _cached_n += 1
-                        else:
-                            _fresh.append(c)                 # 未判定过 → 才走 AI
-                    if _cached_n:
-                        # 缓存命中推进 done（total 含全部候选）。修复（recheck）：续联时
-                        # 用 _bump_stage_only（基准已含，防硬编码阶段 done 重复累计）
-                        self._bump_stage(_cached_n) if not self._resume else self._bump_stage_only(_cached_n)
-                    judged = await ai_judge_translate(self.engine, _fresh, self.req.target_lang,
-                                                      known_translations=dict(sorted(
-                                                          self.project_terms.items(),
-                                                          key=lambda kv: len(kv[0]))[:30]),
-                                                      on_batch_start=_judge_start,
-                                                      on_batch_done=_judge_done,
-                                                      silly_mode=self.silly)
-                except Exception as exc:
-                    # 失败 → 整批候选计入 failed（它们确实未翻译成功），不扣减 total；
-                    # done+failed 与 total 的自洽由 build 阶段 total 修正兜底（下限 done+failed）
-                    self.state.failed += len(cands)
-                    self.state.progress.append({"status": "warn",
-                                                "error": f"{jar.name} AI 判断硬编码失败：{exc}"})
-                    continue
-                # P0-2：兼容旧式 mock（dict）与三分类 AiJudgeResult
+                for c in cands:
+                    c_text = c["text"]
+                    cached = self.memory.get(c_text, self.req.target_lang)
+                    if cached and cached != c_text:
+                        _cached_by_jar.setdefault(jar, {})[c_text] = cached   # 复用译文
+                        _cached_n += 1
+                    elif cached == c_text:
+                        _excluded_cached_by_jar.setdefault(jar, []).append(c_text)  # 排除标记
+                        _cached_n += 1
+                    else:
+                        _fc = dict(c)
+                        _fc["jar"] = jar
+                        _all_fresh.append(_fc)
+            if _cached_n:
+                # 缓存命中推进 done（续联不重复加）
+                self._bump_stage(_cached_n) if not self._resume else self._bump_stage_only(_cached_n)
+            # 一次批量判断（内部批次 gather 并行 + 并发补位）
+            try:
+                judged = await ai_judge_translate(self.engine, _all_fresh, self.req.target_lang,
+                                                  known_translations=dict(sorted(
+                                                      self.project_terms.items(),
+                                                      key=lambda kv: len(kv[0]))[:30]),
+                                                  on_batch_start=_judge_start,
+                                                  on_batch_done=_judge_done,
+                                                  silly_mode=self.silly)
+            except Exception as exc:
+                # 失败 → fresh 候选计入 failed（build 阶段 total 修正兜底）
+                self.state.failed += len(_all_fresh)
+                self.state.progress.append({"status": "warn",
+                                            "error": f"AI 判断硬编码失败：{exc}"})
+                judged = None
+            # 判断期间可能被取消（ai_judge 批回调置取消）→ 拦截，不分配结果、状态保持 cancelled
+            if self.state.cancelled:
+                self.state.status = "cancelled"
+                self.store.save(self.state)
+                self._aborted = True
+                return
+            # 第二遍：按 jar 分配判断结果写回
+            if judged is not None:
                 if isinstance(judged, dict):
-                    mapping = judged
-                    unresolved: list[str] = []
-                    excluded: list[str] = []
+                    mapping_all = dict(judged)
+                    unresolved_all: list[str] = []
+                    excluded_all: list[str] = []
                 else:
-                    mapping = judged.translations
-                    unresolved = judged.unresolved
-                    excluded = judged.excluded
-                    # 账本校验用（AI 明确排除 + 缓存排除都记，防漏）
-                    self.hard_excluded_by_jar.setdefault(jar, []).extend(excluded)
-                mapping = dict(mapping)
-                mapping.update(_cached_map)   # 合并缓存复用译文（不重复判断的部分）
-                if mapping:
-                    # 修复：清理译文无效 surrogate（写 jar utf-8 崩溃根因）
-                    mapping = {t: clean_surrogates(tr) for t, tr in mapping.items()}
-                    self.hard_mappings[jar] = mapping
-                    # B 审查 🔵5：AI 判断译文写回记忆，后续语言文件/其他 jar 同串直接命中
-                    for text, trans in mapping.items():
-                        # 名称归一化：硬编码译文与语言文件同原文时统一为规范译名
-                        trans = self._apply_name_norm(text, trans)
-                        mapping[text] = trans   # 修复（recheck #6）：归一化结果回写 hard_mappings（否则产物用未统一译名）
-                        self.memory.set(text, self.req.target_lang, trans)
-                        self._record_consistency(text, trans)   # 一致性统计（兜底归一化用）
-                # 排除决策写记忆（原文标记）：后续 jar 同文本命中直接跳过，不重复判断
-                for t in excluded:
-                    if self.memory.get(t, self.req.target_lang) != t:
-                        self.memory.set(t, self.req.target_lang, t)
-                # P0-2：exclude（LLM 明确判定非用户可见）与 unresolved（未判定）分开报告。
-                # 修复（recheck）：skipped 含缓存排除（此前历史判定非用户可见），措辞不能
-                # 全算成「AI 判定」误导——改为「非用户可见或历史已排除」
-                skipped = max(0, len(cands) - len(mapping) - len(unresolved))
-                if skipped > 0:
-                    self.state.progress.append({"status": "warn",
-                                                "error": (f"{jar.name}: {skipped} 条硬编码被判定"
-                                                          f"非用户可见或历史已排除，已跳过")})
-                if unresolved:
-                    preview = "、".join(unresolved[:5]) + ("…" if len(unresolved) > 5 else "")
-                    self.state.progress.append({"status": "warn",
-                                                "error": (f"{jar.name}: {len(unresolved)} 条硬编码判断不明确"
-                                                          f"（已保持原文不翻译，只翻判断准的）：{preview}")})
-                    # 进报告（翻译报告可见全部未翻译明细）
-                    for u in unresolved:
-                        self.failures.append({"text": u[:50],
-                                              "reason": "保留原文：AI 判断不明确（模棱两可），选择不翻译"})
-                    self.hard_unresolved_by_jar[jar] = unresolved
-                # B 审查 🔵6：LLM 分支补一条汇总 progress（judged/visible 便于前端展示）
-                # 注意：done 已由 _judge_progress 逐批累加（total 含全部硬编码候选），不再重复加
-                self.state.progress.append({"jar": jar.name, "judged": len(cands),
-                                            "visible": len(mapping), "unresolved": len(unresolved),
-                                            "status": "done"})
-                if self.state.done % 10 == 0:
-                    self.memory.save()
-                    self.store.save(self.state)
+                    mapping_all = judged.translations
+                    unresolved_all = judged.unresolved
+                    excluded_all = judged.excluded
+                for jar, cands in self.hard_candidates_by_jar.items():
+                    cand_texts = {c["text"] for c in cands}
+                    mapping = dict(_cached_by_jar.get(jar, {}))
+                    for t in cand_texts:
+                        if t in mapping_all:
+                            mapping[t] = mapping_all[t]
+                    if mapping:
+                        # 清理译文无效 surrogate（写 jar utf-8 崩溃根因）
+                        mapping = {t: clean_surrogates(tr) for t, tr in mapping.items()}
+                        self.hard_mappings[jar] = mapping
+                        # AI 判断译文写回记忆，后续语言文件/其他 jar 同串直接命中
+                        for text, trans in mapping.items():
+                            trans = self._apply_name_norm(text, trans)
+                            mapping[text] = trans
+                            self.memory.set(text, self.req.target_lang, trans)
+                            self._record_consistency(text, trans)
+                    excluded = [t for t in excluded_all if t in cand_texts]
+                    excluded += _excluded_cached_by_jar.get(jar, [])
+                    if excluded:
+                        self.hard_excluded_by_jar.setdefault(jar, []).extend(excluded)
+                        # 排除决策写记忆（原文标记）：后续 jar 同文本命中直接跳过
+                        for t in excluded:
+                            if self.memory.get(t, self.req.target_lang) != t:
+                                self.memory.set(t, self.req.target_lang, t)
+                    unresolved = [t for t in unresolved_all if t in cand_texts]
+                    skipped = max(0, len(cands) - len(mapping) - len(unresolved))
+                    if skipped > 0:
+                        self.state.progress.append({"status": "warn",
+                                                    "error": (f"{jar.name}: {skipped} 条硬编码被判定"
+                                                              f"非用户可见或历史已排除，已跳过")})
+                    if unresolved:
+                        preview = "、".join(unresolved[:5]) + ("…" if len(unresolved) > 5 else "")
+                        self.state.progress.append({"status": "warn",
+                                                    "error": (f"{jar.name}: {len(unresolved)} 条硬编码判断不明确"
+                                                              f"（已保持原文不翻译，只翻判断准的）：{preview}")})
+                        for u in unresolved:
+                            self.failures.append({"text": u[:50],
+                                                  "reason": "保留原文：AI 判断不明确（模棱两可），选择不翻译"})
+                        self.hard_unresolved_by_jar[jar] = unresolved
+                    # 汇总 progress（judged/visible 便于前端展示）
+                    self.state.progress.append({"jar": jar.name, "judged": len(cands),
+                                                "visible": len(mapping), "unresolved": len(unresolved),
+                                                "status": "done"})
+                    if self.state.done % 10 == 0:
+                        self.memory.save()
+                        self.store.save(self.state)
         elif not self.engine_machine:
             # 兜底引擎（测试假引擎等）：硬编码批量全翻（无 AI 判断，复用批量流水线）。
             # total 已在初始计算含硬编码候选数（_translate_batch_pipeline 按条目推进 done）。
