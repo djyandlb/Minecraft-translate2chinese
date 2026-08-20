@@ -81,21 +81,21 @@ Move-Item "dist\像素译站" "dist\安装版\像素译站"
 Write-Host "  onedir 已移动到: dist\安装版\像素译站\"
 # onefile -> 便携版
 New-Item -ItemType Directory -Path "dist\便携版" -Force | Out-Null
-Move-Item "dist\像素译站.exe" "dist\便携版\release-v1.4.5-portable.exe"
-Write-Host "  onefile 已移动到: dist\便携版\release-v1.4.5-portable.exe"
+Move-Item "dist\像素译站.exe" "dist\便携版\release-v1.4.6-portable.exe"
+Write-Host "  onefile 已移动到: dist\便携版\release-v1.4.6-portable.exe"
 
 # ---------- [4/4] Inno Setup 安装版 ----------
 if ($iscc) {
     Write-Host "========== [4/4] Inno Setup 安装版 =========="
     & $iscc scripts\installer.iss
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup 编译失败（退出码 $LASTEXITCODE）" }
-    Write-Host "  安装版产物: dist\安装版\release-v1.4.5-setup.exe"
+    Write-Host "  安装版产物: dist\安装版\release-v1.4.6-setup.exe"
 } else {
     Write-Host "========== [4/4] 跳过 Inno Setup（未安装）=========="
 }
 
 Write-Host "=============================================="
 Write-Host "全部完成！"
-Write-Host "  安装版: dist\安装版\release-v1.4.5-setup.exe（需 Inno Setup 6）"
-Write-Host "  便携版: dist\便携版\release-v1.4.5-portable.exe"
+Write-Host "  安装版: dist\安装版\release-v1.4.6-setup.exe（需 Inno Setup 6）"
+Write-Host "  便携版: dist\便携版\release-v1.4.6-portable.exe"
 Write-Host "  onedir:  dist\安装版\像素译站\（安装版源）"
