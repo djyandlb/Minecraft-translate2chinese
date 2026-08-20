@@ -1280,8 +1280,14 @@ class AutoFlow:
             enqueue_fn=review_queue.put, **kw))
         # v1.4.8：审查攒批 20 条（更快开始、更快写回产出）——40 条攒批在翻译快时
         # 审查滞后、done 产出慢（用户「15分钟200条」根因之一）。20 条更快审查写回。
-        consumer = asyncio.create_task(self._review_pipeline(
+        # v1.4.10：**多个审查 consumer 并行**——原单一 consumer 串行审查（取20条→
+        # AI审查几秒→写回→再取），产出 = 20条/审查耗时（用户「token涨但十几条十几条出」根因）。
+        # 并发 consumer 各自从队列取、并行审查，产出速度 × 并发数（RPM 共享兜底防超限）。
+        _rb_conc = max(1, int(getattr(self.engine, "concurrency", 1) or 1))
+        _review_consumers = min(6, max(2, _rb_conc))   # 审查并发 consumer 数（2-6）
+        consumers = [asyncio.create_task(self._review_pipeline(
             review_queue, done_event, review_batch=20))
+            for _ in range(_review_consumers)]
         # 审查状态灯：审查管道活跃 → 前端红灯「静默审查中…」；全部审查完成 → 绿灯「审查完成」
         self.state.reviewing = True
         self.store.save(self.state)
@@ -1291,14 +1297,15 @@ class AutoFlow:
             except BaseException:
                 # 修复（recheck）：producer 抛异常/被取消时 consumer 成为孤儿任务——
                 # 取消并 await 收敛，避免其仍卡在审查网络请求里挂到排空退出（窗口期竞态写回）
-                consumer.cancel()
-                await asyncio.gather(consumer, return_exceptions=True)
+                for _c in consumers:
+                    _c.cancel()
+                await asyncio.gather(*consumers, return_exceptions=True)
                 raise
             finally:
                 # 修复：done_event 通知 consumer 排空退出（替代入队 sentinel——
                 # 队列满 + consumer 异常时 put(None) 会永久阻塞死锁）
                 done_event.set()
-            await consumer
+            await asyncio.gather(*consumers)
         finally:
             self.state.reviewing = False
             self.store.save(self.state)
