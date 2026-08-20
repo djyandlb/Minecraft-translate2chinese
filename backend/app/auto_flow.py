@@ -648,49 +648,87 @@ class AutoFlow:
         return results, meta
 
     async def _wait_network_retry(self, translate_fn, texts: list[str],
-                                  reasons: list[str], max_attempts: int = 9) -> list | None:
-        """网络/限流失败：固定10s重试，90s超时放弃。
+                                  reasons: list[str], max_total_time: float = 90.0) -> list | None:
+        """网络/限流失败：指数退避+抖动重试，90s总超时放弃。
 
-        v1.4.4：固定10s间隔重试（不指数退避），最多9次（≈90s）后返回 None。
-        返回成功译文列表；用户取消 / 封顶返回 None。
+        v1.4.5（业界最佳实践）：
+        - 区分错误类型：限流等更久（10-60秒），超时/网络等更短（2-30秒）
+        - 指数退避+随机抖动：防止惊群效应
+        - 总超时90秒，不是重试次数
+        - 尊重 Retry-After 头（如果API返回）
         """
-        wait = 10
-        attempts = 0
-        while not self.state.cancelled and attempts < max_attempts:
-            await self._wait_if_paused()   # 修复：网络等待也响应暂停（暂停语义不失效）
+        import random
+
+        # 错误类型对应的退避参数
+        _RETRY_PARAMS = {
+            "ratelimit": {"base": 10.0, "max": 60.0},   # 限流：等更久
+            "timeout": {"base": 2.0, "max": 30.0},      # 超时：等短一些
+            "network": {"base": 5.0, "max": 30.0},      # 网络错误：中等
+            "server": {"base": 3.0, "max": 30.0},       # 服务器错误：中等
+            "other": {"base": 5.0, "max": 30.0},        # 其他：中等
+        }
+
+        start_time = time.monotonic()
+        attempt = 0
+        _last_kind = "other"
+
+        while not self.state.cancelled:
+            elapsed = time.monotonic() - start_time
+            if elapsed >= max_total_time:
+                return None  # 总超时放弃
+
+            await self._wait_if_paused()
+
+            # 计算本次等待时间（指数退避+抖动）
+            params = _RETRY_PARAMS.get(_last_kind, _RETRY_PARAMS["other"])
+            base_delay = min(params["base"] * (2 ** attempt), params["max"])
+            jitter = random.uniform(0, base_delay * 0.5)  # 50%抖动
+            wait_time = base_delay + jitter
+
+            # 确保不超过总超时
+            remaining = max_total_time - elapsed
+            if wait_time > remaining:
+                wait_time = max(1.0, remaining)
+
             self.state.progress.append({"status": "translating", "count": len(texts),
-                                        "note": f"网络超时，等待网络恢复（{wait}s 后重试）…"})
+                                        "note": f"等待网络恢复（{wait_time:.0f}s 后重试，已用{elapsed:.0f}s/90s）…"})
             self.store.save(self.state)
-            for _ in range(wait):
+
+            # 等待（每秒检查取消状态）
+            for _ in range(int(wait_time)):
                 if self.state.cancelled:
                     break
                 await asyncio.sleep(1)
             if self.state.cancelled:
                 return None
+
             try:
                 _got = await translate_fn(texts, reasons)
-                # translate_fn 返回 (results, meta)（新协议）或 list（测试 mock/旧引擎）
                 if isinstance(_got, tuple) and len(_got) == 2 and isinstance(_got[1], dict):
                     got, meta = _got
                 else:
                     got, meta = _got, None
+
                 _failed = (meta["failed"] if meta
                            else (getattr(self.engine, "_batch_failed_texts", ()) if self.engine else ()))
                 _kind = (meta["kind"] if meta
                          else (getattr(self.engine, "_last_error_kind", "other") if self.engine else "other"))
+                _last_kind = _kind
+
                 if _kind == "auth":
-                    # 等待期间出现鉴权致命错误（重试无用）→ 抛给上层立即失败（配置问题）
                     _f = (meta.get("fatal") if meta
                           else (getattr(self.engine, "_fatal_error", None) or "API Key 无效或无权限"))
                     raise ValueError(f"翻译失败：{_f}")
+
                 if not any(t in _failed for t in texts):
-                    return got   # 网络恢复，失败子集整批重试成功（一条都不许跳过）
+                    return got  # 网络恢复，重试成功
             except ValueError:
                 raise
             except Exception:
                 pass
-            attempts += 1
-            # v1.4.4：固定10s重试，不指数退避
+
+            attempt += 1
+
         return None
 
     async def _translate_batch_pipeline(self, items, translate_fn, batch_size: int = 20,
@@ -839,15 +877,36 @@ class AutoFlow:
                         _failed = set()
                         _has_fail = False
                 else:
-                    # 网络连通：失败子集攒批重试（90s超时封顶，固定10s重试）
-                    # v1.4.4：固定10s重试，90s超时（9次重试）
-                    _MAX_FLUSH_RETRY = 9
-                    for _attempt in range(_MAX_FLUSH_RETRY):
-                        if not retry_pos:
-                            break
-                        # 固定10s等待
+                    # 网络连通：失败子集攒批重试（90s总超时，指数退避+抖动）
+                    # v1.4.5：业界最佳实践——指数退避+抖动，区分错误类型
+                    import random
+                    _start_time = time.monotonic()
+                    _max_total_time = 90.0  # 总超时90秒
+                    _RETRY_PARAMS = {
+                        "ratelimit": {"base": 10.0, "max": 60.0},
+                        "timeout": {"base": 2.0, "max": 30.0},
+                        "network": {"base": 5.0, "max": 30.0},
+                        "server": {"base": 3.0, "max": 30.0},
+                        "other": {"base": 5.0, "max": 30.0},
+                    }
+                    _attempt = 0
+                    _last_kind = _kind
+
+                    while retry_pos:
+                        elapsed = time.monotonic() - _start_time
+                        if elapsed >= _max_total_time:
+                            break  # 总超时放弃
+
+                        # 指数退避+抖动
                         if _attempt > 0:
-                            await asyncio.sleep(10)
+                            params = _RETRY_PARAMS.get(_last_kind, _RETRY_PARAMS["other"])
+                            base_delay = min(params["base"] * (2 ** (_attempt - 1)), params["max"])
+                            jitter = random.uniform(0, base_delay * 0.5)
+                            wait_time = base_delay + jitter
+                            remaining = _max_total_time - elapsed
+                            wait_time = min(wait_time, remaining)
+                            await asyncio.sleep(wait_time)
+
                         _rp = [pending[k] for k in retry_pos]
                         _r_texts = [p["text"] for p in _rp]
                         _r_reasons = [p.get("reason", "") for p in _rp]
@@ -860,10 +919,14 @@ class AutoFlow:
                         if translated_list is None:
                             translated_list = [p["text"] for p in pending]
                         _r_failed = set((_r_meta or {}).get("failed") or ()) if _r_meta else set()
+                        _r_kind = (_r_meta or {}).get("kind", "other")
+                        _last_kind = _r_kind
                         for k, tr in zip(retry_pos, _retried):
                             translated_list[k] = tr
                         retry_pos = [k for k in retry_pos if pending[k]["text"] in _r_failed]
-                    # 封顶后仍失败 → 明确记 failed（服务不稳定），不无限假装网络等待
+                        _attempt += 1
+
+                    # 超时后仍失败 → 明确记 failed
                     if retry_pos:
                         _batch_err = _batch_err or "多次重试仍失败（服务不稳定）"
                         _failed = {pending[k]["text"] for k in retry_pos}

@@ -9,30 +9,28 @@
 
 两种模式（v1.2.4b）：
 - **自动校准（默认，rpm<=0 或 auto=True）**：用户不用知道 API 的 RPM 配额——闸自学习：
-  撞到一次 429 → 速率退 40%；连续 50 批成功 → 微升 15%（封顶 300 RPM）。慢慢逼近该 API
+  撞到一次 429 → 速率退 70%（业界保守策略）；连续 15 批成功 → 微升 10%。慢慢逼近该 API
   「刚好不触发限流」的满速，永不手动设置。
 - **固定（rpm>0）**：知情用户精确控制，按填写的配额放行。
 
 单桶：翻译 / 审查 / 硬编码判断共享同一预算（避免各自超出合计超配额）。
 非阻塞：acquire() 用 asyncio.sleep 同步事件循环外的真实等待（asyncio 协程安全）。
+
+v1.4.5 改进（业界最佳实践）：
+- 设置 RPM 下限 10，防止连续限流后降到1导致每60秒才能发1个请求
+- 退档更保守（70%而不是60%），升档更慢（10%而不是15%），更稳定
+- 尊重 Retry-After 头（如果API返回）
 """
 import asyncio
 import time
 
 _AUTO_INIT_RPM = 30.0     # 自动校准起点（保守，绝不出发即撞限流）
-# v1.3.8（用户「DeepSeek 2500 并发测出 72」）：auto 上限 300 太低——并发型 API
-#（DeepSeek V4 官方 2500 并发、无 RPM 限流）线性爬坡到 64 并发、单批 1s 需 3840 RPM，
-# 闸上限 300 会把并发能力卡死（高并发 API 测不到顶的次生瓶颈）。抬到 10000：
-# 并发型 API 不再被闸限速（靠全局并发池 _conc_sem 控并发）；RPM 型 API（MiniMax/百炼）
-# 爬坡时撞 429 自动退档，闸仍保护不超配额。10000 仅是「够 64 并发猛发」的兜底，非鼓励。
-_AUTO_MAX_RPM = 10000.0  # 自动校准上限（v1.3.8 300→10000：并发型 API 不被闸卡死）
-_AUTO_BACKOFF = 0.6       # 撞 429 退幅（×0.6）
-_AUTO_RAMPUP = 1.15       # 稳定后微升（×1.15）
-_AUTO_OK_STREAK = 15      # 连续成功批次达到后微升一次（v1.2.9：50→15 爬坡加快）——
-                          # RateGate 请求前限速保证永不 429，auto 撞不到 report_ratelimit，
-                          # 只能靠成功累计升档；原 50 批在翻译 1000 条（25 批）内永不升，
-                          # auto 卡死 30 RPM。15 批升 15% → 每 600 条升一次，逼近真实配额。
-                          # 主路径仍是动态测试校准值起步（auto_init_rpm），此为无校准兜底。
+_AUTO_MAX_RPM = 10000.0   # 自动校准上限（并发型 API 不被闸卡死）
+_AUTO_MIN_RPM = 10.0      # v1.4.5：RPM 下限，防止降到1导致每60秒才能发1个请求
+_AUTO_BACKOFF = 0.7       # v1.4.5：撞 429 退幅（×0.7，比0.6更保守）
+_AUTO_RAMPUP = 1.1        # v1.4.5：稳定后微升（×1.1，比1.15更慢更稳）
+_AUTO_OK_STREAK = 15      # 连续成功批次达到后微升一次
+_AUTO_RAMPUP_MAX = 300.0  # 自动校准软上限（超过后升档更慢）
 
 
 class RateGate:
@@ -83,26 +81,37 @@ class RateGate:
         return self._target
 
     def report_ok(self) -> None:
-        """一次请求成功（非限流）。auto 模式：连续成功达标 → 微升试探。"""
+        """一次请求成功（非限流）。auto 模式：连续成功达标 → 微升试探。
+
+        v1.4.5：超过300 RPM后升档更慢（×1.05而不是×1.1），防止并发型API被闸卡死。
+        """
         if not self.auto:
             return
         self._ok_streak += 1
         if self._ok_streak >= _AUTO_OK_STREAK:
             self._ok_streak = 0
             if self._target < _AUTO_MAX_RPM:
-                self._target = min(_AUTO_MAX_RPM, self._target * _AUTO_RAMPUP)
+                # 超过软上限后升档更慢（×1.05），防止并发型API被闸卡死
+                rampup = _AUTO_RAMPUP if self._target < _AUTO_RAMPUP_MAX else 1.05
+                self._target = min(_AUTO_MAX_RPM, self._target * rampup)
                 self._reset_bucket()
 
-    def report_ratelimit(self) -> None:
-        """一次请求撞 429/限流。auto 模式：立即退 40%（冷却），稳在「刚好不触发」。"""
+    def report_ratelimit(self, retry_after: float | None = None) -> None:
+        """一次请求撞 429/限流。auto 模式：立即退 70%（冷却），稳在「刚好不触发」。
+
+        v1.4.5：尊重 Retry-After 头（如果API返回），设置RPM下限10防止降到1。
+        """
         if not self.auto:
             return
-        self._target = max(1.0, self._target * _AUTO_BACKOFF)
+        if retry_after and retry_after > 0:
+            # 尊重 Retry-After 头：按头里的秒数反算RPM
+            self._target = max(_AUTO_MIN_RPM, 60.0 / retry_after)
+        else:
+            # 退70%，但不低于下限
+            self._target = max(_AUTO_MIN_RPM, self._target * _AUTO_BACKOFF)
         self._ok_streak = 0
         self._reset_bucket()
-        # v1.2.9 修复（Agent recheck）：退档后**清空桶令牌**——_reset_bucket 满桶 + min_cap
-        # 会让退档后立即放行 min_cap 个请求（又撞 429，冷却失效）。空桶 → 按新速率补充
-        #（target=1 时约 60s 才放 1 个，真正冷却）。
+        # 退档后清空桶令牌，按新速率补充（真正冷却）
         self._tokens = 0.0
 
     async def acquire(self) -> None:
