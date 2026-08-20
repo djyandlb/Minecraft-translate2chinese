@@ -758,7 +758,9 @@ async def test_throughput(payload: dict = None):
                 await asyncio.wait_for(eng.translate_batch(req, "zh_cn", meta=_m),
                                        timeout=_timeout)   # 自适应超时
                 _w = _t.time() - _t0
-                if _m.get("failed"):
+                # v1.4.6 修复：并发压力测试只关心请求是否成功，而不是所有条目都成功翻译
+                # 如果有fatal错误（鉴权失败），才算失败
+                if _m.get("fatal"):
                     return cc, 0.0, False, (_m.get("kind") or "") == "ratelimit"
                 return cc, _w, True, False
             except Exception:
