@@ -14,6 +14,7 @@ import logging
 import re
 import sys
 import zipfile
+from collections import Counter
 from pathlib import Path
 
 import httpx
@@ -71,14 +72,22 @@ def _toml_mc_spec(zf: zipfile.ZipFile, toml_path: str) -> str | None:
 
 
 def infer_modpack_runtime(mods_dir: Path) -> tuple[str, str]:
-    """从 mods/ 元数据推断整合包 loader + MC 版本。
+    """从 mods/ 元数据推断整合包 loader + MC 版本（**众数投票**，不取第一个）。
 
     返回 (loader, mc_version)；loader ∈ {"fabric","forge","neoforge"}，
     无法推断时均为空串。遍历 mods/**/*.jar 读 fabric.mod.json /
-    neoforge.mods.toml / mods.toml，取第一个命中；单个损坏 jar 跳过不中断。
+    neoforge.mods.toml / mods.toml，统计每个 jar 声明的 loader/版本出现次数。
+
+    v1.5.0 修复（用户实测「1.21.4 整合包材质包版本不兼容」）：原实现取**第一个**
+    命中的 jar——mods 目录遍历顺序不稳定，碰巧命中声明「依赖范围下限」
+    （depends.minecraft=">=1.21"）的 jar → 判成 1.21 → pack_format 写成 34 →
+    1.21.4 游戏拒载。改众数：多数 mod 声明的主流版本胜出（1.21.4 整合包里
+    58/110 个 jar 声明 1.21.4），平局取版本最大。单个损坏 jar 跳过不中断。
     """
     if not mods_dir.is_dir():
         return ("", "")
+    loader_votes: Counter = Counter()
+    ver_votes: Counter = Counter()
     for jar in sorted(mods_dir.rglob("*.jar")):
         try:
             with zipfile.ZipFile(jar) as zf:
@@ -86,19 +95,36 @@ def infer_modpack_runtime(mods_dir: Path) -> tuple[str, str]:
                 if "fabric.mod.json" in names:
                     data = json.loads(zf.read("fabric.mod.json").decode("utf-8"))
                     depends = data.get("depends") or {}
-                    return ("fabric",
-                            _extract_mc_version(str(depends.get("minecraft", ""))) or "")
-                if "META-INF/neoforge.mods.toml" in names:
-                    return ("neoforge",
-                            _extract_mc_version(
-                                _toml_mc_spec(zf, "META-INF/neoforge.mods.toml")) or "")
-                if "META-INF/mods.toml" in names:
-                    return ("forge",
-                            _extract_mc_version(
-                                _toml_mc_spec(zf, "META-INF/mods.toml")) or "")
+                    v = _extract_mc_version(str(depends.get("minecraft", ""))) or ""
+                    if v:
+                        loader_votes["fabric"] += 1
+                        ver_votes[v] += 1
+                    continue
+                for toml, loader in (("META-INF/neoforge.mods.toml", "neoforge"),
+                                     ("META-INF/mods.toml", "forge")):
+                    if toml in names:
+                        v = _extract_mc_version(_toml_mc_spec(zf, toml)) or ""
+                        if v:
+                            loader_votes[loader] += 1
+                            ver_votes[v] += 1
+                        break
         except Exception:
             continue
-    return ("", "")
+    return (_top_vote(loader_votes), _top_vote(ver_votes))
+
+
+def _top_vote(votes: Counter) -> str:
+    """取出现次数最多的 key；平局取版本号最大（1.9 < 1.10 按数值比较，非字符串）。"""
+    if not votes:
+        return ""
+    best = max(votes.values())
+    cands = [k for k, c in votes.items() if c == best]
+    if len(cands) == 1:
+        return cands[0]
+    try:
+        return max(cands, key=lambda v: tuple(int(x) for x in v.split(".")))
+    except ValueError:
+        return max(cands)
 
 
 def build_vp_module(vp_pairs: dict[str, str]) -> list[dict]:

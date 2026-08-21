@@ -2374,9 +2374,10 @@ class AutoFlow:
                                             "note": "AI 判断硬编码"})
                 self.store.save(self.state)
             def _judge_done(n: int) -> None:
-                # 批完成：逐批推进 done（续联不重复加）
-                self._bump_stage(n) if not self._resume else self._bump_stage_only(n)
-                self.store.save(self.state)
+                # v1.5.0：初判批**不提前 bump done**——翻译完成计数等重判完全结束、
+                # 结果写回后一次性加（对齐翻译流程「审查过关才计完成」语义）。
+                # 进度活动靠 _judge_start 的「AI 判断硬编码」提示维持，不卡界面。
+                pass
             # 第一遍：收集所有 jar 的 fresh 候选 + 缓存命中
             # 省 token（用户诉求）：硬编码字符串跨 jar 重复率极高，判断过写记忆后续复用
             _cached_by_jar: dict = {}          # jar -> {text: trans}
@@ -2483,6 +2484,13 @@ class AutoFlow:
                     if self.state.done % 10 == 0:
                         self.memory.save()
                         self.store.save(self.state)
+            # v1.5.0：初判批未提前 bump done（_judge_done 空转），重判完全结束后
+            # 一次性加——translate/exclude/unresolved 全部处置完才算「翻译完成」
+            #（对齐翻译流程「审查过关才计完成」语义；续联只推进 stage 明细）。
+            self._bump_stage(len(_all_fresh)) if not self._resume else self._bump_stage_only(len(_all_fresh))
+            self.state.progress.append({"status": "done", "count": len(_all_fresh),
+                                        "note": "硬编码判断完成"})
+            self.store.save(self.state)
         elif not self.engine_machine:
             # 兜底引擎（测试假引擎等）：硬编码批量全翻（无 AI 判断，复用批量流水线）。
             # total 已在初始计算含硬编码候选数（_translate_batch_pipeline 按条目推进 done）。
@@ -2573,7 +2581,13 @@ class AutoFlow:
             # modjar → 单一汉化 jar：语言文件 + json/lines + 硬编码全写回一个 jar 副本。
             # 命名 {中文名}-{语言}化.jar（中文名取 resolve_mod_name，取不到回退原 stem；
             # 后缀「{语言}化」支持任意目标语言）。
-            for jar in self.jars:
+            # v1.5.0：逐 jar 推「正在构建汉化 jar i/N」——硬编码判断完成进入 build 后
+            # 界面有明确反馈（用户「判断完 build 干等」根因）；对齐硬编码扫描 i/N 风格。
+            _jar_n = len(self.jars)
+            for _ji, jar in enumerate(self.jars, 1):
+                self.state.progress.append({"status": "translating", "count": 0,
+                                            "note": f"正在构建汉化 jar {_ji}/{_jar_n}（{jar.name}）…"})
+                self.store.save(self.state)
                 jar_copy = self.out_dir / friendly_output_name(jar, self.req.target_lang)
                 try:
                     # 原 jar 只读铁律：先 copy2 副本再改。

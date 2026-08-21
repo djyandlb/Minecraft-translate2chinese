@@ -226,6 +226,10 @@ async function startQueue() {
       } else {
         job.status = 'failed'
         job.error = final ? (final.status === 'cancelled' ? '已取消' : '翻译失败') : '读取任务状态失败'
+        // v1.5.0：取消/失败后刷新「未完成项目（可续联）」列表——原只在启动时扫描，
+        // 取消/中断的任务不实时出现在续联列表，用户只能重启才看到（用户反馈根因）。
+        // done 分支不刷新：后端 finally 写满 progress 有时序竞态，成功项目靠启动检测自然消失。
+        loadProjects()
       }
       // 修复（recheck #3）：手动查看的任务已终态（done/failed/cancelled）→ 恢复跟随队列，
       // 右栏切回当前任务进度（不再永久锁定历史任务）

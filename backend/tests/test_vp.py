@@ -65,6 +65,35 @@ def test_infer_modpack_runtime_empty(tmp_path):
     assert infer_modpack_runtime(tmp_path) == ("", "")
 
 
+def test_infer_modpack_runtime_mode_vote(tmp_path):
+    """v1.5.0 众数投票：多数 mod 声明的主流版本胜出（用户 1.21.4 整合包根因——
+    原实现取第一个 jar 碰巧命中旧版本依赖声明 → pack_format 写错 → 材质包不兼容）。"""
+    for i in range(3):
+        _make_jar(tmp_path, f"m{i}.jar", {
+            "fabric.mod.json": json.dumps({"id": f"m{i}", "depends": {"minecraft": ">=1.21.4"}}),
+        })
+    _make_jar(tmp_path, "old.jar", {
+        "fabric.mod.json": json.dumps({"id": "old", "depends": {"minecraft": ">=1.20.1"}}),
+    })
+    loader, mc = infer_modpack_runtime(tmp_path)
+    assert loader == "fabric"
+    assert mc == "1.21.4"
+
+
+def test_infer_modpack_runtime_tie_takes_newest(tmp_path):
+    """众数平局（2:2）→ 取版本号最大（1.21.4 > 1.20.1，数值比较非字符串）。"""
+    for i in range(2):
+        _make_jar(tmp_path, f"n{i}.jar", {
+            "fabric.mod.json": json.dumps({"id": f"n{i}", "depends": {"minecraft": ">=1.21.4"}}),
+        })
+    for i in range(2):
+        _make_jar(tmp_path, f"o{i}.jar", {
+            "fabric.mod.json": json.dumps({"id": f"o{i}", "depends": {"minecraft": ">=1.20.1"}}),
+        })
+    loader, mc = infer_modpack_runtime(tmp_path)
+    assert mc == "1.21.4"
+
+
 # ---------- Modrinth 下载 ----------
 
 @pytest.mark.asyncio

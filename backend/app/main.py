@@ -375,7 +375,11 @@ def list_projects():
                 # 按钮。新格式存 status：非 done 状态（cancelled/failed/running）即使 done==total
                 # 也算未完成可续联；旧格式（无 status）仍按 done<total 兼容。
                 _st = (d.get("status") or "")
-                if (d.get("done", 0) > 0 and d.get("total", 0) > 0
+                # v1.5.0 续联放宽：去掉 done>0 硬条件——刚拖入还没翻完第一批就中断
+                # （取消/崩溃）的任务 done 可能为 0，但 status 非 done 且 total 已定
+                # → 仍应显示可续联（用户「主动取消的不续联，仅关窗才续联」根因之一）。
+                # total>0 = 任务真正开始过（扫描完成定死总量），total=0 不显示（无进度可续）。
+                if (d.get("total", 0) > 0
                         and (_st not in ("", "done") or d.get("done", 0) < d.get("total", 0))):
                     done, total = d["done"], d["total"]
                     # 修复：name 为空/哈希（旧版遗留 progress 没存名，或中断在取名前）→
