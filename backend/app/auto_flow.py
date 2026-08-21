@@ -2373,11 +2373,18 @@ class AutoFlow:
                 self.state.progress.append({"status": "translating", "count": n,
                                             "note": "AI 判断硬编码"})
                 self.store.save(self.state)
+            _judge_done_count = [0]   # 初判已处理累计（进行中反馈，不计入 done）
             def _judge_done(n: int) -> None:
-                # v1.5.0：初判批**不提前 bump done**——翻译完成计数等重判完全结束、
-                # 结果写回后一次性加（对齐翻译流程「审查过关才计完成」语义）。
-                # 进度活动靠 _judge_start 的「AI 判断硬编码」提示维持，不卡界面。
-                pass
+                # v1.5.0：初判批**不提前 bump done**——完成计数等重判完全结束、结果
+                # 写回后一次性加（对齐翻译流程「审查过关才计完成」语义）。
+                # 但推「进行中」反馈：判断期间 done 不动（20 条判断 API 慢时主进度条
+                # 静止像卡死，用户「单 mod 硬编码判定很慢很慢」观感根因）→ 明细持续
+                # 显示「已处理 X/N」，界面在动，完成仍一次跳。
+                _judge_done_count[0] += n
+                self.state.progress.append({"status": "translating", "count": n,
+                                            "note": (f"AI 判断硬编码"
+                                                     f"（已处理 {_judge_done_count[0]}/{len(_all_fresh)}）…")})
+                self.store.save(self.state)
             # 第一遍：收集所有 jar 的 fresh 候选 + 缓存命中
             # 省 token（用户诉求）：硬编码字符串跨 jar 重复率极高，判断过写记忆后续复用
             _cached_by_jar: dict = {}          # jar -> {text: trans}
