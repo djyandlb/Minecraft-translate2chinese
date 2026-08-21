@@ -28,13 +28,28 @@ def pack_mcmeta(pack_format: int | list[int], description: str = "MC Auto Transl
 
 
 def _pack_icon_path() -> Path | None:
-    """定位资源包图标 pack.png（frozen → _MEIPASS/assets；否则项目根 assets/）。"""
+    """定位资源包图标 pack.png。
+
+    frozen → **多候选路径**（v1.5.0 修复：用户 13:09 产物资源包无图标——frozen 单查
+    `_MEIPASS/assets`，但 PyInstaller 不同版本 onedir 的 `_MEIPASS` 可能指向 exe 目录
+    而非 `_internal`（datas 实际在 `_internal/assets`）→ 返回 None → 图标不复制 →
+    游戏显示默认图标）；开发 → 项目根 assets/。多候选命中即返回。
+    """
+    cands: list[Path] = []
     if getattr(sys, "frozen", False):
-        base = Path(getattr(sys, "_MEIPASS", "."))
+        _m = Path(getattr(sys, "_MEIPASS", "") or ".")
+        exe_dir = Path(sys.executable).resolve().parent
+        cands = [
+            _m / "assets" / "pack.png",                   # onefile 临时解压 / onedir _internal
+            exe_dir / "_internal" / "assets" / "pack.png",  # onedir（_MEIPASS 指向 exe 目录时）
+            exe_dir / "assets" / "pack.png",              # 便携版 exe 旁
+        ]
     else:
-        base = Path(__file__).resolve().parent.parent.parent
-    p = base / "assets" / "pack.png"
-    return p if p.exists() else None
+        cands = [Path(__file__).resolve().parent.parent.parent / "assets" / "pack.png"]
+    for p in cands:
+        if p.exists():
+            return p
+    return None
 
 
 def _ext_of(pack_format: int | list[int]) -> str:

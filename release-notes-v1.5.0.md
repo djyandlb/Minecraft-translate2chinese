@@ -7,6 +7,7 @@
 - **modjar 构建逐 jar 进度**：打包阶段显示「正在构建汉化 jar i/N（jar 名）」，判断完成进 build 不再干等
 - **断点续联判定放宽**：取消/中断（含刚拖入还没翻第一批）的任务也能显示可续联；前端取消/失败后实时刷新续联列表，不再只有重启才能续联
 - **1.21.4 整合包材质包版本不兼容修复**：detect 改众数投票——遍历全部 mods jar 统计版本声明（原取第一个 jar 碰巧命中旧版本依赖 → pack_format 写 34 被 1.21.4 游戏拒载），多数 mod 声明的主流版本胜出，1.21.4 正确写 46
+- **资源包图标丢失修复**：打包后 `_pack_icon_path()` 单查 `_MEIPASS/assets`——PyInstaller 部分版本 onedir 的 `_MEIPASS` 指向 exe 目录而非 `_internal`（datas 实际在 `_internal/assets`）→ 找不到 pack.png → 资源包无图标 → 游戏显示默认图标。改为多候选路径（_MEIPASS / exe 旁 `_internal` / exe 旁），任意命中即用
 
 ### 🎯 审查/产出提速（v1.5.0 初版）
 - **审查多 consumer 并行**：原单一审查 consumer 串行（取20条→AI审查几秒→写回→再取），产出 = 20条/审查耗时（用户「token涨但十几条十几条出」根因）。现在多个审查 consumer 并行，产出速度 × 并发数
