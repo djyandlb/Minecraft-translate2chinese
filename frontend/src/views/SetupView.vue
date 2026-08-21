@@ -462,9 +462,9 @@ async function saveAndClose() {
           <input type="number" v-model.number="tpm" min="0" max="100000000" step="1000" class="rpm-input">
           <span class="slider-val">TPM</span>
         </div>
-        <small class="sub">RPM <b>0 = 自动校准</b>（自学习 API 配额）；&gt;0 按值放行</small>
-        <small class="sub">TPM <b>0 = 自动/未知</b>（读到响应头自动用，读不到批=40）；&gt;0 → 批 = TPM ÷ 1000</small>
-        <p class="warn-tip">⚠️ <b>首次使用请先点「动态测试吞吐」校准档位</b>（约 30-60 秒，其中 RPM 校准要灌满一个 60s 限流窗口才能测准）：否则按默认保守档跑，API 可能跑不满、偏卡慢。预算闸默认自动校准 RPM，无需手动填写；已知配额可直接填数值跳过校准。</p>
+        <small class="sub">RPM <b>0 = 自动校准</b>，自学习 API 配额；大于 0 按填的值放行</small>
+        <small class="sub">TPM <b>0 = 自动</b>，读到响应头自动用，读不到时批=40；大于 0 时批 = TPM ÷ 1000</small>
+        <p class="warn-tip">⚠️ <b>首次使用请先点「动态测试吞吐」校准档位</b>，约 30-60 秒自动探测并发、批次、扫描的最优组合。不做这步按默认保守档跑，API 可能跑不满速、偏卡慢。预算闸默认自动校准 RPM，无需手动填写；已知配额可直接填数值跳过校准。</p>
       </div>
       <div class="field">
         <label>胡言乱语模式</label>

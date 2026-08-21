@@ -90,6 +90,28 @@ def _json_should_translate(text: str) -> bool:
     return should_translate(text, max_len=5000)
 
 
+# 通用排除：程序资源/渲染目录（业界标准 mc_translator excluded_paths / Fabulously
+# 只翻 lang——翻译只碰「明确文本载体」，程序资源绝不翻译）。
+# v1.5.0（用户 Sodium clouds.json 崩溃根因）：shader 配置被当文本翻译，资源路径
+# （minecraft:shaders/core/clouds→云）、uniform 名（ModelViewMatrix→模型视图矩阵）、
+# 枚举（SourceAlpha→源Alpha）全变中文 → 游戏找不到 shader 崩溃。这里在**路径层**
+# 统一排除这些目录，比值过滤更早更稳——无论未来采集规则怎么放宽都不翻它们。
+_NON_TEXT_DIRS = frozenset((
+    "shaders", "shaderpacks", "models", "textures", "blockstates",
+    "animations", "particles", "sounds", "font", "icons",
+))
+
+
+def _is_non_text_resource(rel: str) -> bool:
+    """路径是否命中程序资源/渲染目录（翻译必坏，统一跳过）。
+
+    命中清单**任一段**即排除（含 shaderpacks/ 顶层光影包目录、config 里的 shader
+    配置）。清单是渲染/资源专用段，正常文本路径（lang/教程书/进度）不含它们。
+    """
+    p = PurePosixPath(rel)
+    return any(seg in _NON_TEXT_DIRS for seg in p.parts)
+
+
 def _is_patchouli_json(path: str) -> bool:
     """Patchouli 帕秋莉教程书：assets/*/patchouli_books/*/en_us/...（剧情/教程正文）。"""
     p = PurePosixPath(path)
@@ -113,7 +135,11 @@ _ADV_TEXT_PATHS = {
 def _is_text_carrier_json(path: str) -> bool:
     """结构化 JSON 是否为「明确文本载体」（可翻译）——回归 Minecraft 汉化标准：
     只翻 lang + 教程书 + 进度，其余程序资源/配置 json（模型/材质/动画/配方/战利品/
-    config 参数）翻译必坏，且是大整合包十几万条噪音条目的根源（用户反馈 debug 难受）。"""
+    config 参数）翻译必坏，且是大整合包十几万条噪音条目的根源（用户反馈 debug 难受）。
+    v1.5.0：先过通用排除（shaders/models/textures 等程序资源，见 _is_non_text_resource）
+    ——防呆兜底：即使未来 text_carrier 规则放宽，shader 配置也绝不翻译。"""
+    if _is_non_text_resource(path):
+        return False
     return _is_patchouli_json(path) or _is_advancement_json(path)
 
 
@@ -124,6 +150,10 @@ def _is_pack_text_carrier(rel: str) -> bool:
     整合包自定义资源包/自带 lang（含 FTBQ 翻译键 ftbquestlocalizer、Create ponder 键等）
     全收，否则这些用户可见文本漏翻。"""
     p = PurePosixPath(rel)
+    # v1.5.0：通用排除——整合包目录里 resourcepacks/ 可能带 shaders/models 等程序
+    # 资源（尤其光影包 shaderpacks/），翻译必坏；先过 _is_non_text_resource 防呆。
+    if _is_non_text_resource(rel):
+        return False
     # 语言文件 assets/<mod>/lang/*.（含 kubejs/assets、自定义资源包）。
     # v1.3.9 修复（用户「FTB/KubeJS 没全量翻译」）：原只收 en_us（防破坏 mod 自带多语言），
     # 但漏了「只有 zh_cn 无 en_us」的 mod（FTB localizer 直接把英文写进 zh_cn 占位，
