@@ -43,6 +43,33 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _webview2_version() -> str | None:
+    """查系统 WebView2 Runtime 版本（注册表）；缺失返回 None。
+
+    v1.5.0（用户「其他电脑打开白屏」根因排查）：pywebview 依赖 WebView2 渲染，缺失或
+    版本过老时窗口白屏无反馈。启动前检测，缺失弹中文提示引导安装，不静默白屏。
+    """
+    import winreg
+    guid = r"{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    candidates = (
+        (winreg.HKEY_LOCAL_MACHINE,
+         rf"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{guid}"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{guid}"),
+        (winreg.HKEY_CURRENT_USER,
+         rf"Software\Microsoft\EdgeUpdate\Clients\{guid}"),
+    )
+    for hkey, sub in candidates:
+        try:
+            with winreg.OpenKey(hkey, sub) as k:
+                ver, _ = winreg.QueryValueEx(k, "pv")
+                if ver:
+                    return str(ver)
+        except OSError:
+            continue
+    return None
+
+
 def _run_server(port: int) -> None:
     import uvicorn
     from app.main import app   # 对象导入：PyInstaller 静态分析可收集整个 app 包
@@ -211,6 +238,24 @@ def main() -> None:
     """启动后台 API 服务 + 桌面窗口。"""
     # 标记桌面壳：/api/desktop 据此返回 true（前端下载等走桌面路径，不依赖 window.pywebview 检测）
     os.environ["MC_DESKTOP"] = "1"
+    # v1.5.0：检测 WebView2 Runtime——pywebview 依赖它渲染，缺失时窗口白屏无反馈
+    #（用户「其他电脑打开白屏」根因排查）。缺失弹中文提示并退出，引导安装后重开。
+    _wv = _webview2_version()
+    if not _wv:
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "缺少 Microsoft Edge WebView2 Runtime 组件，应用无法显示界面。\n\n"
+                "请先安装 WebView2 Runtime（微软官方免费组件）：\n"
+                "https://developer.microsoft.com/microsoft-edge/webview2/\n\n"
+                "安装完成后重新打开应用即可。",
+                "像素译站 - 缺少运行组件", 0x10)
+        except Exception:
+            pass
+        logger.error("缺少 WebView2 Runtime，应用退出")
+        return
+    logger.info("WebView2 Runtime 版本：%s", _wv)
     logger.info("桌面壳启动，端口 %s", (port := _free_port()))
     threading.Thread(target=_run_server, args=(port,), daemon=True).start()
     import webview  # 延迟导入：未装 pywebview 时不影响其余代码
