@@ -954,6 +954,21 @@ def _check_resume(path_str: str) -> dict:
             "progress_pct": None if completed else pct}
 
 
+# v1.5.0 修复（Prominence II 整合包被误判地图）：zip 内「地图存档」信号——
+# level.dat / region 区块数据。排除 config/ 等配置目录下的维度数据
+#（config/prominent/dimensions/*/region/ 是整合包自定义维度区块，不是存档，用户
+# 实测「卓越2.zip 被判成地图」根因）。纯地图包的 level.dat/region 在存档根或
+# world/ 下，不含这些段。
+_NON_WORLD_SEGS = ("config", "data", "resourcepacks", "shaderpacks", "mods")
+
+
+def _is_world_signal(n: str) -> bool:
+    """zip 条目是否为「地图存档」信号（level.dat / region 区块），排除配置目录。"""
+    if not (n.endswith("level.dat") or "/region/" in f"/{n}"):
+        return False
+    return not any(s in Path(n).parts for s in _NON_WORLD_SEGS)
+
+
 @app.post("/api/detect")
 def detect(req: DetectRequest):
     """自动识别输入类型 + 源语言 + pack_format。识别失败返回 kind=unknown 供前端提示。
@@ -979,9 +994,8 @@ def detect(req: DetectRequest):
         # 层级匹配：f"/{n}" 归一化后找段，level.dat/region 任意层收尾。
         # 修复（recheck）：地图强信号（level.dat/region）优先于 mods——含 mods 文件夹的地图
         # zip 不再误判 modpack；mods 匹配收紧为 mods/**/*.jar（config/mods/*.cfg 不误命中）
-        elif any(n.endswith("level.dat") for n in names):
-            kind = "map"
-        elif any("/region/" in f"/{n}" for n in names):
+        # v1.5.0：_is_world_signal 排除 config/ 等配置目录下的维度数据（卓越2 整合包误判地图根因）
+        elif any(_is_world_signal(n) for n in names):
             kind = "map"
         # 修复（recheck）：mods/**/*.jar（整合包）优先于 shaders/lang——整合包内含
         # shaders/lang/ 路径（mod/资源包携带）不应误判光影（用户实测 Better MC [FORGE] 整合包
