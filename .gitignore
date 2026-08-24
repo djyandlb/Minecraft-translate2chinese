@@ -18,3 +18,7 @@ backend/outputs/
 docs/
 宣传页/
 icon.svg
+
+# v1.5.0 纯净可编译：测试/宣传 PPT 不进源码仓库
+backend/tests/
+像素译站-宣传PPT.html

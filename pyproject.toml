@@ -6,8 +6,3 @@ version = "0.1.0"
 description = "像素译站：把整合包/mod/地图里的英文自动翻译成中文（目标语言参数化）的 Windows 桌面应用"
 readme = "README.md"
 requires-python = ">=3.14"
-
-[tool.pytest.ini_options]
-# 运行测试时确保能 import 到 backend/app 下的模块
-pythonpath = ["backend"]
-testpaths = ["backend/tests"]

@@ -2373,14 +2373,15 @@ class AutoFlow:
                 self.state.progress.append({"status": "translating", "count": n,
                                             "note": "AI 判断硬编码"})
                 self.store.save(self.state)
-            _judge_done_count = [0]   # 初判已处理累计（进行中反馈，不计入 done）
+            _judge_done_count = [0]   # 初判已处理累计（进度反馈 + 同步 bump done）
             def _judge_done(n: int) -> None:
-                # v1.5.0：初判批**不提前 bump done**——完成计数等重判完全结束、结果
-                # 写回后一次性加（对齐翻译流程「审查过关才计完成」语义）。
-                # 但推「进行中」反馈：判断期间 done 不动（20 条判断 API 慢时主进度条
-                # 静止像卡死，用户「单 mod 硬编码判定很慢很慢」观感根因）→ 明细持续
-                # 显示「已处理 X/N」，界面在动，完成仍一次跳。
+                # v1.5.0 修复：每批 bump done——总进度与「已处理 X/N」同步涨。
+                # 原「重判后一次性加」导致判断期间明细在涨但主进度条静止（用户
+                # 「已处理 3161/3721 但总进度 22% 不动」根因）。每批已判断即算
+                # 已处理（translate/exclude/unresolved 都已处置完）；重判不重复
+                # 加（判断后不再 bump，防双计）。
                 _judge_done_count[0] += n
+                self._bump_stage(n) if not self._resume else self._bump_stage_only(n)
                 self.state.progress.append({"status": "translating", "count": n,
                                             "note": (f"AI 判断硬编码"
                                                      f"（已处理 {_judge_done_count[0]}/{len(_all_fresh)}）…")})
@@ -2491,10 +2492,8 @@ class AutoFlow:
                     if self.state.done % 10 == 0:
                         self.memory.save()
                         self.store.save(self.state)
-            # v1.5.0：初判批未提前 bump done（_judge_done 空转），重判完全结束后
-            # 一次性加——translate/exclude/unresolved 全部处置完才算「翻译完成」
-            #（对齐翻译流程「审查过关才计完成」语义；续联只推进 stage 明细）。
-            self._bump_stage(len(_all_fresh)) if not self._resume else self._bump_stage_only(len(_all_fresh))
+            # 判断完成提示：done 已在 _judge_done 每批推进（总进度与「已处理 X/N」同步），
+            # 这里不再重复 bump（防双计）。重判结果不改动已计进度。
             self.state.progress.append({"status": "done", "count": len(_all_fresh),
                                         "note": "硬编码判断完成"})
             self.store.save(self.state)

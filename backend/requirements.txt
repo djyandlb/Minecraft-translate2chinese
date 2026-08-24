@@ -8,8 +8,6 @@ deep-translator==1.11.4
 nbtlib==2.0.4
 anvil-parser==0.9.*
 jawa==2.2.0
-pytest==8.3.*
-pytest-asyncio==0.24.*
 keyring==25.*
 opencc-python-reimplemented==0.1.*
 # 构建依赖（打包用）：build_all.ps1 检查 pyinstaller，README 按 requirements 安装后可直接打包
