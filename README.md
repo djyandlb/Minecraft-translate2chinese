@@ -126,7 +126,6 @@ Python 3.14 · FastAPI · Vue 3 · Vite · pywebview · PyInstaller · Inno Setu
 ```bash
 cd backend
 pip install -r requirements.txt
-python -m pytest tests/ -q
 uvicorn app.main:app --port 8000
 ```
 
